@@ -1,5 +1,20 @@
 # Product Discovery Platform — Initial Build Plan
 
+## Development Standards
+
+This project must be implemented in accordance with:
+
+- DEVELOPMENT_STANDARDS.md
+- DESIGN.md
+- CLAUDE.md
+- Installed Claude Code project skills
+
+These documents define how the product should be designed and engineered.
+
+PROJECT_PLAN.md defines what should be built.
+
+
+
 ## 1. Product vision
 
 Build an AI-guided product discovery platform that helps a user move from:

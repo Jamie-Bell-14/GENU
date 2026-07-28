@@ -781,5 +781,8 @@ taken at approval:
 7. The slice ships on the system Helvetica stack; licensed display typography
    (Helvetica Now + rounded companion) is a later decision
 
-Still open (owner: Jamie): per-turn/monthly AI cost budget numbers and the
-named incident-response owner (SECURITY_STANDARDS §17, §20).
+Incident-response owner (SECURITY_STANDARDS §20): **Jamie Bell**
+(jamie.bell@zerodeposit.com), recorded 2026-07-28.
+
+Still open (owner: Jamie): per-turn/monthly AI cost budget numbers
+(SECURITY_STANDARDS §17), needed by task T9.

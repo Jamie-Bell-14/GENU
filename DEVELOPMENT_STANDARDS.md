@@ -28,6 +28,30 @@ Never silently choose one interpretation.
 
 ---
 
+## Security
+
+All engineering work must follow SECURITY_STANDARDS.md.
+
+Security must be considered during planning, implementation, testing and review—not added as a final release step.
+
+Every task must identify:
+
+- data accessed or modified
+- authentication requirements
+- authorisation requirements
+- trust boundaries
+- untrusted inputs
+- RLS implications
+- secret-handling requirements
+- abuse and cost risks
+- audit requirements
+- required security tests
+
+A task is not complete while a material security question remains unresolved.
+
+
+---
+
 # Required Development Workflow
 
 Before implementing any significant feature:

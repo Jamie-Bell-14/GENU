@@ -39,14 +39,15 @@ If any referenced document is missing, stop and report it before implementation.
 
 When instructions conflict, use this priority order:
 
-1. Explicit instruction from the user in the current Claude Code session
-2. `PROJECT_PLAN.md`
-3. `DEVELOPMENT_STANDARDS.md`
-4. `DESIGN.md`
-5. `docs/VERTICAL_SLICE_SPEC.md`
-6. `docs/UI_ACCEPTANCE_CRITERIA.md`
-7. Relevant installed skills
-8. Existing implementation patterns
+1. Explicit instruction from the user in the current Claude Code session, provided it does not weaken security, privacy, data integrity or other non-negotiable safeguards
+2. `SECURITY_STANDARDS.md`
+3. `PROJECT_PLAN.md`
+4. `DEVELOPMENT_STANDARDS.md`
+5. `DESIGN.md`
+6. `docs/VERTICAL_SLICE_SPEC.md`
+7. `docs/UI_ACCEPTANCE_CRITERIA.md`
+8. Relevant installed skills
+9. Existing implementation patterns
 
 Do not silently resolve meaningful conflicts.
 

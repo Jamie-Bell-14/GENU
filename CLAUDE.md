@@ -20,18 +20,20 @@ The project—not the AI personality—is the primary focus.
 
 Before beginning any significant task, read:
 
-1. PROJECT_PLAN.md
-2. DEVELOPMENT_STANDARDS.md
-3. SECURITY_STANDARDS.md
-4. DESIGN.md
-5. docs/VERTICAL_SLICE_SPEC.md
-6. docs/UI_ACCEPTANCE_CRITERIA.md
+1. `PROJECT_PLAN.md`
+2. `DEVELOPMENT_STANDARDS.md`
+3. `SECURITY_STANDARDS.md`
+4. `DESIGN.md`
+5. `docs/ADAPTIVE_CANVAS_MVP.md`
+6. `docs/VERTICAL_SLICE_SPEC.md`
+7. `docs/UI_ACCEPTANCE_CRITERIA.md`
 
 For implementation work, also read:
 
-7. docs/ARCHITECTURE.md
-8. docs/VERTICAL_SLICE_TASKS.md
-9. docs/SECURITY_REVIEW.md
+8. `docs/ARCHITECTURE.md`
+9. `docs/AI_SYSTEM.md`
+10. `docs/VERTICAL_SLICE_TASKS.md`
+11. `docs/SECURITY_REVIEW.md`
 
 If any referenced document is missing, stop and report it before implementation.
 
@@ -46,10 +48,12 @@ When instructions conflict, use this priority order:
 3. `PROJECT_PLAN.md`
 4. `DEVELOPMENT_STANDARDS.md`
 5. `DESIGN.md`
-6. `docs/VERTICAL_SLICE_SPEC.md`
-7. `docs/UI_ACCEPTANCE_CRITERIA.md`
-8. Relevant installed skills
-9. Existing implementation patterns
+6. `docs/ADAPTIVE_CANVAS_MVP.md` for canvas scope, representation and scene behaviour
+7. `docs/AI_SYSTEM.md` for AI orchestration and model-output boundaries
+8. `docs/VERTICAL_SLICE_SPEC.md`
+9. `docs/UI_ACCEPTANCE_CRITERIA.md`
+10. Relevant installed skills
+11. Existing implementation patterns
 
 Do not silently resolve meaningful conflicts.
 
@@ -133,6 +137,7 @@ Do not silently expand scope.
 The current priority is one polished vertical journey defined in:
 
 - `docs/VERTICAL_SLICE_SPEC.md`
+- `docs/ADAPTIVE_CANVAS_MVP.md`
 
 The initial build must prove:
 
@@ -147,7 +152,7 @@ Deferred features include:
 - mobile layouts
 - founder-inspired personalities
 - user-facing skills or methodology marketplace
-- fully open whiteboard editing
+- fully open whiteboard editing and unrestricted object dragging
 - all discovery entry paths
 - direct Claude Code execution
 - team collaboration
@@ -214,6 +219,9 @@ The runtime AI experience must:
 - preserve user control over structural decisions
 - require approval for consequential connected changes
 - record decision rationale and attribution
+- treat canvas-scene recommendations as untrusted structured output
+- restrict scenes to application-owned renderer keys and validated project objects
+- keep scene state separate from canonical project truth
 
 Do not display raw hidden reasoning or claim that raw chain-of-thought is available.
 
@@ -374,10 +382,8 @@ Make the strongest safe recommendation, explain it clearly and identify the exac
 
 ## 16. Project status
 
-The Phase 0 repository review and project-plan merge were approved on
-2026-07-28 (decisions recorded in PROJECT_PLAN.md §17; review archive in
-docs/review/).
+The Phase 0 repository review and project-plan merge were approved on 2026-07-28.
 
-Implementation proceeds through the task sequence in
-docs/VERTICAL_SLICE_TASKS.md, one task at a time, meeting each task's
-completion checklist before starting the next.
+The constrained adaptive-canvas MVP direction was approved on 2026-07-28 and is defined in `docs/ADAPTIVE_CANVAS_MVP.md`. The canvas implementation must not continue from the old fixed-zone interpretation alone.
+
+Implementation proceeds through the task sequence in `docs/VERTICAL_SLICE_TASKS.md`, one task at a time, meeting each task's completion checklist before starting the next.

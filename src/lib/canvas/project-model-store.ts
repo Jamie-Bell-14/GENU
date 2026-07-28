@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CanvasObject, Origin, SupportState } from "./model";
+import type { ProjectRelationship, RelationshipType } from "./relationships";
 
 interface FieldRow {
   id: string;
@@ -82,4 +83,40 @@ export async function loadCanvasObjects(
   }
 
   return objects;
+}
+
+interface RelationshipRow {
+  id: string;
+  from_object_id: string;
+  to_object_id: string;
+  relation: RelationshipType;
+  origin: Origin;
+  support: SupportState;
+  note: string | null;
+}
+
+/**
+ * Loads stored relationships for a project. Renderers display only what this
+ * returns — a relationship that is not stored is never drawn
+ * (docs/AI_SYSTEM.md §9.2). RLS scopes the query to the caller's project.
+ */
+export async function loadProjectRelationships(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<ProjectRelationship[]> {
+  const { data } = await supabase
+    .from("project_relationships")
+    .select("id, from_object_id, to_object_id, relation, origin, support, note")
+    .eq("project_id", projectId)
+    .limit(200);
+
+  return ((data ?? []) as RelationshipRow[]).map((row) => ({
+    id: row.id,
+    fromObjectId: row.from_object_id,
+    toObjectId: row.to_object_id,
+    relation: row.relation,
+    origin: row.origin,
+    support: row.support,
+    note: row.note ?? undefined,
+  }));
 }

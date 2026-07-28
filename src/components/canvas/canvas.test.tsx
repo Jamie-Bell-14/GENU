@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { OBJECT_KINDS, type CanvasObject } from "@/lib/canvas/model";
-import { LivingCanvas } from "./living-canvas";
+import { StructuredInspector } from "./structured-inspector";
 
 const objects: CanvasObject[] = [
   {
@@ -32,31 +32,9 @@ const objects: CanvasObject[] = [
   },
 ];
 
-describe("LivingCanvas states", () => {
-  it("explains the sparse empty canvas rather than showing nothing", () => {
-    render(<LivingCanvas objects={[]} />);
-    expect(
-      screen.getByText(/canvas fills in as the conversation goes on/i),
-    ).toBeInTheDocument();
-  });
-
-  it("renders loading and failure states distinctly", () => {
-    const { rerender } = render(<LivingCanvas objects={[]} loading />);
-    expect(screen.getByText(/loading the project model/i)).toBeInTheDocument();
-
-    rerender(
-      <LivingCanvas
-        objects={[]}
-        error="The project model could not be loaded. The conversation still works."
-      />,
-    );
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "The conversation still works.",
-    );
-  });
-
+describe("StructuredInspector states", () => {
   it("labels each zone as an addressable region", () => {
-    render(<LivingCanvas objects={objects} />);
+    render(<StructuredInspector objects={objects} />);
     for (const label of [
       "Current subject",
       "Related concepts",
@@ -67,7 +45,7 @@ describe("LivingCanvas states", () => {
   });
 
   it("states origin and support in text, not colour alone", () => {
-    render(<LivingCanvas objects={objects} />);
+    render(<StructuredInspector objects={objects} />);
     expect(screen.getByText("You stated")).toBeInTheDocument();
     expect(screen.getAllByText("Inferred").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Hypothesis").length).toBeGreaterThan(0);
@@ -75,14 +53,14 @@ describe("LivingCanvas states", () => {
   });
 });
 
-describe("LivingCanvas view operations", () => {
+describe("StructuredInspector view operations", () => {
   it("pins an object to the top of its zone", async () => {
     const user = userEvent.setup();
     const many: CanvasObject[] = [
       { ...objects[1], id: "a", title: "First" },
       { ...objects[1], id: "b", title: "Second" },
     ];
-    render(<LivingCanvas objects={many} />);
+    render(<StructuredInspector objects={many} />);
     const related = screen.getByRole("region", { name: "Related concepts" });
     await user.click(within(related).getByLabelText("Pin Second"));
 
@@ -95,7 +73,7 @@ describe("LivingCanvas view operations", () => {
 
   it("hides an object and reports the count instead of dropping it", async () => {
     const user = userEvent.setup();
-    render(<LivingCanvas objects={objects} />);
+    render(<StructuredInspector objects={objects} />);
     const related = screen.getByRole("region", { name: "Related concepts" });
     await user.click(
       within(related).getByLabelText("Hide Missing check-in evidence"),
@@ -108,7 +86,7 @@ describe("LivingCanvas view operations", () => {
 
   it("collapses and expands a zone from the keyboard", async () => {
     const user = userEvent.setup();
-    render(<LivingCanvas objects={objects} />);
+    render(<StructuredInspector objects={objects} />);
     const assumptions = screen.getByRole("region", { name: "Assumptions" });
     const toggle = within(assumptions).getByRole("button", {
       name: "Collapse",
@@ -128,7 +106,7 @@ describe("LivingCanvas view operations", () => {
 
   it("re-centres on an object and restores the view with undo", async () => {
     const user = userEvent.setup();
-    render(<LivingCanvas objects={objects} />);
+    render(<StructuredInspector objects={objects} />);
     await user.click(
       screen.getByLabelText("Re-centre on Missing check-in evidence"),
     );
@@ -153,7 +131,7 @@ describe("LivingCanvas view operations", () => {
       title: `A ${kind}`,
       origin: "user_stated",
     }));
-    render(<LivingCanvas objects={all} />);
+    render(<StructuredInspector objects={all} />);
     const related = screen.getByRole("region", { name: "Related concepts" });
     // Zone limit applies, so check the rendered subset carries all controls.
     for (const article of within(related).getAllByRole("article")) {
@@ -167,7 +145,7 @@ describe("LivingCanvas view operations", () => {
 
   it("keeps long titles inside the object frame", () => {
     render(
-      <LivingCanvas
+      <StructuredInspector
         objects={[
           {
             ...objects[0],

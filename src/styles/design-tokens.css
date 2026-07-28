@@ -80,8 +80,9 @@
 
   /* Typography */
   --font-interface: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --font-display: "Helvetica Now Display", "Arial Rounded MT Bold",
-    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-display:
+    "Helvetica Now Display", "Arial Rounded MT Bold", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 
   /* Type scale */
@@ -113,8 +114,7 @@
 
   /* Elevation */
   --shadow-floating:
-    0 12px 32px rgba(0, 0, 0, 0.32),
-    0 2px 8px rgba(0, 0, 0, 0.2);
+    0 12px 32px rgba(0, 0, 0, 0.32), 0 2px 8px rgba(0, 0, 0, 0.2);
 
   /* Motion */
   --motion-fast: 120ms;
@@ -194,8 +194,7 @@
   --series-6: #c53e3e;
 
   --shadow-floating:
-    0 14px 34px rgba(24, 35, 28, 0.14),
-    0 2px 8px rgba(24, 35, 28, 0.08);
+    0 14px 34px rgba(24, 35, 28, 0.14), 0 2px 8px rgba(24, 35, 28, 0.08);
 
   --focus-ring: 0 0 0 3px rgba(0, 169, 87, 0.22);
 }
@@ -217,4 +216,11 @@
     --motion-standard: 0ms;
     --motion-slow: 0ms;
   }
+}
+
+/* Explicit user preference, independent of the OS setting (see appearance). */
+[data-motion="reduced"] {
+  --motion-fast: 0ms;
+  --motion-standard: 0ms;
+  --motion-slow: 0ms;
 }

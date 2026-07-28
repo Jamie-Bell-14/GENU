@@ -1,10 +1,102 @@
 @import "tailwindcss";
-@import "../../styles/design-tokens.css";
+@import "../styles/design-tokens.css";
 
 /*
-  Full token → Tailwind theme mapping arrives with task T2.
-  Until then the base document consumes semantic tokens directly.
+  Map semantic design tokens (src/styles/design-tokens.css) to Tailwind v4
+  utility tokens. Components consume these utilities (bg-surface-primary,
+  text-fg-secondary, border-edge-subtle, font-display, rounded-md…) so the
+  theme, density and motion attributes on <html> drive every component with
+  no hardcoded colours and no `dark:` overrides.
 */
+@theme inline {
+  /* Reset Tailwind's default palette so raw colours (bg-blue-500…) do not
+     exist; only semantic tokens are available. */
+  --color-*: initial;
+
+  /* Brand */
+  --color-brand: var(--brand-primary);
+  --color-brand-hover: var(--brand-primary-hover);
+  --color-brand-active: var(--brand-primary-active);
+  --color-on-brand: var(--brand-on-primary);
+  --color-brand-subtle: var(--brand-subtle);
+  --color-brand-subtle-strong: var(--brand-subtle-strong);
+
+  /* Surfaces */
+  --color-surface-canvas: var(--surface-canvas);
+  --color-surface-primary: var(--surface-primary);
+  --color-surface-secondary: var(--surface-secondary);
+  --color-surface-tertiary: var(--surface-tertiary);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-input: var(--surface-input);
+  --color-surface-overlay: var(--surface-overlay);
+
+  /* Text */
+  --color-fg-primary: var(--text-primary);
+  --color-fg-secondary: var(--text-secondary);
+  --color-fg-tertiary: var(--text-tertiary);
+  --color-fg-disabled: var(--text-disabled);
+  --color-fg-inverse: var(--text-inverse);
+
+  /* Borders */
+  --color-edge-subtle: var(--border-subtle);
+  --color-edge-default: var(--border-default);
+  --color-edge-strong: var(--border-strong);
+  --color-edge-focus: var(--border-focus);
+
+  /* Semantic object colours */
+  --color-evidence: var(--evidence);
+  --color-evidence-subtle: var(--evidence-subtle);
+  --color-evidence-edge: var(--evidence-border);
+  --color-assumption: var(--assumption);
+  --color-assumption-subtle: var(--assumption-subtle);
+  --color-assumption-edge: var(--assumption-border);
+  --color-risk: var(--risk);
+  --color-risk-subtle: var(--risk-subtle);
+  --color-risk-edge: var(--risk-border);
+  --color-opportunity: var(--opportunity);
+  --color-opportunity-subtle: var(--opportunity-subtle);
+  --color-opportunity-edge: var(--opportunity-border);
+  --color-info: var(--info);
+  --color-info-subtle: var(--info-subtle);
+  --color-info-edge: var(--info-border);
+
+  /* States */
+  --color-state-success: var(--state-success);
+  --color-state-warning: var(--state-warning);
+  --color-state-error: var(--state-error);
+  --color-state-disabled: var(--state-disabled);
+
+  /* Data series */
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-series-5: var(--series-5);
+  --color-series-6: var(--series-6);
+
+  /* Typography */
+  --font-interface: var(--font-interface);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+
+  /* Type scale (drives text-xs … text-3xl) */
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-md: var(--text-md);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+
+  /* Radius (drives rounded-xs … rounded-lg; default component radius is md) */
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  /* Elevation — floating surfaces only */
+  --shadow-floating: var(--shadow-floating);
+}
 
 body {
   background: var(--surface-canvas);

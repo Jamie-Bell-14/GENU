@@ -1,0 +1,220 @@
+/*
+  Intelligent Product Lab — starter semantic tokens
+
+  Dark is the primary designed experience.
+  Components should consume semantic variables rather than raw palette values.
+*/
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Brand */
+  --brand-primary: #00bf63;
+  --brand-primary-hover: #08cf6d;
+  --brand-primary-active: #00aa58;
+  --brand-on-primary: #04130b;
+  --brand-subtle: rgba(0, 191, 99, 0.12);
+  --brand-subtle-strong: rgba(0, 191, 99, 0.2);
+
+  /* Surfaces */
+  --surface-canvas: #0b0d0c;
+  --surface-primary: #101311;
+  --surface-secondary: #151917;
+  --surface-tertiary: #1a201d;
+  --surface-elevated: #202722;
+  --surface-input: #121613;
+  --surface-overlay: rgba(4, 7, 5, 0.76);
+
+  /* Text */
+  --text-primary: #f2f5f3;
+  --text-secondary: #b2bbb5;
+  --text-tertiary: #818b84;
+  --text-disabled: #5e6761;
+  --text-inverse: #07100b;
+
+  /* Borders */
+  --border-subtle: #242b27;
+  --border-default: #303933;
+  --border-strong: #465149;
+  --border-focus: #00bf63;
+
+  /* Evidence and research */
+  --evidence: #4a8dff;
+  --evidence-subtle: rgba(74, 141, 255, 0.13);
+  --evidence-border: rgba(74, 141, 255, 0.34);
+
+  /* Assumption and uncertainty */
+  --assumption: #e6a83d;
+  --assumption-subtle: rgba(230, 168, 61, 0.13);
+  --assumption-border: rgba(230, 168, 61, 0.34);
+
+  /* Risk and destructive */
+  --risk: #ed6666;
+  --risk-subtle: rgba(237, 102, 102, 0.13);
+  --risk-border: rgba(237, 102, 102, 0.34);
+
+  /* Opportunities and alternatives */
+  --opportunity: #9a7cf4;
+  --opportunity-subtle: rgba(154, 124, 244, 0.13);
+  --opportunity-border: rgba(154, 124, 244, 0.34);
+
+  /* Information */
+  --info: #3fc5b7;
+  --info-subtle: rgba(63, 197, 183, 0.13);
+  --info-border: rgba(63, 197, 183, 0.34);
+
+  /* States */
+  --state-success: #00bf63;
+  --state-warning: #e6a83d;
+  --state-error: #ed6666;
+  --state-disabled: #69736c;
+
+  /* Data series */
+  --series-1: #00bf63;
+  --series-2: #4a8dff;
+  --series-3: #e6a83d;
+  --series-4: #9a7cf4;
+  --series-5: #3fc5b7;
+  --series-6: #ed6666;
+
+  /* Typography */
+  --font-interface: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-display: "Helvetica Now Display", "Arial Rounded MT Bold",
+    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* Type scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+
+  /* Radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-round: 999px;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  /* Elevation */
+  --shadow-floating:
+    0 12px 32px rgba(0, 0, 0, 0.32),
+    0 2px 8px rgba(0, 0, 0, 0.2);
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-standard: 200ms;
+  --motion-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasised: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* Layout */
+  --workspace-nav-width: 15rem;
+  --workspace-panel-min: 22rem;
+  --composer-max-width: 52rem;
+
+  /* Focus */
+  --focus-ring: 0 0 0 3px rgba(0, 191, 99, 0.26);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --brand-primary: #00a957;
+  --brand-primary-hover: #00984e;
+  --brand-primary-active: #008444;
+  --brand-on-primary: #ffffff;
+  --brand-subtle: rgba(0, 169, 87, 0.1);
+  --brand-subtle-strong: rgba(0, 169, 87, 0.17);
+
+  --surface-canvas: #f3f6f4;
+  --surface-primary: #ffffff;
+  --surface-secondary: #f8faf8;
+  --surface-tertiary: #eef2ef;
+  --surface-elevated: #ffffff;
+  --surface-input: #ffffff;
+  --surface-overlay: rgba(18, 24, 20, 0.42);
+
+  --text-primary: #121713;
+  --text-secondary: #4f5b53;
+  --text-tertiary: #707c73;
+  --text-disabled: #a0aaa3;
+  --text-inverse: #ffffff;
+
+  --border-subtle: #e2e8e3;
+  --border-default: #d3dbd5;
+  --border-strong: #b9c5bc;
+  --border-focus: #00a957;
+
+  --evidence: #276fd4;
+  --evidence-subtle: rgba(39, 111, 212, 0.09);
+  --evidence-border: rgba(39, 111, 212, 0.26);
+
+  --assumption: #a56a00;
+  --assumption-subtle: rgba(165, 106, 0, 0.09);
+  --assumption-border: rgba(165, 106, 0, 0.26);
+
+  --risk: #c53e3e;
+  --risk-subtle: rgba(197, 62, 62, 0.09);
+  --risk-border: rgba(197, 62, 62, 0.26);
+
+  --opportunity: #6f4bc6;
+  --opportunity-subtle: rgba(111, 75, 198, 0.09);
+  --opportunity-border: rgba(111, 75, 198, 0.26);
+
+  --info: #147d73;
+  --info-subtle: rgba(20, 125, 115, 0.09);
+  --info-border: rgba(20, 125, 115, 0.26);
+
+  --state-success: #008f49;
+  --state-warning: #a56a00;
+  --state-error: #c53e3e;
+  --state-disabled: #9aa49d;
+
+  --series-1: #00a957;
+  --series-2: #276fd4;
+  --series-3: #a56a00;
+  --series-4: #6f4bc6;
+  --series-5: #147d73;
+  --series-6: #c53e3e;
+
+  --shadow-floating:
+    0 14px 34px rgba(24, 35, 28, 0.14),
+    0 2px 8px rgba(24, 35, 28, 0.08);
+
+  --focus-ring: 0 0 0 3px rgba(0, 169, 87, 0.22);
+}
+
+[data-density="compact"] {
+  --space-3: 0.625rem;
+  --space-4: 0.875rem;
+  --space-5: 1rem;
+  --space-6: 1.25rem;
+}
+
+[data-text-size="large"] {
+  font-size: 112.5%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-standard: 0ms;
+    --motion-slow: 0ms;
+  }
+}

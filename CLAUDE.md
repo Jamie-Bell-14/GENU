@@ -20,11 +20,12 @@ The project—not the AI personality—is the primary focus.
 
 Before beginning any significant task, read:
 
-1. `PROJECT_PLAN.md`
-2. `DEVELOPMENT_STANDARDS.md`
-3. `DESIGN.md`
-4. `docs/VERTICAL_SLICE_SPEC.md`
-5. `docs/UI_ACCEPTANCE_CRITERIA.md`
+1. PROJECT_PLAN.md
+2. DEVELOPMENT_STANDARDS.md
+3. SECURITY_STANDARDS.md
+4. DESIGN.md
+5. docs/VERTICAL_SLICE_SPEC.md
+6. docs/UI_ACCEPTANCE_CRITERIA.md
 
 During the temporary planning-update stage, also read:
 

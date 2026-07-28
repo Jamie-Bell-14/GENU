@@ -11,6 +11,7 @@ Review:
 - PROJECT_PLAN.md
 - PROJECT_PLAN_ADDENDUM.md
 - DEVELOPMENT_STANDARDS.md
+- SECURITY_STANDARDS.md.
 - DESIGN.md
 - docs/VERTICAL_SLICE_SPEC.md
 - docs/UI_ACCEPTANCE_CRITERIA.md
@@ -151,3 +152,21 @@ Do not write application code.
 Do not change existing project files except to create clearly labelled draft proposals under `docs/review/`.
 
 Wait for approval before implementation.
+
+## 8. Review the proposed architecture against SECURITY_STANDARDS.md.
+
+Include:
+
+- authentication and session boundaries
+- authorisation and ownership checks
+- Supabase RLS strategy
+- secret and environment-variable handling
+- prompt-injection controls
+- web-research and URL-fetching risks
+- AI tool permissions
+- validation and output rendering
+- logging and redaction
+- rate limiting and cost-abuse controls
+- threat modelling
+- security testing
+- production security gates

@@ -5,6 +5,12 @@ test("stored theme preference is applied before first paint and drives token col
 }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/");
+  // Assert the page actually rendered before reading document attributes:
+  // in dev the first request to a route compiles it, and a transient error
+  // document would otherwise surface as a confusing attribute mismatch.
+  await expect(
+    page.getByRole("heading", { name: "Intelligent Product Lab" }),
+  ).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const darkBackground = await page.evaluate(
     () => getComputedStyle(document.body).backgroundColor,

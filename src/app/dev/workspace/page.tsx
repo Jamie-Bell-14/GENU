@@ -5,5 +5,7 @@ import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 // testable without Supabase credentials. Unavailable in production.
 export default function DevWorkspacePage() {
   if (process.env.NODE_ENV === "production") notFound();
-  return <WorkspaceShell projectName="Deposit disputes (demo)" />;
+  return (
+    <WorkspaceShell projectId="demo" projectName="Deposit disputes (demo)" />
+  );
 }

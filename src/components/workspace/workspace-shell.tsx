@@ -11,6 +11,8 @@ import {
   type FocusMode,
   type WorkspaceLayout,
 } from "@/lib/workspace/layout";
+import { ConversationPane } from "@/components/conversation/conversation-pane";
+import type { Message } from "@/lib/ai/turn-events";
 import { AppearanceSettings } from "./appearance-settings";
 import { PlanningNav } from "./planning-nav";
 import { Button } from "@/components/ui/button";
@@ -45,25 +47,6 @@ function SkipLinks() {
   );
 }
 
-function ConversationPlaceholder() {
-  return (
-    <section
-      id="conversation-pane"
-      aria-label="Conversation"
-      tabIndex={-1}
-      className="bg-surface-primary flex h-full flex-col items-center justify-center gap-1 p-8"
-    >
-      <p className="text-fg-secondary text-sm">
-        The discovery conversation opens here.
-      </p>
-      <p className="text-fg-tertiary text-xs">
-        It arrives with the next build step — nothing is hidden behind this
-        screen.
-      </p>
-    </section>
-  );
-}
-
 function CanvasPlaceholder() {
   return (
     <section
@@ -84,8 +67,14 @@ function CanvasPlaceholder() {
 }
 
 export function WorkspaceShell({
+  projectId,
   projectName,
-}: Readonly<{ projectName: string }>) {
+  initialMessages = [],
+}: Readonly<{
+  projectId: string;
+  projectName: string;
+  initialMessages?: Message[];
+}>) {
   // Two-pass hydration, same pattern as the appearance provider: the server
   // renders the default layout, the client corrects from storage on mount.
   const [layout, setLayout] = useState<WorkspaceLayout | null>(null);
@@ -193,7 +182,10 @@ export function WorkspaceShell({
                 defaultSize={effective.split}
                 minSize={25}
               >
-                <ConversationPlaceholder />
+                <ConversationPane
+                  projectId={projectId}
+                  initialMessages={initialMessages}
+                />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
@@ -205,7 +197,10 @@ export function WorkspaceShell({
               </ResizablePanel>
             </ResizablePanelGroup>
           ) : mode === "conversation" ? (
-            <ConversationPlaceholder />
+            <ConversationPane
+              projectId={projectId}
+              initialMessages={initialMessages}
+            />
           ) : (
             <CanvasPlaceholder />
           )}

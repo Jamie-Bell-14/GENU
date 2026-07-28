@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { activitySurface, type ActivityLine } from "@/lib/ai/turn-events";
+import { ActivityIndicator } from "@/components/activity/activity-indicator";
 import type { CanvasObject } from "@/lib/canvas/model";
 import {
   buildProblemMap,
@@ -92,6 +94,8 @@ export function LivingCanvas({
   objects,
   relationships = [],
   initialScene = null,
+  recommendedScene = null,
+  activity = null,
   loading = false,
   error = null,
   onEdit,
@@ -99,6 +103,14 @@ export function LivingCanvas({
   objects: CanvasObject[];
   relationships?: ProjectRelationship[];
   initialScene?: CanvasScene | null;
+  /**
+   * A scene the running turn recommended. It has already passed server-side
+   * validation; the host validates it again against the ids it actually
+   * rendered, because the boundary belongs to whatever is about to draw.
+   */
+  recommendedScene?: CanvasScene | null;
+  /** Research and canvas activity for the running turn (DESIGN.md §9.1). */
+  activity?: ActivityLine | null;
   loading?: boolean;
   error?: string | null;
   /**
@@ -200,6 +212,27 @@ export function LivingCanvas({
     [objects, relationships, scope],
   );
 
+  /*
+    A recommendation is queued, never applied: the scene reducer decides
+    whether it even reaches the queue, and the user decides whether to take it
+    (docs/ADAPTIVE_CANVAS_MVP.md §7). Re-validating here is deliberate
+    duplication — the server validated against the project, this validates
+    against what is actually on screen, and neither trusts the other.
+  */
+  const lastRecommendation = useRef<CanvasScene | null>(null);
+  useEffect(() => {
+    if (!recommendedScene || recommendedScene === lastRecommendation.current) {
+      return;
+    }
+    lastRecommendation.current = recommendedScene;
+    const result = validateScene(recommendedScene, scope);
+    dispatchScene(
+      result.ok
+        ? { type: "recommend_scene", scene: result.scene }
+        : { type: "scene_rejected", rejection: result.rejection },
+    );
+  }, [recommendedScene, scope]);
+
   const scene = sceneState.current;
   const map = useMemo(
     () =>
@@ -227,10 +260,22 @@ export function LivingCanvas({
       className="bg-surface-canvas flex h-full min-h-0 flex-col"
     >
       <div className="border-edge-subtle flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3">
-        <h2 className="text-fg-secondary text-xs font-medium tracking-wide uppercase">
-          Project canvas
-        </h2>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <h2 className="text-fg-secondary shrink-0 text-xs font-medium tracking-wide uppercase">
+            Project canvas
+          </h2>
+          {/* Research and canvas work is reported here, beside the canvas it
+              concerns, rather than in the conversation (DESIGN.md §9.1). */}
+          <ActivityIndicator
+            activity={
+              activity && activitySurface(activity.kind) === "canvas"
+                ? activity
+                : null
+            }
+            className="min-w-0"
+          />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           {canReturnToPrevious(sceneState) && showVisual && (
             <Button
               variant="ghost"

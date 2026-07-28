@@ -219,3 +219,88 @@ describe("problem-exploration renderer", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("recommended scenes", () => {
+  const recommendation = {
+    renderer: "problem_exploration",
+    purpose: "explore_problem",
+    focalObjectId: CAUSE,
+    visibleObjectIds: [CAUSE, PROBLEM],
+    visibleRelationshipIds: ["bbbbbbbb-0000-4000-8000-000000000001"],
+    emphasis: "none",
+    reason: "The conversation moved to missing check-in evidence.",
+    transition: "replace",
+  } as const;
+
+  it("queues a recommendation with its reason instead of moving the view", () => {
+    renderCanvas({ recommendedScene: recommendation });
+
+    expect(
+      screen.getByText(/The conversation moved to missing check-in evidence/),
+    ).toBeInTheDocument();
+    // The view the user was reading is untouched until they accept.
+    expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+      "Property-condition disagreement",
+    );
+  });
+
+  it("applies the recommendation only when the user takes it", async () => {
+    const user = userEvent.setup();
+    renderCanvas({ recommendedScene: recommendation });
+
+    await user.click(screen.getByRole("button", { name: "Show it" }));
+    expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+      "Missing check-in evidence",
+    );
+  });
+
+  it("lets the user decline and stay where they are", async () => {
+    const user = userEvent.setup();
+    renderCanvas({ recommendedScene: recommendation });
+
+    await user.click(screen.getByRole("button", { name: "Stay here" }));
+    expect(screen.queryByRole("button", { name: "Show it" })).toBeNull();
+    expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+      "Property-condition disagreement",
+    );
+  });
+
+  it("returns to the previous scene after accepting one", async () => {
+    const user = userEvent.setup();
+    renderCanvas({ recommendedScene: recommendation });
+
+    await user.click(screen.getByRole("button", { name: "Show it" }));
+    await user.click(
+      screen.getByRole("button", { name: "Return to previous" }),
+    );
+    expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+      "Property-condition disagreement",
+    );
+  });
+
+  it("refuses a scene naming an object this canvas did not render", () => {
+    renderCanvas({
+      recommendedScene: {
+        ...recommendation,
+        focalObjectId: "eeeeeeee-0000-4000-8000-000000000009",
+        visibleObjectIds: ["eeeeeeee-0000-4000-8000-000000000009"],
+        visibleRelationshipIds: [],
+      },
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /outside this project.*current view is unchanged/i,
+    );
+    expect(screen.queryByRole("button", { name: "Show it" })).toBeNull();
+    expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+      "Property-condition disagreement",
+    );
+  });
+
+  it("does not interrupt when the recommendation preserves the view", () => {
+    renderCanvas({
+      recommendedScene: { ...recommendation, transition: "preserve" },
+    });
+    expect(screen.queryByRole("button", { name: "Show it" })).toBeNull();
+  });
+});

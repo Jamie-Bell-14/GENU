@@ -16,7 +16,9 @@ import { LivingCanvas } from "@/components/canvas/living-canvas";
 import type { EditSubmit } from "@/components/canvas/object-editor";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
-import type { Message } from "@/lib/ai/turn-events";
+import type { ActivityLine, Message } from "@/lib/ai/turn-events";
+import { useTurnRuntime } from "@/lib/ai/use-turn-runtime";
+import { ActivityHistory } from "@/components/activity/activity-history";
 import { AppearanceSettings } from "./appearance-settings";
 import { PlanningNav } from "./planning-nav";
 import { Button } from "@/components/ui/button";
@@ -55,6 +57,7 @@ export function WorkspaceShell({
   projectId,
   projectName,
   initialMessages = [],
+  initialActivity = [],
   canvasObjects = [],
   canvasRelationships = [],
   onEditObject,
@@ -62,10 +65,23 @@ export function WorkspaceShell({
   projectId: string;
   projectName: string;
   initialMessages?: Message[];
+  /** Activity already recorded for this project, newest last. */
+  initialActivity?: ActivityLine[];
   canvasObjects?: CanvasObject[];
   canvasRelationships?: ProjectRelationship[];
   onEditObject?: EditSubmit;
 }>) {
+  /*
+    The turn runs here, above both panes: analysis activity belongs to the
+    conversation and canvas activity and scene recommendations belong to the
+    canvas, so neither pane can own the stream. It also means changing focus
+    mode no longer unmounts an in-flight turn.
+  */
+  const runtime = useTurnRuntime({
+    projectId,
+    initialMessages,
+    initialActivity,
+  });
   // Two-pass hydration, same pattern as the appearance provider: the server
   // renders the default layout, the client corrects from storage on mount.
   const [layout, setLayout] = useState<WorkspaceLayout | null>(null);
@@ -143,6 +159,7 @@ export function WorkspaceShell({
             <ToggleGroupItem value="balanced">Balanced</ToggleGroupItem>
             <ToggleGroupItem value="canvas">Canvas</ToggleGroupItem>
           </ToggleGroup>
+          <ActivityHistory lines={runtime.state.activityLog} />
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="ghost" size="icon-sm" aria-label="Settings">
@@ -173,10 +190,7 @@ export function WorkspaceShell({
                 defaultSize={effective.split}
                 minSize={25}
               >
-                <ConversationPane
-                  projectId={projectId}
-                  initialMessages={initialMessages}
-                />
+                <ConversationPane runtime={runtime} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
@@ -187,19 +201,20 @@ export function WorkspaceShell({
                 <LivingCanvas
                   objects={canvasObjects}
                   relationships={canvasRelationships}
+                  recommendedScene={runtime.state.recommendedScene}
+                  activity={runtime.state.activity.canvas}
                   onEdit={onEditObject}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>
           ) : mode === "conversation" ? (
-            <ConversationPane
-              projectId={projectId}
-              initialMessages={initialMessages}
-            />
+            <ConversationPane runtime={runtime} />
           ) : (
             <LivingCanvas
               objects={canvasObjects}
               relationships={canvasRelationships}
+              recommendedScene={runtime.state.recommendedScene}
+              activity={runtime.state.activity.canvas}
               onEdit={onEditObject}
             />
           )}

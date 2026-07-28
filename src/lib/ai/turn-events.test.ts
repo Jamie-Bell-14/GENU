@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { CanvasScene } from "@/lib/canvas/scene";
 import {
   turnReducer,
   INITIAL_TURN_STATE,
+  NO_ACTIVITY,
   type Message,
   type TurnState,
 } from "./turn-events";
@@ -78,11 +80,16 @@ describe("turnReducer", () => {
     let state = streamStarted(send());
     state = turnReducer(state, {
       type: "event",
-      event: { type: "activity", kind: "analysis", label: "Recording…" },
+      event: {
+        type: "activity",
+        activity: { id: "a1", kind: "analysis", label: "Recording…" },
+      },
     });
-    expect(state.activity).toBe("Recording…");
+    expect(state.activity.conversation?.label).toBe("Recording…");
     state = turnReducer(state, { type: "event", event: { type: "done" } });
-    expect(state.activity).toBeNull();
+    expect(state.activity.conversation).toBeNull();
+    // The line fades from the working surface but stays retrievable.
+    expect(state.activityLog.map((line) => line.label)).toEqual(["Recording…"]);
   });
 
   it("never shows more than three contextual actions", () => {
@@ -155,5 +162,100 @@ describe("turnReducer", () => {
       },
     });
     expect(send(failed).error).toBeNull();
+  });
+});
+
+describe("activity history, scenes and steering", () => {
+  const line = (id: string, label: string) =>
+    ({ id, label, kind: "analysis" }) as const;
+
+  it("keeps a retrievable log after the working line has faded", () => {
+    let state = streamStarted(send());
+    for (const [id, label] of [
+      ["a1", "Recording your message…"],
+      ["a2", "Reading the current project model…"],
+    ]) {
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "activity", activity: line(id, label) },
+      });
+    }
+    state = turnReducer(state, { type: "event", event: { type: "done" } });
+
+    expect(state.activity).toEqual(NO_ACTIVITY);
+    expect(state.activityLog.map((entry) => entry.label)).toEqual([
+      "Recording your message…",
+      "Reading the current project model…",
+    ]);
+  });
+
+  it("does not duplicate a line that is delivered twice", () => {
+    let state = streamStarted(send());
+    for (let i = 0; i < 2; i += 1) {
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "activity", activity: line("a1", "Recording…") },
+      });
+    }
+    expect(state.activityLog).toHaveLength(1);
+  });
+
+  it("holds a recommended scene without touching the project model", () => {
+    const scene: CanvasScene = {
+      renderer: "problem_exploration",
+      purpose: "explore_problem",
+      focalObjectId: "aaaaaaaa-0000-4000-8000-000000000001",
+      visibleObjectIds: ["aaaaaaaa-0000-4000-8000-000000000001"],
+      visibleRelationshipIds: [],
+      emphasis: "none",
+      reason: "Showing the problem in focus.",
+      transition: "replace",
+    };
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "scene_recommended", scene },
+    });
+
+    expect(state.recommendedScene).toEqual(scene);
+    // Nothing about project truth lives in turn state, so there is nothing a
+    // scene could have changed.
+    expect(state.messages).toEqual([userMessage]);
+  });
+
+  it("separates the promise made about a direction from its application", () => {
+    let state = streamStarted(send());
+    state = turnReducer(state, {
+      type: "direction_accepted",
+      note: "Focus on smaller agencies.",
+      application: "next_step",
+    });
+    expect(state.direction).toEqual({
+      note: "Focus on smaller agencies.",
+      application: "next_step",
+      applied: false,
+    });
+
+    state = turnReducer(state, {
+      type: "event",
+      event: { type: "direction_applied", note: "Focus on smaller agencies." },
+    });
+    expect(state.direction?.applied).toBe(true);
+  });
+
+  it("ignores an applied direction that was never accepted here", () => {
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "direction_applied", note: "unseen" },
+    });
+    expect(state.direction).toBeNull();
+  });
+
+  it("clears the previous direction when a new message is sent", () => {
+    const withDirection = turnReducer(streamStarted(send()), {
+      type: "direction_accepted",
+      note: "Focus on smaller agencies.",
+      application: "next_step",
+    });
+    expect(send(withDirection).direction).toBeNull();
   });
 });

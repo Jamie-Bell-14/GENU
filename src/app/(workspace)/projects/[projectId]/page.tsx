@@ -6,6 +6,7 @@ import {
   loadCanvasObjects,
   loadProjectRelationships,
 } from "@/lib/canvas/project-model-store";
+import { loadActivityHistory } from "@/lib/services/activity";
 
 // Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
@@ -43,9 +44,12 @@ export default async function ProjectPage({
     createdAt: row.created_at as string,
   }));
 
-  const [canvasObjects, canvasRelationships] = await Promise.all([
+  const [canvasObjects, canvasRelationships, activity] = await Promise.all([
     loadCanvasObjects(supabase, projectId),
     loadProjectRelationships(supabase, projectId),
+    // Activity recorded before this page load, so the history panel survives
+    // a reload rather than starting empty (T8).
+    loadActivityHistory(supabase, projectId),
   ]);
 
   return (
@@ -53,6 +57,7 @@ export default async function ProjectPage({
       projectId={project.id}
       projectName={project.name}
       initialMessages={messages}
+      initialActivity={activity}
       canvasObjects={canvasObjects}
       canvasRelationships={canvasRelationships}
     />

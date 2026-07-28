@@ -129,22 +129,48 @@ Grows to PROJECT_PLAN §4's full profile by adding `area`/`key` values — no mi
 
 ```ts
 interface DiscoveryEngine {
-  runTurn(input: {
-    projectId: string; userMessage: string;
-    context: ProjectSnapshot;            // structured model summary + recent messages
-  }, emit: (e: TurnEvent) => void): Promise<TurnResult>;
+  readonly directionApplication: "applies_now" | "next_step" | "restart";
+  runTurn(
+    input: { projectId: string; turnId: string; userMessage: string; context?: TurnContext },
+    hooks: TurnHooks,
+    signal?: AbortSignal,
+  ): Promise<TurnResult>;
+}
+
+// What an engine may do to the outside world. Narrow on purpose.
+interface TurnHooks {
+  emit(event: EngineEvent): void;         // EngineEvent excludes app-owned events
+  activity(step: ActivityStep): Promise<void>;   // names a step; never the words
+  recommendScene(candidate: unknown): Promise<void>;  // validated by the app
+  takeDirection(): Promise<string | null>;
 }
 
 type TurnEvent =
+  | { type: "turn_started"; turnId: string }
   | { type: "assistant_delta"; text: string }
-  | { type: "activity"; label: string; kind: ActivityKind }   // app-emitted only
-  | { type: "model_updates_applied"; fields: FieldUpdate[] }
-  | { type: "proposal_created"; proposalId: string }
-  | { type: "research_started"; researchId: string }
-  | { type: "checkpoint_suggested"; summary: CheckpointSummary }
+  | { type: "activity"; activity: ActivityLine }              // app-emitted only
+  | { type: "block"; kind: TurnBlockKind; heading?: string }
+  | { type: "actions"; actions: ContextualAction[] }
+  | { type: "scene_recommended"; scene: CanvasScene }         // app-validated only
+  | { type: "direction_applied"; note: string }               // app-emitted only
   | { type: "turn_failed"; error: SafeError }
-  | { type: "done"; outcome: OutcomeSummary };
+  | { type: "done" };
 ```
+
+`EngineEvent` is `TurnEvent` minus `scene_recommended` and `direction_applied`, so
+the type system — not review — is what stops an engine minting either. A scene
+candidate crosses from untrusted to renderable in exactly one place,
+`createTurnHooks` (`src/lib/ai/turn-hooks.ts`), which validates it against ids
+loaded under RLS; a rejected candidate reaches no surface and is recorded in
+`audit_events` instead. Model-proposed events (`proposal_created`,
+`research_started`, `checkpoint_suggested`, applied model updates) arrive with
+T9–T12.
+
+Activity, audit and steering are persisted in three append-only tables —
+`activity_events`, `audit_events`, `turn_directions` — correlated by the turn
+id the host generates and passes to the engine. Steering crosses two HTTP
+requests (the SSE stream and the direction POST), so the handover is storage
+rather than process memory.
 
 - Slice implementation `AnthropicDiscoveryEngine`: **one streaming Messages call with tools** `update_project_model`, `propose_connected_change`, `start_research`, `suggest_checkpoint`. Application code validates every tool input (Zod), authorises against the project, applies via services, and emits events. The model never writes anywhere.
 - A deterministic `ScriptedDiscoveryEngine` implements the same interface for Playwright/e2e and UI development — the mock/real seam demanded by the addendum.

@@ -20,3 +20,14 @@ export type TurnRequest = z.infer<typeof TurnRequestSchema>;
 
 /** Turn rate limit (SECURITY_STANDARDS §17). */
 export const TURN_RATE_LIMIT = { action: "turn", limit: 20, windowSeconds: 60 };
+
+/**
+ * Steering is a separate write path and gets its own budget: it is cheap and
+ * legitimately repeated within one turn, but it still inserts rows, so it is
+ * bounded rather than trusted.
+ */
+export const DIRECTION_RATE_LIMIT = {
+  action: "direction",
+  limit: 30,
+  windowSeconds: 60,
+};

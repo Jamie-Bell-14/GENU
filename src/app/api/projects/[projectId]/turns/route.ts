@@ -1,6 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
+import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
+import { loadProjectScope } from "@/lib/canvas/project-scope";
+import { recordActivity } from "@/lib/services/activity";
+import { recordAudit } from "@/lib/services/audit";
+import { readDirectionsSince } from "@/lib/services/directions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TurnRequestSchema, TURN_RATE_LIMIT } from "@/lib/validation/turns";
 
@@ -136,16 +141,76 @@ export async function POST(
     );
   }
 
+  // The scene scope is read once, up front, under the caller's own client:
+  // every id a scene may name comes from rows this user can already read.
+  const scope = await loadProjectScope(supabase, projectId);
+  await recordAudit(supabase, {
+    projectId,
+    actorId: user.id,
+    actorKind: "user",
+    action: "turn_started",
+    correlationId: turnId,
+  });
+
   const engine = new ScriptedDiscoveryEngine();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const emit = (event: TurnEvent) => {
         controller.enqueue(encodeEvent(event));
       };
+      /*
+        Steering arrives on a separate request, so the turn reads directions
+        newer than a cursor it advances itself. The table stays append-only:
+        "already applied" is state of this run, not an edit to history.
+      */
+      let directionCursor = new Date().toISOString();
+      const hooks = createTurnHooks({
+        emit,
+        scope,
+        onActivity: (line) =>
+          recordActivity(supabase, { projectId, turnId, line }),
+        onSceneAccepted: (scene) =>
+          recordAudit(supabase, {
+            projectId,
+            actorId: user.id,
+            actorKind: "system",
+            action: "scene_recommended",
+            target: scene.renderer,
+            correlationId: turnId,
+            detail: { objects: scene.visibleObjectIds.length },
+          }),
+        onSceneRejected: (rejection) =>
+          recordAudit(supabase, {
+            projectId,
+            actorId: user.id,
+            actorKind: "system",
+            action: "scene_rejected",
+            correlationId: turnId,
+            detail: { code: rejection.code },
+          }),
+        takeDirection: async () => {
+          const directions = await readDirectionsSince(supabase, {
+            projectId,
+            turnId,
+            after: directionCursor,
+          });
+          if (directions.length === 0) return null;
+          directionCursor = directions[directions.length - 1].createdAt;
+          const note = directions.map((entry) => entry.note).join("\n");
+          emit({ type: "direction_applied", note });
+          return note;
+        },
+      });
+
       try {
         const result = await engine.runTurn(
-          { projectId, userMessage: parsed.data.message },
-          emit,
+          {
+            projectId,
+            turnId,
+            userMessage: parsed.data.message,
+            context: { objectIds: [...scope.objectIds] },
+          },
+          hooks,
           request.signal,
         );
         if (result.assistantText) {
@@ -156,6 +221,13 @@ export async function POST(
             content: result.assistantText,
           });
         }
+        await recordAudit(supabase, {
+          projectId,
+          actorId: user.id,
+          actorKind: "system",
+          action: result.assistantText ? "turn_completed" : "turn_failed",
+          correlationId: turnId,
+        });
       } catch {
         // Internal detail stays server-side (SECURITY_STANDARDS §8).
         emit({
@@ -166,6 +238,13 @@ export async function POST(
               "The response could not be completed. Your message is saved — send another when you are ready.",
             recoverable: true,
           },
+        });
+        await recordAudit(supabase, {
+          projectId,
+          actorId: user.id,
+          actorKind: "system",
+          action: "turn_failed",
+          correlationId: turnId,
         });
       } finally {
         controller.close();

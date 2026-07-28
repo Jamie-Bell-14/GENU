@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { Message, TurnState } from "@/lib/ai/turn-events";
 import { TurnBlock } from "./turn-block";
-import { Spinner } from "@/components/ui/spinner";
+import { ActivityIndicator } from "@/components/activity/activity-indicator";
 
 function UserTurn({ message }: Readonly<{ message: Message }>) {
   return (
@@ -69,15 +69,12 @@ export function ConversationStream({ state }: Readonly<{ state: TurnState }>) {
         />
       )}
 
-      {/* Observable activity: specific, subtle, and it fades when done. */}
-      <div aria-live="polite" className="min-h-5">
-        {state.activity && (
-          <p className="text-fg-tertiary flex items-center gap-2 text-xs">
-            <Spinner className="size-3" aria-hidden />
-            {state.activity}
-          </p>
-        )}
-        {state.status === "sending" && !state.activity && (
+      {/* Observable activity: specific, subtle, and it fades when done.
+          Only ordinary analysis belongs here — research and canvas work is
+          reported at the canvas instead (DESIGN.md §9.1). */}
+      <div className="min-h-5">
+        <ActivityIndicator activity={state.activity.conversation} />
+        {state.status === "sending" && !state.activity.conversation && (
           <p className="text-fg-tertiary text-xs">Sending…</p>
         )}
       </div>

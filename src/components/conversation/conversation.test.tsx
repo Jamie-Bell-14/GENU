@@ -74,7 +74,14 @@ describe("ConversationStream", () => {
               createdAt: "2026-07-28T00:00:00.000Z",
             },
           ],
-          activity: "Recording your message…",
+          activity: {
+            conversation: {
+              id: "a1",
+              kind: "analysis",
+              label: "Recording your message…",
+            },
+            canvas: null,
+          },
         })}
       />,
     );
@@ -117,6 +124,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={onSend}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={INITIAL_TURN_STATE}
       />,
@@ -136,6 +144,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={INITIAL_TURN_STATE}
       />,
@@ -152,6 +161,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={onStop}
+        onAddDirection={noop}
         onAction={noop}
         state={stateWith({ status: "streaming" })}
       />,
@@ -168,6 +178,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={INITIAL_TURN_STATE}
       />,
@@ -185,6 +196,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={stateWith({
           actions: [{ id: "a", label: "Research this" }],

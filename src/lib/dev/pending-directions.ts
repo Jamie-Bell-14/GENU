@@ -1,0 +1,29 @@
+/**
+ * In-memory steering handover for the development-only turn endpoint.
+ *
+ * The real route hands directions between requests through the database, which
+ * is what works across server instances. The dev route has no database at all,
+ * so it keeps directions in module state instead. That is acceptable here and
+ * only here: the routes using it return 404 in production, and nothing outside
+ * `/api/dev/*` imports this file.
+ */
+const pending = new Map<string, string[]>();
+
+const MAX_TURNS_TRACKED = 20;
+
+export function addPendingDirection(turnId: string, note: string): void {
+  // Bounded so a long-running dev server cannot accumulate turns without end.
+  if (!pending.has(turnId) && pending.size >= MAX_TURNS_TRACKED) {
+    const oldest = pending.keys().next().value;
+    if (oldest) pending.delete(oldest);
+  }
+  pending.set(turnId, [...(pending.get(turnId) ?? []), note]);
+}
+
+/** Returns and clears the directions added since the last call. */
+export function takePendingDirections(turnId: string): string | null {
+  const notes = pending.get(turnId);
+  if (!notes || notes.length === 0) return null;
+  pending.delete(turnId);
+  return notes.join("\n");
+}

@@ -1,6 +1,5 @@
 # Claude Code Repository Review Prompt
 
-Paste the following into Claude Code after these files are copied into the repository.
 
 ---
 

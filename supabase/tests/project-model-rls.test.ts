@@ -197,6 +197,29 @@ describe.skipIf(skip)("assumption presentation data", () => {
     }
   });
 
+  it("rejects an alternative longer than the frame can present", async () => {
+    await impersonate(USER_A);
+    await expect(
+      db.query(
+        `insert into assumptions (project_id, statement, origin, alternatives)
+         values ($1, 'Oversized alternative', 'ai_inferred',
+                 jsonb_build_array($2::text))`,
+        [projectA, "x".repeat(301)],
+      ),
+    ).rejects.toThrow(/alternatives_is_string_array/);
+  });
+
+  it("rejects more alternatives than the frame can present", async () => {
+    await impersonate(USER_A);
+    await expect(
+      db.query(
+        `insert into assumptions (project_id, statement, origin, alternatives)
+         values ($1, 'Too many', 'ai_inferred', $2::jsonb)`,
+        [projectA, JSON.stringify(Array.from({ length: 11 }, () => "a"))],
+      ),
+    ).rejects.toThrow(/alternatives_is_string_array/);
+  });
+
   it("bounds the recommended validation length", async () => {
     await impersonate(USER_A);
     await expect(

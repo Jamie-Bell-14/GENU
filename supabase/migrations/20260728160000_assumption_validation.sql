@@ -16,27 +16,37 @@ alter table public.assumptions
   `alternatives` was typed `jsonb` with an array default but nothing required
   it to be an array of strings, so a malformed value could reach the renderer.
 
-  Check constraints cannot contain subqueries, so the element-type test lives
-  in an immutable helper rather than an inline `not exists (...)`.
+  Bounding the item count alone still allows ten unbounded strings, so each
+  element is length-bounded too: an alternative is a single-line list item in
+  the object frame, so 300 characters is the widest value the UI can present
+  without becoming a paragraph.
+
+  Check constraints cannot contain subqueries, so the element test lives in an
+  immutable helper rather than an inline `not exists (...)`.
 */
-create or replace function private.is_string_array(value jsonb, max_length integer)
+create or replace function private.is_string_array(
+  value jsonb,
+  max_items integer,
+  max_item_length integer
+)
 returns boolean
 language sql
 immutable
 set search_path = ''
 as $$
   select jsonb_typeof(value) = 'array'
-     and jsonb_array_length(value) <= max_length
+     and jsonb_array_length(value) <= max_items
      and not exists (
        select 1
        from jsonb_array_elements(value) as element
        where jsonb_typeof(element) <> 'string'
+          or char_length(element #>> '{}') > max_item_length
      );
 $$;
 
 alter table public.assumptions
   add constraint assumptions_alternatives_is_string_array
-    check (private.is_string_array(alternatives, 10));
+    check (private.is_string_array(alternatives, 10, 300));
 
 comment on column public.assumptions.recommended_validation is
   'How the user could test this assumption. User-facing text; never inferred certainty.';

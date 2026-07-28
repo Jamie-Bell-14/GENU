@@ -48,14 +48,25 @@ export function ObjectEditor({
     if (!canSave) return;
     setStatus("saving");
     setError(null);
-    const result = await onSubmit(object, text.trim());
-    setStatus("idle");
-    if (!result.ok) {
-      // The user's text stays in the field so nothing is lost on failure.
-      setError(result.error ?? "The change could not be saved.");
-      return;
+    let saved = false;
+    try {
+      const result = await onSubmit(object, text.trim());
+      saved = result.ok;
+      if (!result.ok) {
+        setError(result.error ?? "The change could not be saved.");
+      }
+    } catch {
+      // A rejected submit — a dropped connection or a failed Server Action —
+      // must not leave the editor stuck in "saving" with no explanation.
+      setError(
+        "The change could not be saved. Check your connection and try again.",
+      );
+    } finally {
+      // The editor always returns to a usable state, and the user's text stays
+      // in the field on failure so nothing they wrote is lost.
+      setStatus("idle");
     }
-    onClose();
+    if (saved) onClose();
   }
 
   return (

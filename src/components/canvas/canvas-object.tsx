@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   EyeOffIcon,
   PencilIcon,
@@ -53,6 +53,22 @@ export function CanvasObjectCard({
 }>) {
   const [editing, setEditing] = useState(false);
   const canEdit = Boolean(onEdit && object.editable);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+
+  // Closing the editor unmounts the control that held focus, so focus returns
+  // to the trigger that opened it — after saving, cancelling or Escape — and
+  // never falls back to the document body (DESIGN.md §21).
+  useEffect(() => {
+    if (editing || !restoreFocus.current) return;
+    restoreFocus.current = false;
+    editButtonRef.current?.focus();
+  }, [editing]);
+
+  function closeEditor() {
+    restoreFocus.current = true;
+    setEditing(false);
+  }
 
   return (
     <article
@@ -118,11 +134,7 @@ export function CanvasObjectCard({
       )}
 
       {editing && onEdit && (
-        <ObjectEditor
-          object={object}
-          onSubmit={onEdit}
-          onClose={() => setEditing(false)}
-        />
+        <ObjectEditor object={object} onSubmit={onEdit} onClose={closeEditor} />
       )}
 
       {/* Every view operation has a keyboard-reachable button: there is no
@@ -160,6 +172,7 @@ export function CanvasObjectCard({
         </Button>
         {canEdit && !editing && (
           <Button
+            ref={editButtonRef}
             variant="ghost"
             size="icon-xs"
             aria-label={`Edit ${object.title}`}

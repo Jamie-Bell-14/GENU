@@ -154,11 +154,16 @@ test("editing inferred text warns that it becomes the user's wording", async ({
     ),
   ).toBeVisible();
 
-  // Escape closes without saving.
+  // Escape closes without saving and hands focus back to the trigger.
   await page.keyboard.press("Escape");
   await expect(
     assumptions.getByText(/marks this as your own wording/i),
   ).toBeHidden();
+  await expect(
+    assumptions.getByLabel(
+      "Edit Disagreements usually become deposit disputes",
+    ),
+  ).toBeFocused();
 });
 
 test("assumption alternatives and recommended validation are shown", async ({

@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { OBJECT_KINDS, type CanvasObject } from "@/lib/canvas/model";
@@ -222,6 +222,27 @@ describe("editing the user's own meaning", () => {
     expect(field).toHaveValue("Revised wording");
   });
 
+  it("recovers when the save request is rejected outright", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn().mockRejectedValue(new Error("Network unreachable"));
+    render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
+
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    const field = screen.getByLabelText("Edit Property-condition disagreement");
+    await user.clear(field);
+    await user.type(field, "Revised wording");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not be saved/i,
+    );
+    // The editor leaves the saving state, keeps the text and stays retryable.
+    expect(field).toHaveValue("Revised wording");
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
   it("cannot save an unchanged or empty value", async () => {
     const user = userEvent.setup();
     const onEdit = vi.fn();
@@ -254,7 +275,7 @@ describe("editing the user's own meaning", () => {
     ).toBeInTheDocument();
   });
 
-  it("closes the editor on Escape without saving", async () => {
+  it("closes the editor on Escape without saving and restores focus", async () => {
     const user = userEvent.setup();
     const onEdit = vi.fn();
     render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
@@ -262,10 +283,46 @@ describe("editing the user's own meaning", () => {
       screen.getByLabelText("Edit Property-condition disagreement"),
     );
     await user.keyboard("{Escape}");
-    expect(
-      screen.getByLabelText("Edit Property-condition disagreement"),
-    ).toBeInstanceOf(HTMLButtonElement);
+    const trigger = screen.getByLabelText(
+      "Edit Property-condition disagreement",
+    );
+    expect(trigger).toBeInstanceOf(HTMLButtonElement);
+    expect(document.activeElement).toBe(trigger);
     expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("restores focus to the edit control after cancelling", async () => {
+    const user = userEvent.setup();
+    render(<StructuredInspector objects={[editable]} onEdit={vi.fn()} />);
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(document.activeElement).toBe(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+  });
+
+  it("restores focus to the edit control after a successful save", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn().mockResolvedValue({ ok: true });
+    render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    await user.type(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+      " Revised.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const trigger = screen.getByLabelText(
+        "Edit Property-condition disagreement",
+      );
+      expect(trigger).toBeInstanceOf(HTMLButtonElement);
+      expect(document.activeElement).toBe(trigger);
+    });
   });
 });
 

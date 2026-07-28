@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@import "../../styles/design-tokens.css";
+
+/*
+  Full token → Tailwind theme mapping arrives with task T2.
+  Until then the base document consumes semantic tokens directly.
+*/
+
+body {
+  background: var(--surface-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-interface);
+}

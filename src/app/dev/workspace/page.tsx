@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import type { CanvasObject } from "@/lib/canvas/model";
+import type { ProjectRelationship } from "@/lib/canvas/relationships";
 
 /*
   Dev-only route: the workspace with a sparse model matching the vertical
@@ -9,7 +10,7 @@ import type { CanvasObject } from "@/lib/canvas/model";
 */
 const DEMO_OBJECTS: CanvasObject[] = [
   {
-    id: "subject-problem",
+    id: "22222222-2222-4222-8222-000000000001",
     kind: "concept",
     zone: "subject",
     title: "Property-condition disagreement",
@@ -20,7 +21,7 @@ const DEMO_OBJECTS: CanvasObject[] = [
     meta: "Demonstration data",
   },
   {
-    id: "related-cause-evidence",
+    id: "22222222-2222-4222-8222-000000000002",
     kind: "concept",
     zone: "related",
     title: "Missing check-in evidence",
@@ -29,7 +30,7 @@ const DEMO_OBJECTS: CanvasObject[] = [
     support: "unexplored",
   },
   {
-    id: "related-cause-interpretation",
+    id: "22222222-2222-4222-8222-000000000003",
     kind: "concept",
     zone: "related",
     title: "Conflicting interpretation of wear",
@@ -38,7 +39,7 @@ const DEMO_OBJECTS: CanvasObject[] = [
     support: "unexplored",
   },
   {
-    id: "assumption-consequence",
+    id: "22222222-2222-4222-8222-000000000004",
     kind: "assumption",
     zone: "assumptions",
     title: "Disagreements usually become deposit disputes",
@@ -48,11 +49,48 @@ const DEMO_OBJECTS: CanvasObject[] = [
     support: "hypothesis",
   },
   {
-    id: "outline-problem-doc",
+    id: "22222222-2222-4222-8222-000000000005",
     kind: "document",
     zone: "outline",
     title: "Problem definition",
     detail: "Working draft",
+    origin: "user_stated",
+    support: "hypothesis",
+  },
+];
+
+/* Stored relationships for the demo model. The map renders only these — it
+   never derives a connection from layout. */
+const DEMO_RELATIONSHIPS: ProjectRelationship[] = [
+  {
+    id: "11111111-1111-4111-8111-000000000001",
+    fromObjectId: "22222222-2222-4222-8222-000000000002",
+    toObjectId: "22222222-2222-4222-8222-000000000001",
+    relation: "possible_cause_of",
+    origin: "ai_inferred",
+    support: "unexplored",
+  },
+  {
+    id: "11111111-1111-4111-8111-000000000002",
+    fromObjectId: "22222222-2222-4222-8222-000000000003",
+    toObjectId: "22222222-2222-4222-8222-000000000001",
+    relation: "possible_cause_of",
+    origin: "ai_inferred",
+    support: "unexplored",
+  },
+  {
+    id: "11111111-1111-4111-8111-000000000003",
+    fromObjectId: "22222222-2222-4222-8222-000000000004",
+    toObjectId: "22222222-2222-4222-8222-000000000001",
+    relation: "consequence_of",
+    origin: "ai_inferred",
+    support: "hypothesis",
+  },
+  {
+    id: "11111111-1111-4111-8111-000000000004",
+    fromObjectId: "22222222-2222-4222-8222-000000000005",
+    toObjectId: "22222222-2222-4222-8222-000000000001",
+    relation: "derived_from",
     origin: "user_stated",
     support: "hypothesis",
   },
@@ -65,6 +103,7 @@ export default function DevWorkspacePage() {
       projectId="demo"
       projectName="Deposit disputes (demo)"
       canvasObjects={DEMO_OBJECTS}
+      canvasRelationships={DEMO_RELATIONSHIPS}
     />
   );
 }

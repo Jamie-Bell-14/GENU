@@ -14,6 +14,7 @@ import {
 import { ConversationPane } from "@/components/conversation/conversation-pane";
 import { LivingCanvas } from "@/components/canvas/living-canvas";
 import type { CanvasObject } from "@/lib/canvas/model";
+import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { Message } from "@/lib/ai/turn-events";
 import { AppearanceSettings } from "./appearance-settings";
 import { PlanningNav } from "./planning-nav";
@@ -54,11 +55,13 @@ export function WorkspaceShell({
   projectName,
   initialMessages = [],
   canvasObjects = [],
+  canvasRelationships = [],
 }: Readonly<{
   projectId: string;
   projectName: string;
   initialMessages?: Message[];
   canvasObjects?: CanvasObject[];
+  canvasRelationships?: ProjectRelationship[];
 }>) {
   // Two-pass hydration, same pattern as the appearance provider: the server
   // renders the default layout, the client corrects from storage on mount.
@@ -178,7 +181,10 @@ export function WorkspaceShell({
                 defaultSize={100 - effective.split}
                 minSize={25}
               >
-                <LivingCanvas objects={canvasObjects} />
+                <LivingCanvas
+                  objects={canvasObjects}
+                  relationships={canvasRelationships}
+                />
               </ResizablePanel>
             </ResizablePanelGroup>
           ) : mode === "conversation" ? (
@@ -187,7 +193,10 @@ export function WorkspaceShell({
               initialMessages={initialMessages}
             />
           ) : (
-            <LivingCanvas objects={canvasObjects} />
+            <LivingCanvas
+              objects={canvasObjects}
+              relationships={canvasRelationships}
+            />
           )}
         </main>
       </div>

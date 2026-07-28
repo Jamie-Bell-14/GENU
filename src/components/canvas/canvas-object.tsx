@@ -31,11 +31,14 @@ export function CanvasObjectCard({
   pinned,
   centred,
   onOperation,
+  onFocusInMap,
 }: Readonly<{
   object: CanvasObject;
   pinned: boolean;
   centred: boolean;
   onOperation: (operation: ViewOperation) => void;
+  /** Hands this object to the visual relationship map, when one is available. */
+  onFocusInMap?: (objectId: string) => void;
 }>) {
   return (
     <article
@@ -106,6 +109,16 @@ export function CanvasObjectCard({
         >
           <TargetIcon aria-hidden />
         </Button>
+        {onFocusInMap && (
+          <Button
+            variant="ghost"
+            size="xs"
+            aria-label={`Show ${object.title} in the relationship map`}
+            onClick={() => onFocusInMap(object.id)}
+          >
+            Show in map
+          </Button>
+        )}
       </div>
     </article>
   );

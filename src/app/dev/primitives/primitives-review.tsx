@@ -1,6 +1,6 @@
 "use client";
 
-import { useAppearance } from "@/lib/appearance/provider";
+import { AppearanceSettings } from "@/components/workspace/appearance-settings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -86,61 +86,6 @@ function Section({
   );
 }
 
-function AppearanceControls() {
-  const { appearance, setAppearance } = useAppearance();
-  return (
-    <div className="flex flex-wrap items-center gap-4">
-      <ToggleGroup
-        type="single"
-        value={appearance.theme}
-        onValueChange={(value) =>
-          value && setAppearance({ theme: value as typeof appearance.theme })
-        }
-        aria-label="Theme"
-      >
-        <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-        <ToggleGroupItem value="light">Light</ToggleGroupItem>
-        <ToggleGroupItem value="system">System</ToggleGroupItem>
-      </ToggleGroup>
-      <ToggleGroup
-        type="single"
-        value={appearance.density}
-        onValueChange={(value) =>
-          value &&
-          setAppearance({ density: value as typeof appearance.density })
-        }
-        aria-label="Density"
-      >
-        <ToggleGroupItem value="comfortable">Comfortable</ToggleGroupItem>
-        <ToggleGroupItem value="compact">Compact</ToggleGroupItem>
-      </ToggleGroup>
-      <ToggleGroup
-        type="single"
-        value={appearance.motion}
-        onValueChange={(value) =>
-          value && setAppearance({ motion: value as typeof appearance.motion })
-        }
-        aria-label="Motion"
-      >
-        <ToggleGroupItem value="system">Motion: system</ToggleGroupItem>
-        <ToggleGroupItem value="reduced">Reduced</ToggleGroupItem>
-      </ToggleGroup>
-      <ToggleGroup
-        type="single"
-        value={appearance.textSize}
-        onValueChange={(value) =>
-          value &&
-          setAppearance({ textSize: value as typeof appearance.textSize })
-        }
-        aria-label="Text size"
-      >
-        <ToggleGroupItem value="default">Text: default</ToggleGroupItem>
-        <ToggleGroupItem value="large">Large</ToggleGroupItem>
-      </ToggleGroup>
-    </div>
-  );
-}
-
 export function PrimitivesReview() {
   return (
     <main className="mx-auto flex w-full max-w-4xl flex-col gap-8 p-8">
@@ -150,7 +95,7 @@ export function PrimitivesReview() {
           Development-only reference of the re-themed shadcn primitives in every
           state. Review in both themes and with reduced motion.
         </p>
-        <AppearanceControls />
+        <AppearanceSettings />
       </header>
 
       <Section title="Button">

@@ -1,8 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 
-// Minimal project route: proves ownership-scoped access end to end.
-// The workspace shell replaces this surface in task T5.
+// Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
   params,
 }: Readonly<{ params: Promise<{ projectId: string }> }>) {
@@ -23,13 +23,5 @@ export default async function ProjectPage({
     .maybeSingle();
   if (!project) notFound();
 
-  return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4 p-8">
-      <h1 className="font-display text-2xl font-medium">{project.name}</h1>
-      <p className="text-fg-secondary">
-        The discovery workspace for this project arrives with the workspace
-        shell (task T5).
-      </p>
-    </main>
-  );
+  return <WorkspaceShell projectName={project.name} />;
 }

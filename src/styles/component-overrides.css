@@ -41,15 +41,27 @@
     @apply bg-surface-secondary border-edge-subtle text-fg-disabled placeholder:text-fg-disabled opacity-100;
   }
 
-  /* Resizable divider: perceivable at rest, stronger on hover, branded only
-     while actively dragged (agency). */
+  /* Resizable divider: a real 6px hit area (the base style's 1px element is
+     a poor target and can measure zero mid-layout) drawing a visible 1px
+     line — perceivable at rest, stronger on hover, branded only while
+     actively dragged (agency). */
   [data-slot="resizable-handle"] {
-    @apply bg-edge-default;
+    @apply w-1.5 shrink-0 bg-transparent;
   }
-  [data-slot="resizable-handle"]:hover {
-    @apply bg-edge-strong;
+  [data-slot="resizable-handle"]::before {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--border-default);
   }
-  [data-slot="resizable-handle"][data-resize-handle-state="drag"] {
-    @apply bg-brand;
+  [data-slot="resizable-handle"]:hover::before {
+    background: var(--border-strong);
+  }
+  [data-slot="resizable-handle"][data-separator="active"]::before,
+  [data-slot="resizable-handle"]:focus-visible::before {
+    background: var(--brand-primary);
   }
 }

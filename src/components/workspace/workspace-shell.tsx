@@ -13,6 +13,7 @@ import {
 } from "@/lib/workspace/layout";
 import { ConversationPane } from "@/components/conversation/conversation-pane";
 import { LivingCanvas } from "@/components/canvas/living-canvas";
+import type { EditSubmit } from "@/components/canvas/object-editor";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { Message } from "@/lib/ai/turn-events";
@@ -56,12 +57,14 @@ export function WorkspaceShell({
   initialMessages = [],
   canvasObjects = [],
   canvasRelationships = [],
+  onEditObject,
 }: Readonly<{
   projectId: string;
   projectName: string;
   initialMessages?: Message[];
   canvasObjects?: CanvasObject[];
   canvasRelationships?: ProjectRelationship[];
+  onEditObject?: EditSubmit;
 }>) {
   // Two-pass hydration, same pattern as the appearance provider: the server
   // renders the default layout, the client corrects from storage on mount.
@@ -184,6 +187,7 @@ export function WorkspaceShell({
                 <LivingCanvas
                   objects={canvasObjects}
                   relationships={canvasRelationships}
+                  onEdit={onEditObject}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>
@@ -196,6 +200,7 @@ export function WorkspaceShell({
             <LivingCanvas
               objects={canvasObjects}
               relationships={canvasRelationships}
+              onEdit={onEditObject}
             />
           )}
         </main>

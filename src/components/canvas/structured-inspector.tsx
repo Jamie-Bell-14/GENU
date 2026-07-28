@@ -22,6 +22,7 @@ import {
   type ViewOperation,
 } from "@/lib/canvas/model";
 import { CanvasObjectCard } from "./canvas-object";
+import type { EditSubmit } from "./object-editor";
 import { Button } from "@/components/ui/button";
 
 function viewReducer(view: CanvasView, operation: ViewOperation): CanvasView {
@@ -31,10 +32,13 @@ function viewReducer(view: CanvasView, operation: ViewOperation): CanvasView {
 export function StructuredInspector({
   objects,
   onFocusObject,
+  onEdit,
 }: Readonly<{
   objects: CanvasObject[];
   /** Lets the inspector hand an object to the visual relationship map. */
   onFocusObject?: (objectId: string) => void;
+  /** Saves edited wording; absent when editing is unavailable. */
+  onEdit?: EditSubmit;
 }>) {
   const [view, dispatch] = useReducer(viewReducer, EMPTY_VIEW);
   const zones = buildZones(objects, view);
@@ -93,6 +97,7 @@ export function StructuredInspector({
                     centred={view.centredOn === object.id}
                     onOperation={dispatch}
                     onFocusInMap={onFocusObject}
+                    onEdit={onEdit}
                   />
                 ))}
               </div>

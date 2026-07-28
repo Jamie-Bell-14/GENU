@@ -1,6 +1,13 @@
 "use client";
 
-import { EyeOffIcon, PinIcon, PinOffIcon, TargetIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  EyeOffIcon,
+  PencilIcon,
+  PinIcon,
+  PinOffIcon,
+  TargetIcon,
+} from "lucide-react";
 import {
   KIND_LABELS,
   ORIGIN_LABELS,
@@ -11,6 +18,7 @@ import {
 } from "@/lib/canvas/model";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { ObjectEditor, type EditSubmit } from "./object-editor";
 
 /**
  * One frame for every object type (DESIGN.md §10): 8px radius, fine border,
@@ -32,6 +40,7 @@ export function CanvasObjectCard({
   centred,
   onOperation,
   onFocusInMap,
+  onEdit,
 }: Readonly<{
   object: CanvasObject;
   pinned: boolean;
@@ -39,7 +48,28 @@ export function CanvasObjectCard({
   onOperation: (operation: ViewOperation) => void;
   /** Hands this object to the visual relationship map, when one is available. */
   onFocusInMap?: (objectId: string) => void;
+  /** Saves edited wording; absent when editing is unavailable. */
+  onEdit?: EditSubmit;
 }>) {
+  const [editing, setEditing] = useState(false);
+  const canEdit = Boolean(onEdit && object.editable);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+
+  // Closing the editor unmounts the control that held focus, so focus returns
+  // to the trigger that opened it — after saving, cancelling or Escape — and
+  // never falls back to the document body (DESIGN.md §21).
+  useEffect(() => {
+    if (editing || !restoreFocus.current) return;
+    restoreFocus.current = false;
+    editButtonRef.current?.focus();
+  }, [editing]);
+
+  function closeEditor() {
+    restoreFocus.current = true;
+    setEditing(false);
+  }
+
   return (
     <article
       aria-label={`${KIND_LABELS[object.kind]}: ${object.title}`}
@@ -76,6 +106,37 @@ export function CanvasObjectCard({
         {object.meta && <span className="font-mono">{object.meta}</span>}
       </div>
 
+      {/* Assumption presentation (DESIGN.md §10.3): alternatives and how to
+          test it, shown only where the data actually exists. */}
+      {object.alternatives && object.alternatives.length > 0 && (
+        <div className="mt-2">
+          <p className="text-fg-tertiary text-xs font-medium">
+            Possible alternatives
+          </p>
+          <ul className="text-fg-secondary mt-0.5 list-disc pl-4 text-xs">
+            {object.alternatives.map((alternative) => (
+              <li key={alternative} className="break-words">
+                {alternative}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {object.recommendedValidation && (
+        <div className="mt-2">
+          <p className="text-fg-tertiary text-xs font-medium">
+            Recommended validation
+          </p>
+          <p className="text-fg-secondary mt-0.5 text-xs break-words">
+            {object.recommendedValidation}
+          </p>
+        </div>
+      )}
+
+      {editing && onEdit && (
+        <ObjectEditor object={object} onSubmit={onEdit} onClose={closeEditor} />
+      )}
+
       {/* Every view operation has a keyboard-reachable button: there is no
           drag-only interaction (DESIGN.md §18). */}
       <div className="mt-2 flex gap-1">
@@ -109,6 +170,17 @@ export function CanvasObjectCard({
         >
           <TargetIcon aria-hidden />
         </Button>
+        {canEdit && !editing && (
+          <Button
+            ref={editButtonRef}
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Edit ${object.title}`}
+            onClick={() => setEditing(true)}
+          >
+            <PencilIcon aria-hidden />
+          </Button>
+        )}
         {onFocusInMap && (
           <Button
             variant="ghost"

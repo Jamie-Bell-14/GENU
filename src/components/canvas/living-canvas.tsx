@@ -24,6 +24,7 @@ import {
 } from "@/lib/canvas/scene-state";
 import { ProblemExplorationRenderer } from "./renderers/problem-exploration";
 import { StructuredInspector } from "./structured-inspector";
+import type { EditSubmit } from "./object-editor";
 import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
@@ -93,12 +94,18 @@ export function LivingCanvas({
   initialScene = null,
   loading = false,
   error = null,
+  onEdit,
 }: Readonly<{
   objects: CanvasObject[];
   relationships?: ProjectRelationship[];
   initialScene?: CanvasScene | null;
   loading?: boolean;
   error?: string | null;
+  /**
+   * Saves edited wording. Editing lives in the structured inspector
+   * (docs/ADAPTIVE_CANVAS_MVP.md §4.4), so the visual map never mutates text.
+   */
+  onEdit?: EditSubmit;
 }>) {
   /*
     When no scene is supplied, the host derives one for the active problem and
@@ -317,7 +324,11 @@ export function LivingCanvas({
             }}
           />
         ) : (
-          <StructuredInspector objects={objects} onFocusObject={focusOn} />
+          <StructuredInspector
+            objects={objects}
+            onFocusObject={focusOn}
+            onEdit={onEdit}
+          />
         )}
       </div>
     </section>

@@ -16,6 +16,12 @@ for (const theme of ["dark", "light"] as const) {
     await expect(
       page.getByRole("heading", { name: "Primitives review" }),
     ).toBeVisible();
+    // Scan only after hydration: axe on a half-hydrated page reports ARIA
+    // state that React has not attached yet. The appearance provider's
+    // storage write on mount is the hydration signal.
+    await page.waitForFunction(
+      () => localStorage.getItem("ppm.appearance") !== null,
+    );
 
     const results = await new AxeBuilder({ page }).analyze();
     expect(results.violations).toEqual([]);

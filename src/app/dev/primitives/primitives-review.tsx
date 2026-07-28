@@ -125,6 +125,18 @@ function AppearanceControls() {
         <ToggleGroupItem value="system">Motion: system</ToggleGroupItem>
         <ToggleGroupItem value="reduced">Reduced</ToggleGroupItem>
       </ToggleGroup>
+      <ToggleGroup
+        type="single"
+        value={appearance.textSize}
+        onValueChange={(value) =>
+          value &&
+          setAppearance({ textSize: value as typeof appearance.textSize })
+        }
+        aria-label="Text size"
+      >
+        <ToggleGroupItem value="default">Text: default</ToggleGroupItem>
+        <ToggleGroupItem value="large">Large</ToggleGroupItem>
+      </ToggleGroup>
     </div>
   );
 }
@@ -149,12 +161,19 @@ export function PrimitivesReview() {
         <Button variant="destructive">Delete project</Button>
         <Button variant="link">View history</Button>
         <Button disabled>Disabled</Button>
-        <Button disabled>
+        <Button variant="outline" disabled>
+          Disabled outline
+        </Button>
+        <Button aria-busy disabled>
           <Spinner data-icon="inline-start" />
           Saving…
         </Button>
-        <Button size="sm">Small</Button>
-        <Button size="lg">Large</Button>
+        <Button variant="outline" size="sm">
+          Small
+        </Button>
+        <Button variant="outline" size="lg">
+          Large
+        </Button>
       </Section>
 
       <Section title="Badge">

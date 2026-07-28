@@ -11,7 +11,7 @@ const AUTH_ROUTES = ["/sign-in", "/sign-up"];
  * middleware is convenience, not the security boundary
  * (SECURITY_STANDARDS §8).
  */
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const config = supabaseConfig();
   const { pathname } = request.nextUrl;
   const isProtected = PROTECTED_PREFIXES.some((p) => pathname.startsWith(p));

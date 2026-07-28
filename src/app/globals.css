@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "../styles/design-tokens.css";
 @import "../styles/shadcn-base.css";
+@import "../styles/component-overrides.css";
 
 /* Custom utility used by the vendored base styles. */
 @utility no-scrollbar {
@@ -32,9 +33,12 @@
   --primary-foreground: var(--brand-on-primary);
   --secondary: var(--surface-tertiary);
   --secondary-foreground: var(--text-primary);
-  --muted: var(--surface-secondary);
+  /* muted/accent step up one surface: surface-secondary is nearly
+     indistinguishable from the primary surface, which made skeletons and
+     hover/selected states (bg-muted / bg-accent) almost invisible. */
+  --muted: var(--surface-tertiary);
   --muted-foreground: var(--text-secondary);
-  --accent: var(--surface-tertiary);
+  --accent: var(--surface-elevated);
   --accent-foreground: var(--text-primary);
   --destructive: var(--risk);
   --destructive-foreground: var(--text-primary);

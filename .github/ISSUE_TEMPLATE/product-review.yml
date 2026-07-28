@@ -1,0 +1,96 @@
+name: Product and architecture review
+description: Track one GPT review topic from findings through documentation, implementation and verification.
+title: "REV-XXX — "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep this issue body as the concise current state. Use comments for historical discussion. Update the body after meaningful decisions so agents do not need to reread the full thread.
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Current status
+      options:
+        - Awaiting Claude response
+        - Awaiting Jamie decision
+        - Documentation proposed
+        - Approved for implementation
+        - Implementation in progress
+        - Awaiting verification
+        - Verified
+        - Deferred
+        - Closed
+    validations:
+      required: true
+
+  - type: input
+    id: reviewed_commit
+    attributes:
+      label: Reviewed commit or branch
+      description: The exact commit SHA or branch reviewed.
+      placeholder: main@abcdef1
+    validations:
+      required: true
+
+  - type: textarea
+    id: verdict
+    attributes:
+      label: Executive verdict
+      description: Concise assessment of the current state and why the review matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: material
+    attributes:
+      label: Material reviewed
+      description: Canonical documents, implementation files, screenshots and tests reviewed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: findings
+    attributes:
+      label: Findings and recommended actions
+      description: Use stable finding IDs, severity, evidence, consequence, recommendation and acceptance criteria.
+    validations:
+      required: true
+
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions required from Jamie
+      description: List only unresolved product, scope or architecture decisions.
+    validations:
+      required: false
+
+  - type: textarea
+    id: canonical_docs
+    attributes:
+      label: Canonical documents affected
+      description: Exact files and sections that may need updating after approval.
+    validations:
+      required: true
+
+  - type: textarea
+    id: agreed_direction
+    attributes:
+      label: Latest agreed direction
+      description: Maintain this section after Claude responds and Jamie decides. Until then, state that no direction is approved.
+      value: No review recommendation is approved yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: linked_work
+    attributes:
+      label: Linked work
+      description: Documentation PR, implementation PR and verification result.
+      value: |
+        - Documentation PR: not created
+        - Implementation PR: not created
+        - Verification: not started
+    validations:
+      required: true

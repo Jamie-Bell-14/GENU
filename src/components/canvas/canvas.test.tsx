@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OBJECT_KINDS, type CanvasObject } from "@/lib/canvas/model";
 import { StructuredInspector } from "./structured-inspector";
 
@@ -156,5 +156,159 @@ describe("StructuredInspector view operations", () => {
     );
     const heading = screen.getByRole("heading", { name: "A".repeat(300) });
     expect(heading.className).toContain("break-words");
+  });
+});
+
+describe("editing the user's own meaning", () => {
+  const editable: CanvasObject = {
+    id: "aaaaaaaa-0000-4000-8000-000000000001",
+    kind: "concept",
+    zone: "subject",
+    title: "Property-condition disagreement",
+    detail: "Tenants and landlords disagree at tenancy end.",
+    origin: "user_stated",
+    support: "hypothesis",
+    editable: {
+      kind: "field",
+      text: "Tenants and landlords disagree at tenancy end.",
+    },
+  };
+
+  it("offers no edit affordance when editing is unavailable", () => {
+    render(<StructuredInspector objects={[editable]} />);
+    expect(
+      screen.queryByLabelText(/^Edit Property-condition/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("saves edited wording through the supplied handler", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn().mockResolvedValue({ ok: true });
+    render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
+
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    const field = screen.getByLabelText("Edit Property-condition disagreement");
+    await user.clear(field);
+    await user.type(field, "Disagreements about wear and tear at tenancy end.");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onEdit).toHaveBeenCalledWith(
+      expect.objectContaining({ id: editable.id }),
+      "Disagreements about wear and tear at tenancy end.",
+    );
+  });
+
+  it("keeps the user's text and explains the problem when saving fails", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn().mockResolvedValue({
+      ok: false,
+      error: "That item is no longer available.",
+    });
+    render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
+
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    const field = screen.getByLabelText("Edit Property-condition disagreement");
+    await user.clear(field);
+    await user.type(field, "Revised wording");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "That item is no longer available.",
+    );
+    expect(field).toHaveValue("Revised wording");
+  });
+
+  it("cannot save an unchanged or empty value", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn();
+    render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.clear(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("warns before turning inferred text into the user's own wording", async () => {
+    const user = userEvent.setup();
+    render(
+      <StructuredInspector
+        objects={[{ ...editable, origin: "ai_inferred" }]}
+        onEdit={vi.fn()}
+      />,
+    );
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    expect(
+      screen.getByText(/marks this as your own wording rather than inferred/i),
+    ).toBeInTheDocument();
+  });
+
+  it("closes the editor on Escape without saving", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn();
+    render(<StructuredInspector objects={[editable]} onEdit={onEdit} />);
+    await user.click(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    );
+    await user.keyboard("{Escape}");
+    expect(
+      screen.getByLabelText("Edit Property-condition disagreement"),
+    ).toBeInstanceOf(HTMLButtonElement);
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+});
+
+describe("assumption presentation", () => {
+  const assumption: CanvasObject = {
+    id: "aaaaaaaa-0000-4000-8000-000000000002",
+    kind: "assumption",
+    zone: "assumptions",
+    title: "Disagreements usually become deposit disputes",
+    origin: "ai_inferred",
+    support: "hypothesis",
+    alternatives: [
+      "Most are settled informally",
+      "Only where no record exists",
+    ],
+    recommendedValidation: "Ask five letting agents about last year.",
+  };
+
+  it("shows alternatives and recommended validation when the data exists", () => {
+    render(<StructuredInspector objects={[assumption]} />);
+    expect(screen.getByText("Possible alternatives")).toBeInTheDocument();
+    expect(screen.getByText("Most are settled informally")).toBeInTheDocument();
+    expect(screen.getByText("Recommended validation")).toBeInTheDocument();
+    expect(
+      screen.getByText("Ask five letting agents about last year."),
+    ).toBeInTheDocument();
+  });
+
+  it("omits both sections when the data is absent", () => {
+    render(
+      <StructuredInspector
+        objects={[
+          {
+            ...assumption,
+            alternatives: undefined,
+            recommendedValidation: undefined,
+          },
+        ]}
+      />,
+    );
+    expect(screen.queryByText("Possible alternatives")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Recommended validation"),
+    ).not.toBeInTheDocument();
   });
 });

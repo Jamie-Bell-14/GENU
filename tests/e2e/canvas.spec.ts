@@ -123,3 +123,50 @@ for (const theme of ["dark", "light"] as const) {
     });
   }
 }
+
+test("the user can edit their own meaning from the structured inspector", async ({
+  page,
+}) => {
+  await page.getByRole("radio", { name: "Structured view" }).click();
+  const subject = page.getByRole("region", { name: "Current subject" });
+
+  await subject.getByLabel("Edit Property-condition disagreement").click();
+  const field = subject.getByLabel("Edit Property-condition disagreement");
+  await field.fill("Disagreements about wear and tear when a tenancy ends.");
+  await subject.getByRole("button", { name: "Save" }).click();
+
+  await expect(
+    subject.getByText("Disagreements about wear and tear when a tenancy ends."),
+  ).toBeVisible();
+});
+
+test("editing inferred text warns that it becomes the user's wording", async ({
+  page,
+}) => {
+  await page.getByRole("radio", { name: "Structured view" }).click();
+  const assumptions = page.getByRole("region", { name: "Assumptions" });
+  await assumptions
+    .getByLabel("Edit Disagreements usually become deposit disputes")
+    .click();
+  await expect(
+    assumptions.getByText(
+      /marks this as your own wording rather than inferred/i,
+    ),
+  ).toBeVisible();
+
+  // Escape closes without saving.
+  await page.keyboard.press("Escape");
+  await expect(
+    assumptions.getByText(/marks this as your own wording/i),
+  ).toBeHidden();
+});
+
+test("assumption alternatives and recommended validation are shown", async ({
+  page,
+}) => {
+  await page.getByRole("radio", { name: "Structured view" }).click();
+  const assumptions = page.getByRole("region", { name: "Assumptions" });
+  await expect(assumptions.getByText("Possible alternatives")).toBeVisible();
+  await expect(assumptions.getByText("Recommended validation")).toBeVisible();
+  await expect(assumptions.getByText(/Ask five letting agents/)).toBeVisible();
+});

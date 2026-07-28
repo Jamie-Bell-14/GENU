@@ -164,3 +164,75 @@ describe.skipIf(skip)("assumptions RLS", () => {
     );
   });
 });
+
+describe.skipIf(skip)("assumption presentation data", () => {
+  it("stores alternatives and recommended validation", async () => {
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      `insert into assumptions
+         (project_id, statement, origin, alternatives, recommended_validation)
+       values ($1, 'Agencies feel this most', 'ai_inferred',
+               '["Settled informally", "Only without records"]'::jsonb,
+               'Ask five agents')
+       returning alternatives, recommended_validation`,
+      [projectA],
+    );
+    expect(rows[0].alternatives).toEqual([
+      "Settled informally",
+      "Only without records",
+    ]);
+    expect(rows[0].recommended_validation).toBe("Ask five agents");
+  });
+
+  it("rejects malformed alternatives so the renderer cannot receive them", async () => {
+    await impersonate(USER_A);
+    for (const bad of ['{"a": 1}', "[1, 2]", '"text"']) {
+      await expect(
+        db.query(
+          `insert into assumptions (project_id, statement, origin, alternatives)
+           values ($1, 'Bad shape', 'ai_inferred', $2::jsonb)`,
+          [projectA, bad],
+        ),
+      ).rejects.toThrow(/alternatives_is_string_array/);
+    }
+  });
+
+  it("bounds the recommended validation length", async () => {
+    await impersonate(USER_A);
+    await expect(
+      db.query(
+        `insert into assumptions
+           (project_id, statement, origin, recommended_validation)
+         values ($1, 'Too long', 'ai_inferred', $2)`,
+        [projectA, "x".repeat(501)],
+      ),
+    ).rejects.toThrow(/violates check constraint/);
+  });
+});
+
+describe.skipIf(skip)("editing project text", () => {
+  it("lets the owner rewrite a field value", async () => {
+    await impersonate(USER_A);
+    const { rowCount } = await db.query(
+      `update project_fields
+       set value = 'Revised wording', origin = 'user_stated'
+       where area = 'problem' and key = 'statement'`,
+    );
+    expect(rowCount).toBe(1);
+  });
+
+  it("prevents another user rewriting it", async () => {
+    await impersonate(USER_B);
+    const { rowCount } = await db.query(
+      "update project_fields set value = 'Tampered'",
+    );
+    expect(rowCount).toBe(0);
+  });
+
+  it("still enforces the length constraint on an edit", async () => {
+    await impersonate(USER_A);
+    await expect(
+      db.query("update project_fields set value = $1", ["x".repeat(2001)]),
+    ).rejects.toThrow(/violates check constraint/);
+  });
+});

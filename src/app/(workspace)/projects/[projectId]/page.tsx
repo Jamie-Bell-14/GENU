@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { WorkspaceClient } from "./workspace-client";
 import type { Message } from "@/lib/ai/turn-events";
 import {
   loadCanvasObjects,
@@ -49,7 +49,7 @@ export default async function ProjectPage({
   ]);
 
   return (
-    <WorkspaceShell
+    <WorkspaceClient
       projectId={project.id}
       projectName={project.name}
       initialMessages={messages}

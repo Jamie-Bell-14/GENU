@@ -18,6 +18,8 @@ interface AssumptionRow {
   why_it_matters: string | null;
   status: string;
   origin: Origin;
+  alternatives: unknown;
+  recommended_validation: string | null;
 }
 
 const ASSUMPTION_SUPPORT: Record<string, SupportState> = {
@@ -49,7 +51,9 @@ export async function loadCanvasObjects(
       .limit(100),
     supabase
       .from("assumptions")
-      .select("id, statement, why_it_matters, status, origin")
+      .select(
+        "id, statement, why_it_matters, status, origin, alternatives, recommended_validation",
+      )
       .eq("project_id", projectId)
       .order("created_at", { ascending: true })
       .limit(50),
@@ -67,6 +71,7 @@ export async function loadCanvasObjects(
       origin: row.origin,
       support: row.support,
       meta: shortDate(row.updated_at),
+      editable: { kind: "field", text: row.value },
     });
   }
 
@@ -79,6 +84,15 @@ export async function loadCanvasObjects(
       detail: row.why_it_matters ?? undefined,
       origin: row.origin,
       support: ASSUMPTION_SUPPORT[row.status] ?? "hypothesis",
+      editable: { kind: "assumption", text: row.statement },
+      // The database constrains alternatives to a string array; the guard
+      // keeps a malformed legacy row from reaching the renderer.
+      alternatives: Array.isArray(row.alternatives)
+        ? row.alternatives.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : undefined,
+      recommendedValidation: row.recommended_validation ?? undefined,
     });
   }
 

@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { DevWorkspace } from "./dev-workspace";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 
@@ -19,6 +19,10 @@ const DEMO_OBJECTS: CanvasObject[] = [
     origin: "user_stated",
     support: "hypothesis",
     meta: "Demonstration data",
+    editable: {
+      kind: "field",
+      text: "Tenants and landlords disagree about the condition of a property when a tenancy ends.",
+    },
   },
   {
     id: "22222222-2222-4222-8222-000000000002",
@@ -47,6 +51,16 @@ const DEMO_OBJECTS: CanvasObject[] = [
       "Why it matters: it decides whether the product addresses disputes or prevention.",
     origin: "ai_inferred",
     support: "hypothesis",
+    editable: {
+      kind: "assumption",
+      text: "Disagreements usually become deposit disputes",
+    },
+    alternatives: [
+      "Most disagreements are settled informally without a dispute",
+      "Disputes arise mainly where no check-in record exists",
+    ],
+    recommendedValidation:
+      "Ask five letting agents how many condition disagreements reached a scheme last year.",
   },
   {
     id: "22222222-2222-4222-8222-000000000005",
@@ -99,11 +113,6 @@ const DEMO_RELATIONSHIPS: ProjectRelationship[] = [
 export default function DevWorkspacePage() {
   if (process.env.NODE_ENV === "production") notFound();
   return (
-    <WorkspaceShell
-      projectId="demo"
-      projectName="Deposit disputes (demo)"
-      canvasObjects={DEMO_OBJECTS}
-      canvasRelationships={DEMO_RELATIONSHIPS}
-    />
+    <DevWorkspace objects={DEMO_OBJECTS} relationships={DEMO_RELATIONSHIPS} />
   );
 }

@@ -47,6 +47,14 @@ export interface CanvasObject {
   support?: SupportState;
   /** Compact technical metadata (source, updated date). */
   meta?: string;
+  /**
+   * Which underlying table owns this object, so an edit can be routed
+   * without the UI guessing from the object kind.
+   */
+  editable?: { kind: "field" | "assumption"; text: string };
+  /** Assumption presentation data (DESIGN.md §10.3). */
+  alternatives?: string[];
+  recommendedValidation?: string;
 }
 
 export const ORIGIN_LABELS: Record<Origin, string> = {

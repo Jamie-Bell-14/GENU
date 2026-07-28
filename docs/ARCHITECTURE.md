@@ -1,6 +1,6 @@
-# DRAFT — Architecture Proposal (Phase 0 Review, Part 4)
+# Architecture
 
-> Status: draft for review. Nothing here is implemented. Section numbers follow CLAUDE_REVIEW_PROMPT §4. Security analysis of this architecture is in 07-SECURITY_REVIEW.md. Recommendations marked ⚑ depend on decisions listed in 02/03.
+> Status: **approved** (Phase 0 review, 2026-07). Security analysis of this architecture is in docs/SECURITY_REVIEW.md. Numbered references like "02 §U1" point to the Phase 0 review archive in docs/review/. ⚑ marks formerly open decisions — all were approved as recommended (see PROJECT_PLAN.md §17), except cost-budget numbers and the incident-response owner, which remain open.
 
 ## 1. Repository structure
 

@@ -27,9 +27,11 @@ Before beginning any significant task, read:
 5. docs/VERTICAL_SLICE_SPEC.md
 6. docs/UI_ACCEPTANCE_CRITERIA.md
 
-During the temporary planning-update stage, also read:
+For implementation work, also read:
 
-6. `PROJECT_PLAN_ADDENDUM.md`
+7. docs/ARCHITECTURE.md
+8. docs/VERTICAL_SLICE_TASKS.md
+9. docs/SECURITY_REVIEW.md
 
 If any referenced document is missing, stop and report it before implementation.
 
@@ -370,15 +372,12 @@ Make the strongest safe recommendation, explain it clearly and identify the exac
 
 ---
 
-## 16. Current review instruction
+## 16. Project status
 
-Until the repository review and project-plan merge are approved:
+The Phase 0 repository review and project-plan merge were approved on
+2026-07-28 (decisions recorded in PROJECT_PLAN.md §17; review archive in
+docs/review/).
 
-- do not write application code
-- do not overwrite `PROJECT_PLAN.md`
-- do not begin Phase 1
-- review the repository critically
-- propose the plan merge
-- propose the architecture
-- propose the vertical-slice task breakdown
-- wait for approval
+Implementation proceeds through the task sequence in
+docs/VERTICAL_SLICE_TASKS.md, one task at a time, meeting each task's
+completion checklist before starting the next.

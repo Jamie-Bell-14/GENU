@@ -1,6 +1,6 @@
-# DRAFT — Security Review of the Proposed Architecture (Phase 0 Review, Part 7)
+# Security Review of the Approved Architecture
 
-> Status: draft for review. Reviews 04-ARCHITECTURE_PROPOSAL.md against SECURITY_STANDARDS.md, section by section per CLAUDE_REVIEW_PROMPT §8. Where the architecture already embeds the control, this records where; where a control is deferred, the compensating position is stated per SECURITY_STANDARDS §2.
+> Status: **approved** (Phase 0 review, 2026-07). Reviews docs/ARCHITECTURE.md against SECURITY_STANDARDS.md, section by section per CLAUDE_REVIEW_PROMPT §8. Where the architecture already embeds the control, this records where; where a control is deferred, the compensating position is stated per SECURITY_STANDARDS §2.
 
 ## 1. Authentication and session boundaries
 

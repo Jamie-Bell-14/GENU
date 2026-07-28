@@ -1,8 +1,8 @@
-# DRAFT — Vertical-Slice Task Plan (Phase 0 Review, Part 5)
+# Vertical-Slice Task Plan
 
-> Status: draft for review. Tasks are sequential; each depends on the ones before it unless noted. Design system and workspace primitives (T1–T7) precede the complete scenario (T8–T15), as CLAUDE_REVIEW_PROMPT §5 requires. Every task carries the SECURITY_STANDARDS §21 checklist; the **Security** line below records the material answers per task. "UI acceptance" always means the relevant sections of docs/UI_ACCEPTANCE_CRITERIA.md plus dark+light review, keyboard, reduced motion, and loading/empty/success/failure states — repeated per task only where something specific needs calling out.
+> Status: **approved** (Phase 0 review, 2026-07). Tasks are sequential; each depends on the ones before it unless noted. Design system and workspace primitives (T1–T7) precede the complete scenario (T8–T15), as CLAUDE_REVIEW_PROMPT §5 requires. Every task carries the SECURITY_STANDARDS §21 checklist; the **Security** line below records the material answers per task. "UI acceptance" always means the relevant sections of docs/UI_ACCEPTANCE_CRITERIA.md plus dark+light review, keyboard, reduced motion, and loading/empty/success/failure states — repeated per task only where something specific needs calling out.
 
-Assumed approved decisions (see 02 §L): qualitative confidence, single-call engine, zoned canvas without dragging, email+password auth, mock research only.
+Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, single-call engine, zoned canvas without dragging, email+password auth, mock research only. References like "02 §L" and "06 §6" point to the Phase 0 review archive in docs/review/.
 
 ---
 

@@ -1,6 +1,6 @@
-# DRAFT — Phase 0 Review Summary and Decision Sheet
+# Phase 0 Review Summary and Decision Sheet (archive)
 
-> Status: awaiting approval. Produced per CLAUDE_REVIEW_PROMPT.md with SECURITY_STANDARDS.md treated as mandatory throughout. No application code was written; no existing project file was modified; PROJECT_PLAN.md is untouched.
+> Status: **approved 2026-07-28**; decisions recorded in PROJECT_PLAN.md §17. Documents 04, 05 and 07 were promoted to docs/ARCHITECTURE.md, docs/VERTICAL_SLICE_TASKS.md and docs/SECURITY_REVIEW.md; the remaining files here are the review archive. Originally: Produced per CLAUDE_REVIEW_PROMPT.md with SECURITY_STANDARDS.md treated as mandatory throughout. No application code was written; no existing project file was modified; PROJECT_PLAN.md is untouched.
 
 ## Contents
 

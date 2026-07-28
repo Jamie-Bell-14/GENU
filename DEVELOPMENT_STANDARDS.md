@@ -10,13 +10,9 @@ The goal is to create a product that feels intentionally designed, technically r
 
 # Source of Truth
 
-Implementation should always follow this priority order:
-
-1. PROJECT_PLAN.md
-2. DEVELOPMENT_STANDARDS.md
-3. DESIGN.md
-4. CLAUDE.md
-5. Relevant project skills
+The canonical source-of-truth priority order is defined in CLAUDE.md §3 and
+applies to all implementation work. SECURITY_STANDARDS.md ranks above all
+product documents.
 
 If two documents appear to conflict:
 
@@ -138,10 +134,9 @@ For anything involving:
 * confidence scoring
 * contradictions
 
-Use:
-
-* discovery-engine
-* founder-philosophy
+No dedicated skill is installed for this area yet (a `discovery-engine` skill
+may be added later with explicit approval). Follow PROJECT_PLAN.md §5–§7 and
+§11.
 
 Optimise for:
 
@@ -166,9 +161,8 @@ For:
 * roadmap
 * customer journey
 
-Use:
-
-* founder-philosophy
+No dedicated skill is installed for this area yet (a `founder-philosophy`
+skill may be added later with explicit approval).
 
 Challenge assumptions.
 
@@ -189,9 +183,9 @@ For:
 * data integrity
 * storage
 
-Use:
-
-* supabase-standards
+No dedicated skill is installed for this area yet (a `supabase-standards`
+skill may be added later with explicit approval). Follow SECURITY_STANDARDS.md
+§7 and docs/ARCHITECTURE.md §6–§7.
 
 Prioritise:
 
@@ -213,9 +207,9 @@ For:
 * server actions
 * API routes
 
-Use:
-
-* react-architecture
+No dedicated skill is installed for this area yet (a `react-architecture`
+skill may be added later with explicit approval). Follow docs/ARCHITECTURE.md
+§1–§5.
 
 Prefer:
 
@@ -259,37 +253,9 @@ Never:
 
 # UI Acceptance Criteria
 
-Every new screen should satisfy all of the following:
-
-□ frontend-design applied
-
-□ ui-ux-pro-max review completed
-
-□ DESIGN.md followed
-
-□ Responsive layout complete
-
-□ Keyboard accessible
-
-□ Accessibility reviewed
-
-□ Loading state implemented
-
-□ Empty state implemented
-
-□ Error state implemented
-
-□ Success state implemented
-
-□ Visual hierarchy reviewed
-
-□ Typography reviewed
-
-□ Colour system consistent
-
-□ Mobile behaviour reviewed
-
-□ No generic AI SaaS styling
+The canonical checklist is docs/UI_ACCEPTANCE_CRITERIA.md. Every new screen
+must satisfy it before the task is complete, including application of the
+installed design skills (frontend-design, ui-ux-pro-max, shadcn).
 
 If any item cannot be completed, explain why before continuing.
 

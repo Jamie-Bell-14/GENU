@@ -1,9 +1,10 @@
-# Product Discovery Platform — Initial Build Plan
+# Product Discovery Platform — Build Plan
 
 ## Development Standards
 
 This project must be implemented in accordance with:
 
+- SECURITY_STANDARDS.md
 - DEVELOPMENT_STANDARDS.md
 - DESIGN.md
 - CLAUDE.md
@@ -13,7 +14,26 @@ These documents define how the product should be designed and engineered.
 
 PROJECT_PLAN.md defines what should be built.
 
+When documents conflict, the source-of-truth priority in CLAUDE.md §3 governs.
 
+## Design Source of Truth
+
+All interface work must follow:
+
+- DESIGN.md
+- DEVELOPMENT_STANDARDS.md
+- docs/UI_ACCEPTANCE_CRITERIA.md
+- Relevant installed Claude Code skills
+
+For UI and UX work, use:
+
+- frontend-design
+- ui-ux-pro-max
+- shadcn
+
+DESIGN.md defines this product's identity and takes precedence over generic examples supplied by any skill or component library.
+
+---
 
 ## 1. Product vision
 
@@ -40,9 +60,57 @@ It should maintain a growing model of the project and dynamically decide:
 
 The initial product ends at an exportable Claude Code build package.
 
+## Product Experience North Star
+
+The product should feel like an Intelligent Product Lab:
+
+A technically precise but creatively responsive environment where conversation drives an evolving visual model of the user's research, assumptions, decisions and product plan.
+
+The central product loop is:
+
+Conversation → analysis → research → visualisation → challenge → decision → project evolution
+
+The project—not the AI personality—is the primary focus.
+
+The interface must not resemble a generic chatbot, generic AI SaaS dashboard, form-based business-plan generator or decorative developer terminal.
+
+## Initial Build Strategy
+
+The first build will not attempt to implement every planned discovery path or planning capability.
+
+It will deliver one polished vertical journey that proves the complete interaction loop:
+
+1. User starts with a problem
+2. AI clarifies and challenges it
+3. User triggers research
+4. Observable AI activity shows real work
+5. Research appears as an evidence-led visual
+6. Evidence enters the project model
+7. A target customer or problem direction is refined
+8. AI proposes one connected change across project areas
+9. User reviews and approves the connected change
+10. Living documents update visibly
+11. Decision history records evidence, reasoning and attribution
+12. AI suggests a milestone checkpoint
+
+The vertical journey is specified in:
+
+- docs/VERTICAL_SLICE_SPEC.md
+
+The approved architecture and task breakdown are in:
+
+- docs/ARCHITECTURE.md
+- docs/VERTICAL_SLICE_TASKS.md
+
+Although functionality is intentionally narrow, the brand system and general UI/UX language must be implemented properly from the beginning.
+
+The first release should feel like a narrow version of the real product, not a broadly functional prototype with temporary styling.
+
 ---
 
-# 2. MVP objective
+# 2. Longer-term MVP objective (post-slice roadmap)
+
+> Roadmap section. The near-term commitment is the Initial Build Strategy above; this section describes the fuller MVP that follows a validated vertical slice.
 
 The MVP should allow a user to:
 
@@ -63,7 +131,9 @@ Direct coding-agent orchestration can be introduced after the planning experienc
 
 ---
 
-# 3. Initial user entry paths
+# 3. Initial user entry paths (post-slice roadmap)
+
+> Roadmap section. The vertical slice implements the problem-first path only; the remaining paths are deferred scope.
 
 When creating a project, ask:
 
@@ -146,76 +216,55 @@ Goal:
 
 Each project should maintain a structured project model.
 
-Suggested initial schema:
+The implemented schema is defined in docs/ARCHITECTURE.md §6. It uses a flexible
+`project_fields` design (area + key + value + state) that grows toward the full
+profile below without migration churn.
 
-Project
-- id
-- user_id
-- name
-- status
-- entry_path
-- created_at
-- updated_at
+Profile areas (grown incrementally; the slice implements problem, customer,
+value proposition and MVP scope):
 
-ProjectProfile
-- summary
-- vision
-- market
-- industry
-- customer_segments
-- primary_customer
-- user_roles
-- problem_statement
-- problem_evidence
-- existing_alternatives
-- proposed_solution
-- value_proposition
-- differentiation
-- assumptions
-- risks
-- constraints
-- business_model
-- pricing_hypotheses
-- acquisition_channels
-- success_metrics
-- compliance_requirements
-- technical_preferences
+- summary, vision, market, industry
+- customer_segments, primary_customer, user_roles
+- problem_statement, problem_evidence, existing_alternatives
+- proposed_solution, value_proposition, differentiation
+- assumptions, risks, constraints
+- business_model, pricing_hypotheses, acquisition_channels
+- success_metrics, compliance_requirements, technical_preferences
 - current_stage
 
-Each field should contain:
+Each field carries:
 
 - value
-- confidence_score
-- evidence
-- source_message_ids
+- origin — `user_stated | ai_inferred | researched`
+- support — `unexplored | hypothesis | some_evidence | credible | strongly_evidenced | contradicted`
+- evidence links
+- source message references
 - last_updated
-- status
 
-Possible statuses:
-
-- unknown
-- inferred
-- user_confirmed
-- researched
-- challenged
-- invalidated
+Confidence is qualitative. Numeric confidence scores are not stored or displayed
+anywhere: model-emitted numeric confidence is not calibrated and manufactures
+false precision (see DESIGN.md §2.3 and §12).
 
 Example:
 
+```json
 {
-  "field": "primary_customer",
+  "area": "customer",
+  "key": "primary_customer",
   "value": "Independent letting agents managing fewer than 500 properties",
-  "confidence": 0.72,
-  "status": "inferred",
-  "evidence": [
-    "User stated small agencies struggle to chase landlords"
-  ],
+  "origin": "ai_inferred",
+  "support": "hypothesis",
+  "evidence": ["User stated small agencies struggle to chase landlords"],
   "sourceMessageIds": ["message_123"]
 }
+```
 
 ---
 
-# 5. Dynamic discovery engine
+# 5. Dynamic discovery engine (post-slice roadmap)
+
+> Roadmap section. The slice implements the subset of this loop that the
+> problem-first journey exercises; enums remain extensible.
 
 Do not implement the conversation as a hardcoded sequence of questions.
 
@@ -227,7 +276,7 @@ For every user response:
 2. Extract new project information
 3. Update relevant project-model fields
 4. Identify contradictions
-5. Recalculate confidence scores
+5. Reassess qualitative support states
 6. Identify critical knowledge gaps
 7. Rank possible next actions
 8. Select the highest-value next question
@@ -256,7 +305,7 @@ The next question should optimise for information gain, not questionnaire comple
 
 ---
 
-# 6. Discovery state machine
+# 6. Discovery state machine (post-slice roadmap)
 
 Use flexible stages rather than a rigid wizard.
 
@@ -315,49 +364,27 @@ The AI should not:
 
 # 8. User interface
 
-## Main application layout
+The workspace layout, planning navigation, adaptive editorial conversation and
+living canvas are defined in DESIGN.md §3, which is the canonical description of
+the interface. Do not reintroduce the earlier three-panel "project model sidebar"
+layout.
 
-Use a three-panel desktop experience.
+Mobile layouts are deferred scope. When they arrive: conversation is primary,
+the project model opens as a separate sheet or tab, and three columns are never
+squeezed onto a small screen.
 
-Left sidebar:
-- Projects
-- Current stage
-- Discovery sections
-- Documents
-- Export
-
-Centre panel:
-- AI conversation
-- Question and answer interaction
-- Suggested answer prompts
-- Supporting explanations
-- File or link attachments later
-
-Right panel:
-- Live project model
-- Confidence indicators
-- Assumptions
-- Risks
-- Missing information
-- Contradictions
-
-On mobile:
-- Conversation is primary
-- Project model opens as a separate sheet or tab
-- Avoid squeezing three columns onto a small screen
-
-## Primary screens
+## Primary screens (slice subset marked ✦)
 
 1. Marketing landing page
-2. Sign-up and login
-3. Project dashboard
-4. New-project entry-path selection
-5. Discovery workspace
-6. Project-model review
+2. ✦ Sign-up and login (minimal)
+3. ✦ Project list (plain; dashboard design deferred)
+4. New-project entry-path selection (slice: problem-first opening only)
+5. ✦ Discovery workspace
+6. ✦ Project-model review (canvas + documents)
 7. MVP scope review
 8. Build-plan preview
 9. Export screen
-10. Account settings
+10. Account settings (slice: appearance settings only)
 
 ---
 
@@ -374,19 +401,8 @@ The experience should feel:
 - less like a chatbot
 - more like a product strategy workspace
 
-Avoid:
-
-- purple AI gradients
-- glowing orbs
-- excessive glassmorphism
-- generic rounded cards everywhere
-- large amounts of empty dashboard space
-- fake analytics
-- emoji icons
-- unnecessary animations
-- a conventional ChatGPT clone layout
-
-Create an explicit design direction before implementing screens.
+The canonical anti-pattern list is DESIGN.md §21. Every UI task is checked
+against docs/UI_ACCEPTANCE_CRITERIA.md.
 
 The product should have:
 
@@ -402,116 +418,92 @@ The product should have:
 
 ---
 
-# 10. Suggested technical stack
+# 10. Technical stack
 
 Frontend:
-- Next.js
-- TypeScript
-- Tailwind CSS
-- shadcn/ui primitives
-- React Hook Form
+- Next.js (App Router)
+- TypeScript (strict)
+- Tailwind CSS v4
+- shadcn/ui primitives (re-themed to semantic tokens)
+- React Hook Form (when forms need it)
 - Zod
-- TanStack Query where needed
+- TanStack Query
 
 Backend:
-- Next.js server actions or route handlers for MVP
+- Next.js route handlers (SSE) for streaming turns and research; Server Actions
+  only for small non-streaming mutations, treated as public endpoints
 - Supabase Postgres
-- Supabase Auth
-- Row-Level Security
-- Supabase Storage for future attachments
+- Supabase Auth (email + password, verified email, for the slice)
+- Row-Level Security on every table
+- Supabase Storage for future attachments (uploads disabled until
+  SECURITY_STANDARDS §12 controls exist)
 
 AI:
-- Anthropic API
-- Structured tool calls or validated JSON responses
-- Separate prompts for extraction, gap analysis and response generation
-- Store prompt versions
-- Log model usage and failures
+- Anthropic API (server-side only)
+- Structured tool calls with Zod-validated inputs
+- Versioned prompts; model usage and failures logged without message bodies
 - Never rely on free-form model output for database writes
 
 Testing:
-- Vitest
-- React Testing Library
-- Playwright
-- axe accessibility checks
+- Vitest, React Testing Library, Playwright, axe accessibility checks,
+  two-user RLS isolation suite in CI
 
 Deployment:
-- Vercel
-- Supabase
+- Vercel + Supabase (separate dev and production projects)
 
 Monitoring:
-- Sentry
-- PostHog or a privacy-conscious equivalent
+- Deferred for the slice: structured server logs with redaction only.
+  Sentry/PostHog may be added post-slice subject to SECURITY_STANDARDS §13/§15
+  (no private project content to third parties).
 
 ---
 
-# 11. AI architecture
+# 11. AI operation boundaries
 
-Do not use one giant prompt to manage the entire conversation.
+Do not use one giant prompt to manage the entire conversation, and never let
+model output write directly to the database.
 
-Create separate AI operations.
+The conversation engine sits behind the `DiscoveryEngine` interface
+(docs/ARCHITECTURE.md §8).
+
+**Slice implementation (approved):** one streaming Claude call per turn using
+tool-use (`update_project_model`, `propose_connected_change`, `start_research`,
+`suggest_checkpoint`). Application code validates every tool input, authorises
+it against the project, applies it through services and emits observable
+activity events. This preserves the operation boundaries below as *logical*
+boundaries while keeping turn latency and cost acceptable.
+
+The logical operations remain, and may become separate model calls post-slice
+if extraction quality demands it — the interface makes that swap invisible:
 
 ## Operation A: Extract project updates
 
-Input:
-- latest user message
-- relevant recent conversation
-- current project model
-
-Output:
-- proposed field updates
-- supporting evidence
-- inferred or confirmed status
-- confidence changes
-- contradictions
+Input: latest user message, relevant recent conversation, current project model.
+Output: proposed field updates, supporting evidence, origin, support-state
+changes, contradictions.
 
 ## Operation B: Evaluate project state
 
-Input:
-- full structured project model
-
-Output:
-- important gaps
-- weak assumptions
-- contradictions
-- current stage
-- possible next actions
-- ranked recommendation
+Input: full structured project model.
+Output: important gaps, weak assumptions, contradictions, current stage,
+possible next actions, ranked recommendation.
 
 ## Operation C: Generate conversational response
 
-Input:
-- user message
-- project updates
-- state evaluation
-- selected next action
-- tone and behavioural rules
+Input: user message, project updates, state evaluation, selected next action,
+tone and behavioural rules.
+Output: short reflection, optional challenge or observation, one primary next
+question, optional suggested answers.
 
-Output:
-- short reflection
-- optional challenge or observation
-- one primary next question
-- optional suggested answers
+## Operation D: Generate artefacts (post-slice)
 
-## Operation D: Generate artefacts
+Generate independently: opportunity summary, problem brief, customer profile,
+value proposition, assumptions register, risk register, MVP scope, user
+journeys, functional requirements, non-functional requirements, data model,
+technical architecture, implementation backlog, Claude Code handoff package.
 
-Generate independently:
-
-- opportunity summary
-- problem brief
-- customer profile
-- value proposition
-- assumptions register
-- risk register
-- MVP scope
-- user journeys
-- functional requirements
-- non-functional requirements
-- data model
-- technical architecture
-- implementation backlog
-- Claude Code handoff package
-
-Every generated artefact must reference the current project model rather than only the conversation transcript.
+Every generated artefact must reference the current project model rather than
+only the conversation transcript.
 
 ---
 
@@ -523,30 +515,35 @@ Never write directly to the database from unvalidated AI output.
 
 Example:
 
+```ts
 const ProjectUpdateSchema = z.object({
   updates: z.array(
     z.object({
-      field: z.string(),
+      area: z.enum(["problem", "customer", "value_proposition", "mvp_scope"]),
+      key: z.string().max(64),
       value: z.unknown(),
-      confidence: z.number().min(0).max(1),
-      status: z.enum([
-        "inferred",
-        "user_confirmed",
-        "challenged",
-        "invalidated"
+      origin: z.enum(["user_stated", "ai_inferred", "researched"]),
+      support: z.enum([
+        "unexplored",
+        "hypothesis",
+        "some_evidence",
+        "credible",
+        "strongly_evidenced",
+        "contradicted"
       ]),
-      evidence: z.array(z.string()),
-      sourceMessageIds: z.array(z.string())
+      evidence: z.array(z.string().max(500)).max(10),
+      sourceMessageIds: z.array(z.string()).max(20)
     })
-  ),
+  ).max(20),
   contradictions: z.array(
     z.object({
-      description: z.string(),
-      relatedFields: z.array(z.string()),
+      description: z.string().max(500),
+      relatedFields: z.array(z.string()).max(10),
       severity: z.enum(["low", "medium", "high"])
     })
-  )
-})
+  ).max(10)
+}).strict()
+```
 
 Invalid responses should be retried once with schema-error feedback.
 
@@ -557,10 +554,11 @@ If the second attempt fails:
 
 ---
 
-# 13. Claude Code export
+# 13. Claude Code export (post-slice roadmap)
 
 The exported build package should contain:
 
+```text
 /project-export
   README.md
   PRODUCT_VISION.md
@@ -580,6 +578,7 @@ The exported build package should contain:
     002-authentication.md
     003-database-schema.md
     004-core-workspace.md
+```
 
 Each task must contain:
 
@@ -609,169 +608,178 @@ The generated CLAUDE.md should tell Claude Code:
 
 # 14. Security and privacy
 
-Implement from the beginning:
+All security requirements are defined in SECURITY_STANDARDS.md, which is
+mandatory for every task. The security review of the approved architecture is
+in docs/SECURITY_REVIEW.md.
 
-- Row-Level Security on all user-owned records
-- encrypted transport
-- no API keys exposed to the browser
-- server-side AI requests
-- input length limits
-- rate limiting
-- output validation
-- audit logging for project-model changes
-- deletion of projects and associated data
-- export of user data
-- clear AI-generated-content indicators
-- protection against prompt injection in imported content
+Product-specific rules beyond the standards:
 
-Do not add external web research to the initial MVP unless sources can be clearly attributed.
+- external web research does not ship until sources can be clearly attributed
+  and the SECURITY_STANDARDS §11.3 controls exist; until then research is
+  mocked and every demonstration datum is schema-flagged and visibly labelled
+- AI-generated content is always visually distinguishable from user-stated
+  information and sourced evidence
+- observable AI activity derives only from real application events, never from
+  model narration
 
 ---
 
-# 15. MVP development phases
+# 15. Development phases
 
-## Phase 1: Foundation
+## Phase 0 — Repository Review, Architecture and Design Foundation ✔ complete
+
+Completed by the approved review (2026-07). Outcomes: docs/ARCHITECTURE.md,
+docs/VERTICAL_SLICE_TASKS.md, docs/SECURITY_REVIEW.md, and this merged plan.
+
+## Phase 1 — Foundation
 
 Build:
 
-- Next.js project
-- Supabase integration
-- authentication
-- database migrations
-- project creation
-- application shell
-- basic design tokens
-- testing setup
+- Next.js project, tooling, CI
+- Supabase integration and migrations
+- authentication (email + password, verified email)
+- projects table with tested RLS
+- design tokens and appearance infrastructure
+- re-themed base primitives
 
 Completion criteria:
 
-- user can register
-- user can log in
-- user can create a project
-- users cannot access each other's projects
+- user can register, log in and create a project
+- users cannot access each other's projects (proven by the CI RLS suite)
+- tokens power dark, light, density, text-size and reduced-motion
 - CI passes
 
-## Phase 2: Static discovery prototype
+Tasks T1–T4 in docs/VERTICAL_SLICE_TASKS.md.
+
+## Phase 2 — Design System and Workspace Shell
 
 Build:
 
-- entry-path selection
-- conversation interface
-- message persistence
-- initial project-model panel
-- mocked AI responses
+- dark-first application shell with stable planning navigation
+- resizable conversation/canvas workspace with focus modes
+- adaptive editorial conversation primitives
+- canvas object primitives and zoned living canvas
+- contextual action row and adaptive composer
+- observable-activity system with stop/steer
+- loading, empty, success and recoverable-failure patterns
 
-Purpose:
+Completion criteria:
 
-Validate the UX before introducing model complexity.
+- UI acceptance checklist passes
+- no hardcoded theme colours in components
+- keyboard navigation works for the shell
+- reduced motion produces an understandable experience
+- the workspace does not resemble a generic chatbot
 
-## Phase 3: Dynamic discovery engine
+Tasks T5–T8 in docs/VERTICAL_SLICE_TASKS.md.
 
-Build:
+## Phase 3 — First Complete Vertical Journey
 
-- Anthropic API integration
-- extraction operation
-- project-state evaluation
-- next-question selection
-- response generation
-- Zod validation
-- error recovery
-- confidence updates
+Implement the journey in docs/VERTICAL_SLICE_SPEC.md.
 
-## Phase 4: Project intelligence
+Priorities:
 
-Build:
+1. Coherent end-to-end interaction
+2. Trust and traceability
+3. Visible project evolution
+4. Strong UI/UX execution
+5. Replaceable service boundaries
 
-- assumptions register
-- contradiction detection
-- risk register
-- missing-information panel
-- editable project model
-- change history
-- stage progression
+Do not broaden scope until the complete journey works.
 
-## Phase 5: Plan generation
+Completion criteria:
 
-Build:
+- user can complete the full scenario
+- observable AI activity reflects real or explicitly mocked operations
+- claims distinguish source, inference and assumption
+- research can be steered
+- connected changes require approval
+- approved changes update all affected areas
+- decision history records reasoning and attribution
+- milestone checkpoint is suggested rather than forced
+- all important states have loading, failure and undo behaviour
 
-- product brief
-- MVP scope
-- requirements
-- architecture proposal
-- implementation backlog
-- generated CLAUDE.md
+Tasks T9–T15 in docs/VERTICAL_SLICE_TASKS.md.
 
-## Phase 6: Export
+## Post-slice roadmap phases
 
-Build:
+Sequenced after the vertical slice is validated; scope revisited at that point.
 
-- Markdown export
-- ZIP export
-- copy-for-Claude-Code
-- regenerated artefacts after project changes
-
-## Phase 7: Quality
-
-Complete:
-
-- responsive design
-- keyboard navigation
-- accessibility review
-- visual regression tests
-- security review
-- loading and empty states
-- failure and retry states
-- token usage monitoring
-- onboarding polish
+- **Dynamic discovery breadth** — remaining entry paths, full action-type set,
+  stage progression engine (old Phase 3–4 scope)
+- **Project intelligence** — full assumptions register, contradiction
+  detection, risk register, editable project model breadth
+- **Plan generation** — product brief, MVP scope, requirements, architecture
+  proposal, implementation backlog, generated CLAUDE.md
+- **Export** — Markdown export, ZIP export, copy-for-Claude-Code, regenerated
+  artefacts after project changes; deletion and export of user data ship here
+  at the latest (production gate)
+- **Quality breadth** — responsive design, full accessibility review, visual
+  regression tooling, token usage monitoring, onboarding polish
 
 ---
 
-# 16. Initial implementation order
+## Deferred Until After Vertical-Slice Validation
 
-Do not implement everything simultaneously.
+Canonical deferred-scope list. Referenced by CLAUDE.md, DESIGN.md and
+docs/VERTICAL_SLICE_SPEC.md.
 
-Work in this order:
+Do not implement during the initial vertical slice:
 
-1. Repository and tooling
-2. Design direction and design tokens
-3. Authentication
-4. Database and RLS
-5. Project dashboard
-6. New-project flow
-7. Static discovery workspace
-8. Project-model panel
-9. Message persistence
-10. AI extraction
-11. State evaluation
-12. Dynamic question generation
-13. Assumptions and contradictions
-14. Artefact generation
-15. Export
-16. Testing and accessibility
-17. Deployment
+- mobile layouts
+- founder-inspired guidance personalities
+- user-facing skills or methodology marketplace
+- fully open whiteboard editing, including free movement of canvas objects
+- all discovery entry paths beyond problem-first
+- real external web research (mocked, labelled research only)
+- file uploads
+- direct Claude Code execution
+- team collaboration
+- comprehensive billing
+- full commercial-planning workflow
+- full technical-planning workflow
+- generic analytics dashboard
+- third-party analytics/monitoring integrations
 
-After each item:
+Do not add dead buttons or decorative placeholders for deferred features.
+
+---
+
+# 16. Implementation order
+
+The implementation order is the task sequence T1–T15 in
+docs/VERTICAL_SLICE_TASKS.md.
+
+After each task:
 
 - run tests
 - update documentation
 - commit the completed work
 - confirm acceptance criteria
-- do not begin the next item if the current one is broken
+- do not begin the next task if the current one is broken
+
+### UI/UX acceptance for every UI task
+
+Every UI task must pass docs/UI_ACCEPTANCE_CRITERIA.md (canonical checklist)
+before it is complete.
 
 ---
 
-# 17. First Claude Code instruction
+# 17. Phase 0 record
 
-Read this entire plan before making changes.
+Phase 0 was defined by CLAUDE_REVIEW_PROMPT.md and completed by the approved
+review of 2026-07 (docs/review/ drafts, since promoted into docs/). Decisions
+taken at approval:
 
-First:
+1. Confidence is qualitative; no numeric confidence scores (§4, §12)
+2. Slice engine is one streaming tool-use call behind `DiscoveryEngine` (§11)
+3. Free canvas-object movement is deferred scope
+4. Slice authentication is minimal Supabase email + password
+5. References to not-yet-existing skills were removed from
+   DEVELOPMENT_STANDARDS.md
+6. CLAUDE.md §3 is the canonical source-of-truth order
+7. The slice ships on the system Helvetica stack; licensed display typography
+   (Helvetica Now + rounded companion) is a later decision
 
-1. Analyse the requirements
-2. Identify unresolved technical decisions
-3. Propose the repository structure
-4. Propose the database schema
-5. Propose the design direction
-6. Break Phase 1 into small implementation tasks
-7. Do not write application code yet
-
-Return the proposal for review before implementation begins.
+Still open (owner: Jamie): per-turn/monthly AI cost budget numbers and the
+named incident-response owner (SECURITY_STANDARDS §17, §20).

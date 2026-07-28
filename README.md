@@ -1,42 +1,61 @@
-# Intelligent Product Lab — Design Kit
+# PPM — Intelligent Product Lab
 
-This package turns the design-discovery decisions into repository-ready specifications.
+An AI-guided environment that helps a user move from an uncertain problem or
+product idea to an evidence-backed, implementation-ready product plan.
 
-## Files
+The central product loop:
 
-- `DESIGN.md` — canonical product and interface design direction.
-- `design-tokens.css` — starter semantic token system for dark and light themes.
-- `VERTICAL_SLICE_SPEC.md` — the first end-to-end product journey to design and build.
-- `PROJECT_PLAN_ADDENDUM.md` — sections to merge into the existing project plan.
-- `UI_ACCEPTANCE_CRITERIA.md` — reusable review checklist for screens and interactions.
-- `CLAUDE_REVIEW_PROMPT.md` — prompt for Claude Code to review the repository before implementation.
+> Conversation → analysis → research → visualisation → challenge → decision → project evolution
 
-## Recommended repository placement
+## Project documents
 
-```text
-/
-├── CLAUDE.md
-├── PROJECT_PLAN.md
-├── DEVELOPMENT_STANDARDS.md
-├── DESIGN.md
-├── docs/
-│   ├── VERTICAL_SLICE_SPEC.md
-│   └── UI_ACCEPTANCE_CRITERIA.md
-├── styles/
-│   └── design-tokens.css
-└── .claude/
-    └── skills/
-        ├── frontend-design/
-        ├── shadcn/
-        └── ui-ux-pro-max/
+| Document | Purpose |
+|---|---|
+| PROJECT_PLAN.md | What is being built (vision, build strategy, phases) |
+| SECURITY_STANDARDS.md | Mandatory security requirements for every task |
+| DEVELOPMENT_STANDARDS.md | Engineering and workflow standards |
+| DESIGN.md | Canonical design system and experience specification |
+| docs/ARCHITECTURE.md | Approved technical architecture |
+| docs/VERTICAL_SLICE_TASKS.md | Approved implementation task sequence (T1–T15) |
+| docs/VERTICAL_SLICE_SPEC.md | The first end-to-end product journey |
+| docs/UI_ACCEPTANCE_CRITERIA.md | Canonical UI review checklist |
+| docs/SECURITY_REVIEW.md | Security review of the approved architecture |
+| CLAUDE.md | Claude Code project instructions |
+| docs/review/ | Phase 0 review archive |
+
+## Development
+
+Node ≥ 22.
+
+```bash
+npm install        # install dependencies
+npm run dev        # start the dev server
+npm run build      # production build
+npm run typecheck  # strict TypeScript check
+npm run lint       # ESLint
+npm run format     # Prettier check (format:fix to write)
+npm test           # Vitest unit/component tests
+npm run test:e2e   # Playwright end-to-end tests
 ```
 
-`PROJECT_PLAN_ADDENDUM.md` is intentionally separate so Claude Code can compare it with the existing plan and merge it without overwriting earlier requirements.
+Playwright normally downloads its own browser. In sandboxed environments with a
+preinstalled Chromium, point the config at it instead:
 
-## Before implementation
+```bash
+PW_CHROMIUM_PATH=/opt/pw-browsers/chromium npm run test:e2e
+```
 
-1. Copy the files into the repository.
-2. Ask Claude Code to read all project documents and installed skills.
-3. Use the prompt in `CLAUDE_REVIEW_PROMPT.md`.
-4. Review Claude's proposed architecture and merge plan.
-5. Approve the plan before application code is written.
+## Status
+
+Phase 0 (review, architecture, plan merge) is complete. Implementation follows
+docs/VERTICAL_SLICE_TASKS.md in order; T1 (scaffold and tooling) is done.
+
+### Dependency audit note (reviewed 2026-07-28)
+
+`npm audit` reports high-severity findings in transitive, upstream-pinned
+dev/build-time dependencies only: `brace-expansion` (via the ESLint 9
+toolchain; glob-expansion DoS in a build tool), `postcss` (vendored inside
+Next.js), and optional `sharp` (image pipeline; the app serves no
+user-supplied images). No non-breaking fix exists yet; resolved by upstream
+`next`/`eslint` releases. Runtime application dependencies are unaffected.
+Reviewed per SECURITY_STANDARDS.md §16; re-check on each dependency update.

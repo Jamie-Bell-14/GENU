@@ -23,9 +23,13 @@ test("sends a message and streams an attributed response", async ({ page }) => {
   await composer.fill("Tenants and landlords argue about property condition.");
   await page.getByRole("button", { name: /send/i }).click();
 
-  await expect(page.getByText("You")).toBeVisible();
+  // Scoped to the conversation: the canvas also carries "You stated" labels.
+  const conversation = page.getByRole("region", { name: "Conversation" });
+  await expect(conversation.getByText("You", { exact: true })).toBeVisible();
   await expect(
-    page.getByText("Tenants and landlords argue about property condition."),
+    conversation.getByText(
+      "Tenants and landlords argue about property condition.",
+    ),
   ).toBeVisible();
   await expect(
     page.getByText(/This message is saved to the project/),

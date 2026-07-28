@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import type { Message } from "@/lib/ai/turn-events";
+import { loadCanvasObjects } from "@/lib/canvas/project-model-store";
 
 // Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
@@ -39,11 +40,14 @@ export default async function ProjectPage({
     createdAt: row.created_at as string,
   }));
 
+  const canvasObjects = await loadCanvasObjects(supabase, projectId);
+
   return (
     <WorkspaceShell
       projectId={project.id}
       projectName={project.name}
       initialMessages={messages}
+      canvasObjects={canvasObjects}
     />
   );
 }

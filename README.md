@@ -48,7 +48,7 @@ PW_CHROMIUM_PATH=/opt/pw-browsers/chromium npm run test:e2e
 ## Status
 
 Phase 0 (review, architecture, plan merge) is complete. Implementation follows
-docs/VERTICAL_SLICE_TASKS.md in order; T1–T6 are done: scaffold and tooling, design tokens and appearance infrastructure, re-themed base primitives (review at /dev/primitives in development), Supabase foundation (auth screens, projects with tested RLS), the workspace shell, and the conversation primitives (review at /dev/workspace in development). Connecting a real Supabase project requires the env vars in .env.example; RLS tests run with `DATABASE_URL=… npm run test:rls`.
+docs/VERTICAL_SLICE_TASKS.md in order; T1–T7 are done: scaffold and tooling, design tokens and appearance infrastructure, re-themed base primitives (review at /dev/primitives in development), Supabase foundation (auth screens, projects with tested RLS), the workspace shell, the conversation primitives, and the living canvas with its object grammar (review at /dev/workspace in development). Connecting a real Supabase project requires the env vars in .env.example; RLS tests run with `DATABASE_URL=… npm run test:rls`.
 
 ### Dependency audit note (reviewed 2026-07-28)
 

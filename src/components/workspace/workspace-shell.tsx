@@ -12,6 +12,8 @@ import {
   type WorkspaceLayout,
 } from "@/lib/workspace/layout";
 import { ConversationPane } from "@/components/conversation/conversation-pane";
+import { LivingCanvas } from "@/components/canvas/living-canvas";
+import type { CanvasObject } from "@/lib/canvas/model";
 import type { Message } from "@/lib/ai/turn-events";
 import { AppearanceSettings } from "./appearance-settings";
 import { PlanningNav } from "./planning-nav";
@@ -47,33 +49,16 @@ function SkipLinks() {
   );
 }
 
-function CanvasPlaceholder() {
-  return (
-    <section
-      id="canvas-pane"
-      aria-label="Living canvas"
-      tabIndex={-1}
-      className="bg-surface-canvas flex h-full flex-col items-center justify-center gap-1 p-8"
-    >
-      <p className="text-fg-secondary text-sm">
-        The living canvas will visualise the project here.
-      </p>
-      <p className="text-fg-tertiary text-xs">
-        Evidence, assumptions and decisions appear as the conversation
-        progresses.
-      </p>
-    </section>
-  );
-}
-
 export function WorkspaceShell({
   projectId,
   projectName,
   initialMessages = [],
+  canvasObjects = [],
 }: Readonly<{
   projectId: string;
   projectName: string;
   initialMessages?: Message[];
+  canvasObjects?: CanvasObject[];
 }>) {
   // Two-pass hydration, same pattern as the appearance provider: the server
   // renders the default layout, the client corrects from storage on mount.
@@ -193,7 +178,7 @@ export function WorkspaceShell({
                 defaultSize={100 - effective.split}
                 minSize={25}
               >
-                <CanvasPlaceholder />
+                <LivingCanvas objects={canvasObjects} />
               </ResizablePanel>
             </ResizablePanelGroup>
           ) : mode === "conversation" ? (
@@ -202,7 +187,7 @@ export function WorkspaceShell({
               initialMessages={initialMessages}
             />
           ) : (
-            <CanvasPlaceholder />
+            <LivingCanvas objects={canvasObjects} />
           )}
         </main>
       </div>

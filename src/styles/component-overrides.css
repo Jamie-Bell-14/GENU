@@ -1,0 +1,67 @@
+/*
+  Project overrides on the vendored shadcn base styles. Imported after
+  shadcn-base.css in the same @layer so these rules win by order. Rationale
+  lives with each rule; DESIGN.md §5.4–§5.5 governs colour semantics.
+*/
+@layer components {
+  /* Green means agency (DESIGN.md §5.4). A disabled control has none, so
+     every disabled button is neutral regardless of variant. */
+  .cn-button:disabled {
+    @apply bg-surface-tertiary text-fg-disabled border-transparent;
+  }
+  .cn-button-variant-ghost:disabled,
+  .cn-button-variant-link:disabled {
+    @apply bg-transparent;
+  }
+
+  /* In-progress action (aria-busy): visually between enabled primary and
+     neutral disabled — the action is still "owned" by the brand colour but
+     no longer clickable-looking. Order matters: this follows :disabled. */
+  .cn-button[aria-busy="true"] {
+    @apply bg-brand-subtle-strong text-brand;
+  }
+
+  /* Link-variant buttons are navigation, not primary actions; they must not
+     compete with green (DESIGN.md: green is not generic importance). */
+  .cn-button-variant-link {
+    @apply text-fg-secondary underline underline-offset-4 hover:text-fg-primary;
+  }
+
+  /* Destructive stays tinted rather than solid, but reads as a control:
+     visible red border, not just red text. */
+  .cn-button-variant-destructive {
+    @apply border-risk-edge;
+  }
+
+  /* Disabled fields: explicit colours instead of a 50% opacity wash, so the
+     state is legible in both themes. */
+  [data-slot="input"]:disabled,
+  [data-slot="input-group"]:has(input:disabled),
+  [data-slot="textarea"]:disabled {
+    @apply bg-surface-secondary border-edge-subtle text-fg-disabled placeholder:text-fg-disabled opacity-100;
+  }
+
+  /* Resizable divider: a real 6px hit area (the base style's 1px element is
+     a poor target and can measure zero mid-layout) drawing a visible 1px
+     line — perceivable at rest, stronger on hover, branded only while
+     actively dragged (agency). */
+  [data-slot="resizable-handle"] {
+    @apply w-1.5 shrink-0 bg-transparent;
+  }
+  [data-slot="resizable-handle"]::before {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--border-default);
+  }
+  [data-slot="resizable-handle"]:hover::before {
+    background: var(--border-strong);
+  }
+  [data-slot="resizable-handle"][data-separator="active"]::before,
+  [data-slot="resizable-handle"]:focus-visible::before {
+    background: var(--brand-primary);
+  }
+}

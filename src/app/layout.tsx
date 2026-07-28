@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { APPEARANCE_INIT_SCRIPT } from "@/lib/appearance/appearance";
+import { AppearanceProvider } from "@/lib/appearance/provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,8 +15,22 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" data-theme="dark" className="h-full antialiased">
-      <body className="flex min-h-full flex-col">{children}</body>
+    // data-* appearance attributes are stamped pre-hydration by the inline
+    // script below, so the server-rendered values differ intentionally.
+    <html
+      lang="en"
+      data-theme="dark"
+      data-density="comfortable"
+      data-text-size="default"
+      className="h-full antialiased"
+      suppressHydrationWarning
+    >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: APPEARANCE_INIT_SCRIPT }} />
+      </head>
+      <body className="flex min-h-full flex-col">
+        <AppearanceProvider>{children}</AppearanceProvider>
+      </body>
     </html>
   );
 }

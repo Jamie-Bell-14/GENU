@@ -48,7 +48,7 @@ PW_CHROMIUM_PATH=/opt/pw-browsers/chromium npm run test:e2e
 ## Status
 
 Phase 0 (review, architecture, plan merge) is complete. Implementation follows
-docs/VERTICAL_SLICE_TASKS.md in order; T1 (scaffold and tooling) and T2 (design tokens and appearance infrastructure) are done.
+docs/VERTICAL_SLICE_TASKS.md in order; T1 (scaffold and tooling), T2 (design tokens and appearance infrastructure) and T3 (re-themed base primitives) are done. Review the primitives at /dev/primitives in development.
 
 ### Dependency audit note (reviewed 2026-07-28)
 

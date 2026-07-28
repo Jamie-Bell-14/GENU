@@ -1,5 +1,61 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 @import "../styles/design-tokens.css";
+@import "../styles/shadcn-base.css";
+
+/* Custom utility used by the vendored base styles. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* `dark:` utilities follow the appearance attribute, not an OS media query. */
+@custom-variant dark (&:is([data-theme="dark"] *));
+
+/*
+  shadcn/ui semantic variables, defined once from the design tokens.
+  The tokens themselves flip with [data-theme], so no separate light/dark
+  blocks are needed here. Re-theme components by changing these mappings
+  or the tokens - never inside component files.
+*/
+:root {
+  --background: var(--surface-canvas);
+  --foreground: var(--text-primary);
+  --card: var(--surface-primary);
+  --card-foreground: var(--text-primary);
+  --popover: var(--surface-elevated);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--brand-primary);
+  --primary-foreground: var(--brand-on-primary);
+  --secondary: var(--surface-tertiary);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--surface-secondary);
+  --muted-foreground: var(--text-secondary);
+  --accent: var(--surface-tertiary);
+  --accent-foreground: var(--text-primary);
+  --destructive: var(--risk);
+  --destructive-foreground: var(--text-primary);
+  --border: var(--border-subtle);
+  --input: var(--border-default);
+  --ring: var(--border-focus);
+  --radius: var(--radius-md);
+  --chart-1: var(--series-1);
+  --chart-2: var(--series-2);
+  --chart-3: var(--series-3);
+  --chart-4: var(--series-4);
+  --chart-5: var(--series-5);
+  --sidebar: var(--surface-primary);
+  --sidebar-foreground: var(--text-primary);
+  --sidebar-primary: var(--brand-primary);
+  --sidebar-primary-foreground: var(--brand-on-primary);
+  --sidebar-accent: var(--surface-tertiary);
+  --sidebar-accent-foreground: var(--text-primary);
+  --sidebar-border: var(--border-subtle);
+  --sidebar-ring: var(--border-focus);
+}
 
 /*
   Map semantic design tokens (src/styles/design-tokens.css) to Tailwind v4
@@ -12,6 +68,40 @@
   /* Reset Tailwind's default palette so raw colours (bg-blue-500…) do not
      exist; only semantic tokens are available. */
   --color-*: initial;
+
+  /* shadcn component tokens (defined above from the design tokens) */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
 
   /* Brand */
   --color-brand: var(--brand-primary);
@@ -74,6 +164,10 @@
   --color-series-5: var(--series-5);
   --color-series-6: var(--series-6);
 
+  /* Neutral anchors (kept from the default palette for overlays/scrims) */
+  --color-white: #fff;
+  --color-black: #000;
+
   /* Typography */
   --font-interface: var(--font-interface);
   --font-display: var(--font-display);
@@ -88,14 +182,43 @@
   --text-2xl: var(--text-2xl);
   --text-3xl: var(--text-3xl);
 
-  /* Radius (drives rounded-xs … rounded-lg; default component radius is md) */
+  /*
+    Radius. DESIGN.md §7.1: 8px is the default component radius; 12px is
+    reserved for large floating panels. The vendored base styles use
+    rounded-lg on ordinary controls and rounded-xl on dialogs, so lg maps to
+    the 8px token and xl to the 12px token.
+  */
   --radius-xs: var(--radius-xs);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
-  --radius-lg: var(--radius-lg);
+  --radius-lg: var(--radius-md);
+  --radius-xl: var(--radius-lg);
 
   /* Elevation — floating surfaces only */
   --shadow-floating: var(--shadow-floating);
+
+  /* Component animations expected by the vendored base styles */
+  --animate-accordion-down: accordion-down var(--motion-standard)
+    var(--ease-standard);
+  --animate-accordion-up: accordion-up var(--motion-standard)
+    var(--ease-standard);
+
+  @keyframes accordion-down {
+    from {
+      height: 0;
+    }
+    to {
+      height: var(--radix-accordion-content-height);
+    }
+  }
+  @keyframes accordion-up {
+    from {
+      height: var(--radix-accordion-content-height);
+    }
+    to {
+      height: 0;
+    }
+  }
 }
 
 body {

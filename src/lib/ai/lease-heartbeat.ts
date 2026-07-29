@@ -1,5 +1,5 @@
 import type { LeaseRenewal } from "@/lib/services/trusted-writer";
-import { LEASE_HEARTBEAT_MS } from "./engine-config";
+import { LEASE_HEARTBEAT_MS, LEASE_TTL_SECONDS } from "./engine-config";
 
 /**
  * Keeps a running turn's lease alive while its worker is alive (issue #11).
@@ -83,14 +83,19 @@ export function startLeaseHeartbeat(
   const beat = async () => {
     if (stopped) return;
     /*
-      Ask for more than one interval's worth. A renewal that is late — a slow
-      query, a delayed timer — must not leave a gap in which the lease lapses
-      and the run is declared dead while the worker is mid-sentence.
+      Always the full lease TTL, never a multiple of the heartbeat interval.
+
+      Deriving the request from the interval couples two unrelated numbers and
+      gets the direction wrong: a minute-apart heartbeat asking for three
+      minutes would, against a fresh fifteen-minute lease, be asking for *less*
+      time than the run already has. Renewal is monotonic in SQL so it could
+      not shorten one, but a request that is routinely a no-op is a heartbeat
+      that has stopped meaning anything. Asking for the TTL every time means
+      each successful beat genuinely resets the full window.
     */
-    const seconds = Math.ceil((intervalMs * 3) / 1000);
     let outcome: LeaseRenewal;
     try {
-      outcome = await ports.renew(seconds);
+      outcome = await ports.renew(LEASE_TTL_SECONDS);
     } catch {
       outcome = "unavailable";
     }

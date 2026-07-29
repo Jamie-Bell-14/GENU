@@ -85,25 +85,38 @@ export async function recordActivity(input: {
  * that it is running must not open a stream and advertise controls that
  * cannot work. Returns whether the record exists.
  */
+export type OpenTurnOutcome =
+  | "opened"
+  /** Another turn is already running for this project (T9: concurrency). */
+  | "already_running"
+  /** The record could not be written; the turn must not start. */
+  | "unavailable";
+
 export async function openTurnRun(input: {
   projectId: string;
   turnId: string;
-}): Promise<boolean> {
+}): Promise<OpenTurnOutcome> {
   const client = trustedClient();
   if (!client) {
     reportUnavailable("turn_run");
-    return false;
+    return "unavailable";
   }
   const { error } = await client.from("turn_runs").insert({
     turn_id: input.turnId,
     project_id: input.projectId,
     state: "running",
   });
-  if (error) {
-    console.error("turn_run insert failed", { code: error.code });
-    return false;
-  }
-  return true;
+  if (!error) return "opened";
+  /*
+    A unique violation here is the one-running-turn-per-project index, not a
+    fault: a second tab or a duplicate request tried to start a turn while one
+    was already going. Distinguished from a genuine failure so the route can
+    answer "already running" rather than "could not start", which are different
+    things to a user with two tabs open.
+  */
+  if (error.code === "23505") return "already_running";
+  console.error("turn_run insert failed", { code: error.code });
+  return "unavailable";
 }
 
 /**

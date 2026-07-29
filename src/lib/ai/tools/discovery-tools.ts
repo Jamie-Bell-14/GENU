@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ACTION_IDS, type ActionId } from "@/lib/ai/contextual-actions";
 import {
   CanvasSceneSchema,
   RENDERER_KEYS,
@@ -30,12 +31,17 @@ export const PROJECT_AREAS = [
 ] as const;
 
 /**
- * Origins a *model* may claim. `user_stated` is absent on purpose: the model
- * does not get to assert that the person said something. Application code sets
- * that origin from the actual message, so the distinction between stated and
- * inferred cannot be erased by a tool call (docs/AI_SYSTEM.md §2).
+ * The only origin a model may propose.
+ *
+ * `user_stated` is excluded because the model does not get to assert that the
+ * person said something; `researched` is excluded because no research provider
+ * exists until T10, so a turn claiming it would be claiming evidence that
+ * cannot exist. Both are *provenance* claims rather than shapes, and provenance
+ * has to be derived from something traceable — see `quotedFromMessage` below,
+ * which is how a field becomes `user_stated` without the model being trusted
+ * to say so (docs/AI_SYSTEM.md §2, §10).
  */
-export const PROPOSABLE_ORIGINS = ["ai_inferred", "researched"] as const;
+export const PROPOSABLE_ORIGINS = ["ai_inferred"] as const;
 
 /**
  * Support states a model may claim without evidence in hand. The top two are
@@ -87,6 +93,18 @@ export const UpdateProjectModelSchema = z
             support: z.enum(PROPOSABLE_SUPPORT),
             /** Why this belongs in the project, in the user's terms. */
             rationale: safeText(500),
+            /**
+             * An exact excerpt from the current user message, when this field
+             * records something the person actually said.
+             *
+             * This is the traceable source that lets the *application* decide
+             * the origin is `user_stated`. The host checks the excerpt really
+             * is a substring of the message it received; a fabricated or
+             * paraphrased quote simply fails that check and the field stays
+             * `ai_inferred`. The model cannot set the origin either way — it
+             * can only offer evidence, which is then verified.
+             */
+            quotedFromMessage: z.string().trim().min(8).max(500).optional(),
           })
           .strict(),
       )
@@ -100,17 +118,17 @@ export type UpdateProjectModel = z.infer<typeof UpdateProjectModelSchema>;
 export const ASSUMPTION_IMPORTANCE = ["low", "material"] as const;
 
 /**
- * Assumptions carry `user_stated` as well as `ai_inferred`, unlike fields.
+ * An assumption's origin matters more than a field's — whose assumption it is
+ * changes what the product should do about it — which is exactly why the model
+ * does not get to declare it.
  *
- * An assumption's whole point is recording *whose* it is: "smaller agencies
- * probably feel this most" said by the person is a different object from the
- * same sentence inferred by the model, and collapsing them would defeat the
- * step (docs/VERTICAL_SLICE_SPEC.md Step 3). The risk that a turn misattributes
- * one is real but self-correcting: the origin is rendered on the canvas in the
- * same turn the person is reading, and the statement is theirs to edit.
+ * An earlier version of this schema let a turn set `origin: user_stated`
+ * directly, on the reasoning that a misattribution would be visible on the
+ * canvas and therefore self-correcting. That was too weak: "the user can spot
+ * it" is not a control, and an untrusted claim about what someone said is a
+ * provenance assertion however visible it is. Origin is now derived by the host
+ * from `quotedFromMessage`, on the same terms as a project field.
  */
-export const ASSUMPTION_ORIGINS = ["user_stated", "ai_inferred"] as const;
-
 export const RecordAssumptionSchema = z
   .object({
     statement: safeText(1_000),
@@ -118,7 +136,8 @@ export const RecordAssumptionSchema = z
     /** Credible alternative explanations, not strawmen (Step 3 acceptance). */
     alternatives: z.array(safeText(300)).max(5).default([]),
     importance: z.enum(ASSUMPTION_IMPORTANCE),
-    origin: z.enum(ASSUMPTION_ORIGINS),
+    /** Verified against the real message before it can mean `user_stated`. */
+    quotedFromMessage: z.string().trim().min(8).max(500).optional(),
   })
   .strict();
 
@@ -173,6 +192,20 @@ export const SuggestCheckpointSchema = z
 export type SuggestCheckpoint = z.infer<typeof SuggestCheckpointSchema>;
 
 /**
+ * Contextual actions, named by id from the application's catalogue.
+ *
+ * The model never supplies a label. A button is a promise about what the
+ * product does when pressed, and that promise is the application's to make.
+ */
+export const SuggestActionsSchema = z
+  .object({
+    actionIds: z.array(z.enum(ACTION_IDS as [ActionId, ...ActionId[]])).max(3),
+  })
+  .strict();
+
+export type SuggestActions = z.infer<typeof SuggestActionsSchema>;
+
+/**
  * The scene tool reuses `CanvasSceneSchema` verbatim rather than restating it.
  * A second definition would be a second place for the allow-list to drift from
  * the renderers that actually exist.
@@ -184,6 +217,7 @@ export type DiscoveryToolName =
   | "record_assumption"
   | "propose_connected_change"
   | "suggest_checkpoint"
+  | "suggest_actions"
   | "recommend_canvas_scene";
 
 /**
@@ -248,6 +282,11 @@ export const DISCOVERY_TOOLS = [
                 description:
                   "Why this belongs in the project, for the person to read.",
               },
+              quotedFromMessage: {
+                type: ["string", "null"],
+                description:
+                  "An exact, word-for-word excerpt from the person's message, if this records something they actually said. It is checked against the real message; paraphrase it and the field will be recorded as your inference instead. Omit it when the field is your own inference.",
+              },
             },
           },
         },
@@ -267,7 +306,7 @@ export const DISCOVERY_TOOLS = [
         "whyItMatters",
         "alternatives",
         "importance",
-        "origin",
+        "quotedFromMessage",
       ],
       properties: {
         statement: { type: "string" },
@@ -278,11 +317,10 @@ export const DISCOVERY_TOOLS = [
           items: { type: "string" },
         },
         importance: { type: "string", enum: [...ASSUMPTION_IMPORTANCE] },
-        origin: {
-          type: "string",
-          enum: [...ASSUMPTION_ORIGINS],
+        quotedFromMessage: {
+          type: ["string", "null"],
           description:
-            "user_stated only when the person actually said it; ai_inferred when you drew it.",
+            "An exact, word-for-word excerpt from the person's message, if the assumption is theirs rather than yours. It is checked against the real message. Omit it when the assumption is your own inference.",
         },
       },
     },
@@ -335,6 +373,24 @@ export const DISCOVERY_TOOLS = [
         name: { type: "string" },
         reason: { type: "string", enum: [...SUGGEST_CHECKPOINT_REASONS] },
         summary: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "suggest_actions",
+    description:
+      "Offer up to three next actions, by id, from the list this tool accepts. You cannot write the button text — the application owns it. Offer an action only when it genuinely follows from what you just said; an empty list is a valid answer.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["actionIds"],
+      properties: {
+        actionIds: {
+          type: "array",
+          maxItems: 3,
+          items: { type: "string", enum: [...ACTION_IDS] },
+        },
       },
     },
   },
@@ -417,6 +473,10 @@ export function validateToolInput(
     }
     case "record_assumption": {
       const result = parse(RecordAssumptionSchema, input);
+      return result.ok ? { ok: true, tool: name, value: result.value } : result;
+    }
+    case "suggest_actions": {
+      const result = parse(SuggestActionsSchema, input);
       return result.ok ? { ok: true, tool: name, value: result.value } : result;
     }
     case "propose_connected_change": {

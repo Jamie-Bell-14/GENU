@@ -17,19 +17,34 @@
 export const DISCOVERY_MODEL = "claude-opus-5";
 
 /**
- * Output ceiling for one turn, covering *everything* the model generates.
+ * Output ceiling for a single provider request, covering everything the model
+ * generates on that request — thinking is on by default on this model and is
+ * bounded by the same allowance as the visible answer, so a limit sized only
+ * for the prose a user reads truncates the answer mid-sentence.
  *
- * On this model thinking is on by default and is billed and bounded inside the
- * same allowance as the visible answer, so a limit sized only for the prose a
- * user reads truncates the answer mid-sentence. 8k leaves room for reasoning,
- * one focused reply and a tool call.
+ * This is *not* the turn's budget. A turn may make several requests, so a
+ * per-request ceiling bounds none of them collectively; see
+ * `TURN_OUTPUT_ALLOWANCE`.
  */
-export const MAX_OUTPUT_TOKENS = 8_000;
+export const MAX_REQUEST_OUTPUT_TOKENS = 8_000;
+
+/**
+ * Output the whole turn may generate, across every request it makes.
+ *
+ * The engine tracks what it has spent and passes only the remainder to each
+ * request, so the advertised bound is the real one. Without this, "8,000 tokens
+ * per turn" would mean "8,000 tokens per request, six times over".
+ */
+export const TURN_OUTPUT_ALLOWANCE = 24_000;
 
 /**
  * Input budget for assembled context. Not a provider parameter — the
  * application enforces it while assembling, which is the point: it forces real
  * windowing instead of sending the whole project (§11.5, minimum necessary).
+ *
+ * The system prompt, tool definitions and the accumulating tool transcript are
+ * counted against the turn's input accounting too, so the figure reported for
+ * a turn is what was actually sent rather than the first snapshot only.
  */
 export const MAX_CONTEXT_TOKENS = 30_000;
 
@@ -42,12 +57,20 @@ export const MAX_CONTEXT_TOKENS = 30_000;
 export const DISCOVERY_EFFORT = "medium" as const;
 
 /**
- * Tool calls one turn may make. The approved design is a single streaming
- * tool-use call (PROJECT_PLAN §17, decision 2); this leaves room for a retry
- * and a scene recommendation alongside it, and stops a confused-deputy loop
- * calling a tool indefinitely.
+ * Provider round-trips one turn may make. The approved design is a single
+ * streaming tool-use call (PROJECT_PLAN §17, decision 2); this leaves room for
+ * a schema retry and a direction step alongside it.
  */
-export const MAX_TOOL_STEPS = 5;
+export const MAX_PROVIDER_ROUNDS = 5;
+
+/**
+ * Tool calls one turn may make, counted per *block* rather than per round.
+ *
+ * A round limit alone bounds nothing: a single response may contain many
+ * parallel `tool_use` blocks, so a turn could make twenty tool calls inside
+ * one "step". This is the cap that actually holds.
+ */
+export const MAX_TOOL_CALLS = 6;
 
 /**
  * Schema-guided retries for invalid structured output (docs/AI_SYSTEM.md §5).
@@ -56,12 +79,33 @@ export const MAX_TOOL_STEPS = 5;
  */
 export const MAX_SCHEMA_RETRIES = 1;
 
-/** How long a single turn may run before it is abandoned. */
-export const TURN_TIMEOUT_MS = 120_000;
+/**
+ * How long a turn's lease runs from each renewal.
+ *
+ * Matches the database default so a renewed lease and a fresh one mean the
+ * same thing. Renewal is monotonic in SQL — it can only move an expiry later —
+ * so this value cannot shorten a lease even if it were reduced here.
+ */
+export const LEASE_TTL_SECONDS = 900;
 
 /**
- * Interval between lease renewals for a running turn (see issue #11). Well
- * inside the 15-minute lease so several consecutive heartbeats can fail
- * without the run being declared dead while its worker is alive.
+ * Interval between lease renewals. Well inside `LEASE_TTL_SECONDS`, so several
+ * consecutive heartbeats can fail without the run being declared dead while
+ * its worker is alive.
  */
 export const LEASE_HEARTBEAT_MS = 60_000;
+
+/**
+ * How long a single turn may run before it is abandoned.
+ *
+ * Deliberately longer than `LEASE_TTL_SECONDS`. The point of the heartbeat
+ * (issue #11) is that a healthy turn outliving one lease period stays
+ * `running` because something keeps saying so — and that invariant is
+ * unreachable if the engine gives up first, which would make the lease's fixed
+ * expiry the real limit and the heartbeat decoration.
+ *
+ * A turn this long is the *ceiling*, not the expectation: the user can stop at
+ * any point, the per-turn output allowance bounds cost independently, and a
+ * dead worker is detected by the lease rather than by this timer.
+ */
+export const TURN_TIMEOUT_MS = 20 * 60_000;

@@ -29,7 +29,8 @@ function context(patch: Partial<ProjectContext> = {}): ProjectContext {
   return {
     fields: [],
     recentMessages: [],
-    objectIds: [],
+    objects: [],
+    relationshipIds: [],
     focalObjectId: null,
     ...patch,
   };
@@ -100,5 +101,61 @@ describe("assembleContext", () => {
       1_000,
     );
     expect(assembled.approximateTokens).toBeLessThanOrEqual(1_000);
+  });
+});
+
+/*
+  The scene inventory (finding 1). Ids have to be sent to be nameable — a model
+  handed no inventory can only guess a UUID, and every guess is rejected as an
+  object outside the project.
+*/
+describe("scene inventory", () => {
+  const object = (id: string, label: string) => ({
+    id,
+    kind: "concept",
+    label,
+  });
+
+  it("names the ids, kinds and labels a scene may use", () => {
+    const assembled = assembleContext(
+      context({
+        objects: [object("obj-1", "Deposit disputes")],
+        relationshipIds: ["rel-1"],
+        focalObjectId: "obj-1",
+      }),
+    );
+    expect(assembled.snapshot).toContain("obj-1");
+    expect(assembled.snapshot).toContain("Deposit disputes");
+    expect(assembled.snapshot).toContain("rel-1");
+    expect(assembled.snapshot).toContain("currently focal");
+    expect(assembled.snapshot).toContain("Do not invent an id");
+  });
+
+  it("says plainly when there are no relationships to name", () => {
+    const assembled = assembleContext(
+      context({ objects: [object("obj-1", "A concept")] }),
+    );
+    expect(assembled.snapshot).toContain("no relationships");
+  });
+
+  it("keeps the focal object even when the inventory is trimmed", () => {
+    /*
+      The focal object leads, so the budget can never trim it away. A scene
+      whose focal id was not in the inventory is rejected outright, which would
+      look like a broken validator rather than a missing line of context.
+    */
+    const many = Array.from({ length: 200 }, (_, index) =>
+      object(`obj-${index}`, `Object ${index}`),
+    );
+    const assembled = assembleContext(
+      context({ objects: many, focalObjectId: "obj-150" }),
+      300,
+    );
+    expect(assembled.snapshot).toContain("obj-150");
+    expect(assembled.droppedObjects).toBeGreaterThan(0);
+  });
+
+  it("sends no inventory section for a project with no objects", () => {
+    expect(assembleContext(context()).snapshot).toBe("");
   });
 });

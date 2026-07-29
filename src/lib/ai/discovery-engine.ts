@@ -35,6 +35,18 @@ export interface TurnResult {
 }
 
 /**
+ * A validated operation waiting for the turn to succeed.
+ *
+ * `candidate` stays `unknown`: shape was checked to decide whether to retry,
+ * which is not the same as being authorised, and the host re-parses it before
+ * anything is written.
+ */
+export interface StagedOperation {
+  name: string;
+  candidate: unknown;
+}
+
+/**
  * What an engine may do to the outside world. Deliberately narrow:
  *
  * - `emit` accepts `EngineEvent`, which excludes `scene_recommended` and
@@ -60,13 +72,28 @@ export interface TurnHooks {
   ): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
   /**
-   * A structured operation the engine proposes — a field update, an
-   * assumption, a connected change, a checkpoint. Same posture as
-   * `recommendScene`: the candidate crosses as `unknown`, the application
-   * validates and authorises it against project rows, and the outcome is not
-   * reported back, so an engine cannot learn its way past the boundary.
+   * Commits every operation a successful turn produced, as one unit.
+   *
+   * Deliberately not one call per operation as they arrive. A turn that writes
+   * as it goes and then fails leaves the project half-changed while telling the
+   * user nothing changed — so operations are staged by the engine and handed
+   * over only once the turn has actually reached a result. A turn that fails
+   * for any reason never calls this, and nothing it staged is written.
+   *
+   * Same posture as `recommendScene` otherwise: candidates cross as `unknown`,
+   * the application validates and authorises each against project rows, and no
+   * outcome is reported back.
    */
-  proposeOperation(name: string, candidate: unknown): Promise<void>;
+  commitOperations(operations: readonly StagedOperation[]): Promise<void>;
+  /**
+   * Announces that the model has actually consumed a direction.
+   *
+   * Separate from `takeDirection` because taking a note and using it are
+   * different events, and only the second is `direction_applied`. Announcing on
+   * the first is what let the interface claim a direction had been applied when
+   * the turn had no step left to use it.
+   */
+  directionApplied(note: string): void;
   /**
    * Direction the user added since the last check. `final` says this is the
    * engine's last chance to use one — the host seals the steering window on
@@ -185,7 +212,16 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
       const acknowledgement = `\n\nYou added: “${truncate(direction, 120)}”. It is recorded against this turn and will be used once discovery analysis is connected.`;
       const streamed = await hooks.step(
         "considering_direction",
-        () => this.stream(acknowledgement, hooks, signal),
+        async () => {
+          /*
+            The scripted engine really does pick the direction up: it reads it
+            at its step boundary and answers with it. Announcing that here —
+            rather than when the note merely arrived — keeps the meaning of
+            `direction_applied` the same for both engines.
+          */
+          hooks.directionApplied(direction);
+          return this.stream(acknowledgement, hooks, signal);
+        },
         // A turn stopped part-way through the acknowledgement did not take the
         // direction into account, whatever the label would otherwise say.
         (delivered) => (delivered ? "succeeded" : "failed"),

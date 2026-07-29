@@ -35,11 +35,23 @@ async function impersonate(userId: string) {
   await db.query("set role authenticated");
 }
 
-/** Opens a run, optionally with a lease that has already lapsed. */
+/**
+ * Opens a run, optionally with a lease that has already lapsed.
+ *
+ * Closes whatever the previous test left running first: only one running turn
+ * per project is now permitted, which is the point of the constraint tested
+ * below — so a helper that ignored it would make every later test fail on the
+ * index rather than on what it is checking.
+ */
 async function openRun(options: { expired?: boolean } = {}) {
   turnSeq += 1;
   const turnId = `55555555-0000-4000-8000-${String(turnSeq).padStart(12, "0")}`;
   await asTrustedWriter();
+  await db.query(
+    `update turn_runs set state = 'completed', ended_at = now()
+     where project_id = $1 and state = 'running'`,
+    [projectA],
+  );
   await db.query(
     `insert into turn_runs (turn_id, project_id, lease_expires_at)
      values ($1, $2, now() + ($3 || ' minutes')::interval)`,
@@ -220,6 +232,84 @@ describe.skipIf(skip)("renew_turn_lease", () => {
       [turnId],
     );
     expect(second.rowCount).toBe(0);
+  });
+
+  it("cannot shorten a fresh lease with a small renewal request", async () => {
+    /*
+      The regression this exists to prevent. `lease_expires_at = now() +
+      extension` is a *replacement*: a 60-second heartbeat against a fresh
+      15-minute lease cut it to 60 seconds, so the mechanism meant to keep long
+      turns alive was the thing killing them. Renewal must be monotonic.
+    */
+    const turnId = await openRun();
+    const before = await leaseOf(turnId);
+    expect(await renew(turnId, 60)).toBe("renewed");
+    const after = await leaseOf(turnId);
+    expect(after.lease_expires_at.getTime()).toBeGreaterThanOrEqual(
+      before.lease_expires_at.getTime(),
+    );
+    // Still roughly the original quarter of an hour, not a minute.
+    const minutes = (after.lease_expires_at.getTime() - Date.now()) / 60_000;
+    expect(minutes).toBeGreaterThan(10);
+  });
+
+  it("moves a lease later when the request genuinely extends it", async () => {
+    const turnId = await openRun();
+    const before = await leaseOf(turnId);
+    expect(await renew(turnId, 900)).toBe("renewed");
+    const after = await leaseOf(turnId);
+    expect(after.lease_expires_at.getTime()).toBeGreaterThan(
+      before.lease_expires_at.getTime(),
+    );
+  });
+});
+
+describe.skipIf(skip)("one running turn per project", () => {
+  it("refuses a second running turn for the same project", async () => {
+    await openRun();
+    await asTrustedWriter();
+    // A raw insert, deliberately: this is what a second tab does.
+    /*
+      T9 lists concurrent turns as an edge case, and a React guard protects one
+      mounted runtime only. Two tabs, or two direct requests, each insert their
+      own row — so the constraint lives in the database, evaluated inside the
+      insert's own transaction.
+    */
+    await expect(
+      db.query(
+        `insert into turn_runs (turn_id, project_id)
+         values ('66666666-0000-4000-8000-000000000001', $1)`,
+        [projectA],
+      ),
+    ).rejects.toThrow(/duplicate key value|unique constraint/i);
+  });
+
+  it("permits the next turn once the previous one has ended", async () => {
+    const first = await openRun();
+    await asTrustedWriter();
+    await db.query(
+      "update turn_runs set state = 'completed', ended_at = now() where turn_id = $1",
+      [first],
+    );
+    // The index is partial, so a finished run does not occupy the slot.
+    await expect(openRun()).resolves.toBeTruthy();
+  });
+
+  it("does not block a different project's turn", async () => {
+    await impersonate(USER_B);
+    const { rows } = await db.query(
+      "insert into projects (owner_id, name) values (auth.uid(), 'B') returning id",
+    );
+    const projectB = rows[0].id as string;
+
+    await asTrustedWriter();
+    await expect(
+      db.query(
+        `insert into turn_runs (turn_id, project_id)
+         values ('77777777-0000-4000-8000-000000000001', $1)`,
+        [projectB],
+      ),
+    ).resolves.toBeTruthy();
   });
 
   it("caps how far one call may extend a lease", async () => {

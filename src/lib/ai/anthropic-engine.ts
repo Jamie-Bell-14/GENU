@@ -1,7 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { assembleContext, type ProjectContext } from "./context";
+import {
+  approximateTokens,
+  assembleContext,
+  type ProjectContext,
+} from "./context";
+import { resolveActions } from "./contextual-actions";
 import type {
   DiscoveryEngine,
+  StagedOperation,
   TurnHooks,
   TurnInput,
   TurnResult,
@@ -9,9 +15,12 @@ import type {
 import {
   DISCOVERY_EFFORT,
   DISCOVERY_MODEL,
-  MAX_OUTPUT_TOKENS,
+  MAX_CONTEXT_TOKENS,
+  MAX_PROVIDER_ROUNDS,
+  MAX_REQUEST_OUTPUT_TOKENS,
   MAX_SCHEMA_RETRIES,
-  MAX_TOOL_STEPS,
+  MAX_TOOL_CALLS,
+  TURN_OUTPUT_ALLOWANCE,
   TURN_TIMEOUT_MS,
 } from "./engine-config";
 import {
@@ -54,7 +63,10 @@ export interface TurnDiagnostics {
   promptVersion: string;
   model: string;
   turnId: string;
-  toolSteps: number;
+  /** Tool blocks actually executed, which is what the cap counts. */
+  toolCalls: number;
+  /** Provider round-trips the turn made. */
+  providerRounds: number;
   schemaRetries: number;
   inputTokens: number;
   outputTokens: number;
@@ -66,14 +78,24 @@ export interface TurnDiagnostics {
 /**
  * Sent back for every accepted tool call.
  *
- * It says what is true — the proposal has been submitted — and no more.
- * Reporting acceptance would let a turn discover which shapes survive
- * validation and adapt towards them, and reporting a fabricated success would
- * invite the model to tell the person their project was updated when it was
- * not. Silence about the outcome is the only answer that is neither.
+ * It says what is true — the proposal is staged and will be considered when the
+ * turn finishes — and no more. Reporting acceptance would let a turn discover
+ * which shapes survive validation and adapt towards them, and reporting a
+ * fabricated success would invite the model to tell the person their project
+ * was updated when it was not. Silence about the outcome is the only answer
+ * that is neither.
  */
-const SUBMITTED =
-  "Submitted. The application validates and authorises proposals; the outcome is not reported back to you. Do not tell the person it has been applied.";
+const STAGED =
+  "Recorded against this turn. The application validates and authorises proposals when the turn completes; the outcome is not reported back to you. Do not tell the person it has been applied.";
+
+/**
+ * Sent for a well-formed block in a batch that also contained a malformed one.
+ * The batch is refused whole, so this block did not run — and saying so is what
+ * stops the retry re-sending only the broken member and assuming the rest
+ * landed.
+ */
+const NOT_RUN =
+  "Not run: another tool call in the same response was invalid, so the whole batch was discarded. Send the complete set again.";
 
 export class AnthropicDiscoveryEngine implements DiscoveryEngine {
   /** Direction is picked up at tool-step boundaries, so this is the promise. */
@@ -96,7 +118,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     signal?: AbortSignal,
   ): Promise<TurnResult> {
     const startedAt = Date.now();
-    let toolSteps = 0;
+    let toolCalls = 0;
+    let providerRounds = 0;
     let schemaRetries = 0;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -109,7 +132,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         promptVersion: DISCOVERY_PROMPT_VERSION,
         model: DISCOVERY_MODEL,
         turnId: input.turnId,
-        toolSteps,
+        toolCalls,
+        providerRounds,
         schemaRetries,
         inputTokens,
         outputTokens,
@@ -154,38 +178,96 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     const context = this.options.buildContext
       ? this.options.buildContext(input)
       : emptyContext(input);
-    const assembled = assembleContext(context);
 
-    const messages: Anthropic.MessageParam[] = [
-      {
-        role: "user",
-        content: [
-          assembled.snapshot,
-          asUntrusted("user_message", input.userMessage),
-        ]
-          .filter(Boolean)
-          .join("\n\n"),
-      },
-    ];
-    for (const message of assembled.messages) {
-      // Prior turns go in ahead of the current one, oldest first.
-      messages.unshift({ role: message.role, content: message.content });
-    }
+    /*
+      The system prompt and tool definitions are sent on every request, so they
+      are part of what a turn costs. Charging the context budget only for the
+      snapshot and recent messages would understate the input by a fixed amount
+      that happens to be large.
+    */
+    const overhead =
+      approximateTokens(DISCOVERY_SYSTEM_PROMPT) +
+      approximateTokens(JSON.stringify(DISCOVERY_TOOLS));
+    const assembled = assembleContext(
+      context,
+      Math.max(0, MAX_CONTEXT_TOKENS - overhead),
+    );
+
+    /*
+      One chronological sequence: history oldest → newest, then this turn's
+      message. Building it by unshifting inside a forward loop reversed the
+      history, so the provider received the newest exchange first and the
+      oldest last — a transcript that reads as though the conversation ran
+      backwards, and one that can place two same-role messages side by side.
+    */
+    const messages: Anthropic.MessageParam[] = assembled.messages.map(
+      (message) => ({ role: message.role, content: message.content }),
+    );
+    messages.push({
+      role: "user",
+      content: [
+        assembled.snapshot,
+        asUntrusted("user_message", input.userMessage),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    });
 
     let assistantText = "";
     let blockOpened = false;
+    let directionConsumed = false;
 
-    for (let step = 0; step <= MAX_TOOL_STEPS; step += 1) {
+    /*
+      Project-truth operations are *staged*, not applied as they arrive.
+
+      Applying inside the loop means a turn that later fails has already
+      written — and the failure messages then say "nothing in your project was
+      changed" while a field sits changed in the database. Canonical rule
+      (docs/AI_SYSTEM.md §5): a second schema failure produces no partial
+      write. Staging is what makes that true for every failure path, not just
+      the schema one.
+    */
+    const staged: StagedOperation[] = [];
+
+    const emitText = (text: string) => {
+      if (!blockOpened) {
+        hooks.emit({ type: "block", kind: "plain" });
+        blockOpened = true;
+      }
+      hooks.emit({ type: "assistant_delta", text });
+      // Appended as well as emitted, so the persisted answer and the answer the
+      // user watched arrive are the same text after a reload.
+      assistantText += text;
+    };
+
+    /** Commits staged writes, then reports the turn as completed. */
+    const complete = async (): Promise<TurnResult> => {
+      if (staged.length) await hooks.commitOperations(staged);
+      report("completed");
+      return { assistantText };
+    };
+
+    for (let round = 0; round < MAX_PROVIDER_ROUNDS; round += 1) {
+      providerRounds += 1;
       if (combined.aborted) {
         return signal?.aborted ? interrupted() : fail(TIMED_OUT);
       }
+
+      /*
+        The turn's own output allowance, not the request's. `max_tokens` is a
+        per-request ceiling, so sending the same value on every request bounds
+        each one and the turn not at all — six rounds of 8,000 is 48,000. Only
+        what is left is offered to the next request.
+      */
+      const remaining = TURN_OUTPUT_ALLOWANCE - outputTokens;
+      if (remaining <= 0) return fail(OUTPUT_EXHAUSTED);
 
       let final: Anthropic.Message;
       try {
         const stream = this.client.messages.stream(
           {
             model: DISCOVERY_MODEL,
-            max_tokens: MAX_OUTPUT_TOKENS,
+            max_tokens: Math.min(MAX_REQUEST_OUTPUT_TOKENS, remaining),
             output_config: { effort: DISCOVERY_EFFORT },
             system: DISCOVERY_SYSTEM_PROMPT,
             tools: DISCOVERY_TOOLS as unknown as Anthropic.Tool[],
@@ -205,12 +287,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             event.delta.type === "text_delta" &&
             event.delta.text
           ) {
-            if (!blockOpened) {
-              hooks.emit({ type: "block", kind: "plain" });
-              blockOpened = true;
-            }
-            hooks.emit({ type: "assistant_delta", text: event.delta.text });
-            assistantText += event.delta.text;
+            emitText(event.delta.text);
           }
         }
         final = await stream.finalMessage();
@@ -238,78 +315,113 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         });
       }
 
+      /*
+        The response was cut off at the ceiling. Previously this fell through as
+        a normal completion, which persisted a sentence that stops mid-word and
+        called it the answer. A truncated response is a bounded failure: the
+        partial text is discarded along with everything staged.
+      */
+      if (final.stop_reason === "max_tokens") {
+        return fail({
+          code: "model_output_invalid",
+          userMessage:
+            "The response grew too long and was cut off, so it has not been kept. Nothing in your project was changed — try asking for one thing at a time.",
+          recoverable: true,
+        });
+      }
+
       const toolUses = final.content.filter(
         (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
       );
 
       if (final.stop_reason !== "tool_use" || toolUses.length === 0) {
-        // The turn is over. This is the engine's last direction boundary, so
-        // the host seals the steering window here; a failure to seal is not
-        // swallowed, because the window would stay open with no step left.
+        /*
+          The model has finished answering. This is the final direction
+          boundary, so the host seals the steering window here; a failure to
+          seal is not swallowed, because the window would stay open with no
+          step left to consume anything.
+        */
         const direction = await hooks.takeDirection({ final: true });
-        if (direction) {
+        if (!direction) return complete();
+
+        /*
+          A direction that arrives here has not been used yet, and saying
+          otherwise was the defect: the host used to announce
+          `direction_applied` the moment a note existed, while the engine only
+          promised the *next* turn would consider it — a promise nothing in the
+          system kept. So the turn spends one more round actually giving it to
+          the model, and only then is it applied.
+        */
+        const roundsLeft = MAX_PROVIDER_ROUNDS - (round + 1);
+        const budgetLeft = TURN_OUTPUT_ALLOWANCE - outputTokens > 0;
+        if (roundsLeft > 0 && budgetLeft) {
           await hooks.step("considering_direction", async () => {
-            hooks.emit({
-              type: "assistant_delta",
-              text: `\n\nYou added: “${truncate(direction)}”. It arrived after this answer was already being written, so the next turn will take it into account.`,
+            messages.push({ role: "assistant", content: final.content });
+            messages.push({
+              role: "user",
+              content: asUntrusted("user_message", direction),
             });
+            hooks.directionApplied(direction);
+            directionConsumed = true;
             return true;
           });
+          continue;
         }
-        report("completed");
-        return { assistantText };
+
+        /*
+          No room left to use it. The honest outcome is to say so — recorded,
+          not applied — and to leave `direction_applied` unemitted, because it
+          was not.
+        */
+        await hooks.step(
+          "considering_direction",
+          async () => {
+            emitText(
+              `\n\nYou added: “${truncate(direction)}”. This turn had no step left to use it, so it has been recorded against the turn but not applied. Send it again to act on it.`,
+            );
+            return false;
+          },
+          () => "failed",
+        );
+        return complete();
       }
 
-      if (step === MAX_TOOL_STEPS) {
-        // The cap is a real limit and is reported as one. Whatever the model
-        // was mid-way through is abandoned rather than half-applied.
+      /*
+        Every tool block counts, not every round. A round limit bounds nothing
+        on its own: one response may carry a dozen parallel `tool_use` blocks,
+        and each is a real operation. The batch is refused whole rather than
+        executed up to the cap, so the turn never half-applies a plan.
+      */
+      if (toolCalls + toolUses.length > MAX_TOOL_CALLS) {
         return fail({
           code: "model_output_invalid",
           userMessage:
-            "This turn took more steps than it is allowed. Nothing was changed — try asking for one thing at a time.",
+            "This turn tried to do more at once than it is allowed. Nothing in your project was changed — try asking for one thing at a time.",
           recoverable: true,
         });
       }
 
       messages.push({ role: "assistant", content: final.content });
 
-      const results: Anthropic.ToolResultBlockParam[] = [];
-      let invalid = false;
-      for (const use of toolUses) {
-        const validation = validateToolInput(use.name, use.input);
-        if (!validation.ok) {
-          invalid = true;
-          results.push({
-            type: "tool_result",
-            tool_use_id: use.id,
-            is_error: true,
-            content: validation.issue,
-          });
-          continue;
-        }
-        toolSteps += 1;
-        if (validation.tool === "recommend_canvas_scene") {
-          // The scene has its own validated crossing, already reported as its
-          // own step and audited on rejection.
-          await hooks.recommendScene(use.input);
-        } else {
-          await hooks.proposeOperation(validation.tool, use.input);
-        }
-        results.push({
-          type: "tool_result",
-          tool_use_id: use.id,
-          content: SUBMITTED,
-        });
-      }
+      /*
+        Validate the whole batch before executing any of it. Validating and
+        executing in one pass means a valid first block is already staged — and
+        under the old code, already *written* — when a later block in the same
+        response turns out to be malformed.
+      */
+      const validations = toolUses.map((use) => ({
+        use,
+        validation: validateToolInput(use.name, use.input),
+      }));
+      const invalid = validations.filter((entry) => !entry.validation.ok);
 
-      if (invalid) {
+      if (invalid.length > 0) {
         schemaRetries += 1;
         if (schemaRetries > MAX_SCHEMA_RETRIES) {
           /*
             One schema-guided retry, then stop (docs/AI_SYSTEM.md §5). Nothing
-            partial has been written — every operation this turn went through
-            a hook that either authorised it or did not, and a malformed one
-            never reached a hook at all.
+            has been written: every operation this turn produced is still
+            staged, and staged work is discarded with the turn.
           */
           return fail({
             code: "model_output_invalid",
@@ -318,6 +430,57 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             recoverable: true,
           });
         }
+        // Report every block, so the retry corrects the batch rather than
+        // guessing which member of it was wrong.
+        messages.push({
+          role: "user",
+          content: validations.map(({ use, validation }) =>
+            validation.ok
+              ? {
+                  type: "tool_result" as const,
+                  tool_use_id: use.id,
+                  content: NOT_RUN,
+                }
+              : {
+                  type: "tool_result" as const,
+                  tool_use_id: use.id,
+                  is_error: true,
+                  content: validation.issue,
+                },
+          ),
+        });
+        continue;
+      }
+
+      const results: Anthropic.ToolResultBlockParam[] = [];
+      for (const { use, validation } of validations) {
+        if (!validation.ok) continue;
+        toolCalls += 1;
+        if (validation.tool === "recommend_canvas_scene") {
+          /*
+            Scenes are exempt from staging because they mutate nothing: a scene
+            is a view of project truth, validated against ids the host loaded,
+            with no write path (docs/AI_SYSTEM.md §9.3). Deferring one would
+            delay the canvas for no safety gain.
+          */
+          await hooks.recommendScene(use.input);
+        } else if (validation.tool === "suggest_actions") {
+          // Resolved to application-owned labels; the ids are all the model
+          // supplied and all it could supply.
+          hooks.emit({
+            type: "actions",
+            actions: resolveActions(
+              (validation.value as { actionIds: string[] }).actionIds,
+            ),
+          });
+        } else {
+          staged.push({ name: validation.tool, candidate: use.input });
+        }
+        results.push({
+          type: "tool_result",
+          tool_use_id: use.id,
+          content: STAGED,
+        });
       }
 
       messages.push({ role: "user", content: results });
@@ -325,24 +488,44 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       /*
         A genuine step boundary, which is what makes "next step" an honest
         promise rather than a label. Direction taken here is not the final
-        boundary: the turn continues, so the window stays open.
+        boundary: the turn continues, so the window stays open — and the model
+        really does receive it on the next request.
       */
-      const direction = await hooks.takeDirection({ final: false });
-      if (direction) {
-        await hooks.step("considering_direction", async () => {
-          messages.push({
-            role: "user",
-            content: asUntrusted("user_message", direction),
+      if (!directionConsumed) {
+        const direction = await hooks.takeDirection({ final: false });
+        if (direction) {
+          await hooks.step("considering_direction", async () => {
+            messages.push({
+              role: "user",
+              content: asUntrusted("user_message", direction),
+            });
+            hooks.directionApplied(direction);
+            directionConsumed = true;
+            return true;
           });
-          return true;
-        });
+        }
       }
     }
 
-    // Unreachable: the loop returns or fails at `step === MAX_TOOL_STEPS`.
-    return fail(TIMED_OUT);
+    /*
+      Rounds exhausted with the model still calling tools. A real limit,
+      reported as one, with nothing committed.
+    */
+    return fail({
+      code: "model_output_invalid",
+      userMessage:
+        "This turn took more steps than it is allowed. Nothing in your project was changed — try asking for one thing at a time.",
+      recoverable: true,
+    });
   }
 }
+
+const OUTPUT_EXHAUSTED: SafeError = {
+  code: "model_output_invalid",
+  userMessage:
+    "This turn reached its length limit before finishing, so nothing has been kept. Your message is saved — try asking for one thing at a time.",
+  recoverable: true,
+};
 
 const TIMED_OUT: SafeError = {
   code: "engine_unavailable",
@@ -394,7 +577,12 @@ function emptyContext(input: TurnInput): ProjectContext {
   return {
     fields: [],
     recentMessages: [],
-    objectIds: input.context?.objectIds ?? [],
+    objects: (input.context?.objectIds ?? []).map((id) => ({
+      id,
+      kind: "concept",
+      label: "Project object",
+    })),
+    relationshipIds: [],
     focalObjectId: input.context?.focalObjectId ?? null,
   };
 }

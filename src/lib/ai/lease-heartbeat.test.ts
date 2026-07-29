@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LeaseRenewal } from "@/lib/services/trusted-writer";
 import {
+  LEASE_HEARTBEAT_MS,
+  LEASE_TTL_SECONDS,
+  TURN_TIMEOUT_MS,
+} from "./engine-config";
+import {
   MAX_CONSECUTIVE_RENEWAL_FAILURES,
   startLeaseHeartbeat,
 } from "./lease-heartbeat";
@@ -77,10 +82,16 @@ describe("lease heartbeat", () => {
     expect(timer.scheduled).toBe(true);
   });
 
-  it("asks for more time than one interval, so a late beat leaves no gap", async () => {
+  it("asks for the full lease TTL every time, not a multiple of the interval", async () => {
+    /*
+      Deriving the request from the heartbeat interval got the direction wrong:
+      a minute-apart beat asking for three minutes was asking for *less* time
+      than a fresh fifteen-minute lease already had. Asking for the TTL means
+      each successful beat resets the whole window.
+    */
     const { timer, seconds } = setup(["renewed"]);
     await timer.tick();
-    expect(seconds[0]).toBeGreaterThan(1);
+    expect(seconds[0]).toBe(LEASE_TTL_SECONDS);
   });
 
   it("tolerates a transient failure and recovers", async () => {
@@ -165,5 +176,51 @@ describe("lease heartbeat", () => {
     await timer.tick();
     await timer.tick();
     expect(onLost).toHaveBeenCalledOnce();
+  });
+});
+
+/*
+  Issue #11's acceptance criterion, at the worker level: a healthy turn stays
+  running beyond the original lease *because* something keeps saying so.
+*/
+describe("a healthy worker outlives its original lease", () => {
+  it("is allowed to, because the turn timeout is longer than the lease", () => {
+    /*
+      The criterion is unreachable if the engine gives up first — the lease's
+      fixed expiry would then be the real limit and the heartbeat decoration.
+      This assertion is what stops the two drifting back apart.
+    */
+    expect(TURN_TIMEOUT_MS).toBeGreaterThan(LEASE_TTL_SECONDS * 1_000);
+  });
+
+  it("keeps beating past fifteen minutes of simulated work", async () => {
+    const { timer, renew, onLost } = setup(["renewed"]);
+    const beatsInLease = Math.ceil(
+      (LEASE_TTL_SECONDS * 1_000) / LEASE_HEARTBEAT_MS,
+    );
+    // Comfortably beyond one lease period.
+    const beats = beatsInLease * 2;
+    for (let beat = 0; beat < beats; beat += 1) await timer.tick();
+
+    expect(renew).toHaveBeenCalledTimes(beats);
+    expect(onLost).not.toHaveBeenCalled();
+    // Still scheduled: the turn is alive and saying so.
+    expect(timer.scheduled).toBe(true);
+  });
+
+  it("gives up the moment the run stops being renewable, however long it has run", async () => {
+    /*
+      The other half of the invariant. Surviving a long time must not make a
+      worker harder to kill: once the database says the run is gone, further
+      work on it is work nobody will receive.
+    */
+    const { timer, onLost } = setup([
+      ...Array.from({ length: 20 }, () => "renewed" as const),
+      "expired" as const,
+    ]);
+    for (let beat = 0; beat < 21; beat += 1) await timer.tick();
+
+    expect(onLost).toHaveBeenCalledExactlyOnceWith("run_not_renewable");
+    expect(timer.scheduled).toBe(false);
   });
 });

@@ -3,6 +3,7 @@ import {
   loadCanvasObjects,
   loadProjectRelationships,
 } from "./project-model-store";
+import type { CanvasObject } from "./model";
 import { defaultFocalObjectId } from "./problem-map";
 import type { ProjectScope } from "./scene";
 
@@ -13,6 +14,15 @@ export interface TurnScope {
   scope: ProjectScope;
   /** Deterministically ordered, for anything that needs a stable sequence. */
   objectIds: string[];
+  /** Ordered relationship ids, for the same reason. */
+  relationshipIds: string[];
+  /**
+   * The objects behind those ids, so a caller building an inventory for the
+   * model does not have to read them a second time. Ids alone are not enough to
+   * choose between objects: a model handed only UUIDs can pick a focal object
+   * only at random.
+   */
+  objects: CanvasObject[];
   /**
    * The object this project is currently exploring, derived from the stored
    * model — not "whatever the database returned first". An engine may name it;
@@ -75,6 +85,8 @@ export async function loadTurnScope(
       relationshipIds: new Set(relationshipRows.map((row) => row.id)),
     },
     objectIds,
+    relationshipIds: relationshipRows.map((row) => row.id),
+    objects: canvasObjects.data,
     focalObjectId: defaultFocalObjectId(
       canvasObjects.data,
       canvasRelationships.data,

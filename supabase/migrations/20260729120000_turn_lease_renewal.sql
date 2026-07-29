@@ -69,8 +69,19 @@ begin
     return 'expired';
   end if;
 
+  /*
+    Extend, never replace. `now() + extension` alone is a *reduction* whenever
+    the requested TTL is shorter than what the lease already has: a 60-second
+    heartbeat against a fresh 15-minute lease would cut it to 60 seconds, so
+    the mechanism meant to keep long turns alive would be the thing killing
+    them. `greatest` makes renewal monotonic — a lease can only ever move
+    later, so no renewal, however small, can bring a run's death forward.
+  */
   update public.turn_runs
-  set lease_expires_at = now() + make_interval(secs => extension)
+  set lease_expires_at = greatest(
+    run.lease_expires_at,
+    now() + make_interval(secs => extension)
+  )
   where turn_id = p_turn_id;
 
   return 'renewed';
@@ -96,3 +107,25 @@ comment on function public.renew_turn_lease(uuid, integer) is
 */
 alter type public.audit_action add value if not exists 'operation_applied';
 alter type public.audit_action add value if not exists 'operation_rejected';
+
+/*
+  One running turn per project, enforced by the database (T9 edge case:
+  "concurrent turns blocked").
+
+  A guard in React protects one mounted runtime and nothing else. Two tabs, a
+  reload mid-turn, or two direct requests each insert their own running row,
+  and the project then has two turns steering and recovering independently —
+  with `loadProjectContext` unable to tell which message belongs to which.
+
+  A partial unique index is the whole mechanism: it is evaluated inside the
+  same transaction as the insert, so there is no window between checking and
+  opening. `openTurnRun` reads the resulting conflict as "another turn is
+  already running" and the route answers with a safe conflict rather than
+  starting a second stream.
+*/
+create unique index turn_runs_one_running_per_project
+  on public.turn_runs (project_id)
+  where state = 'running';
+
+comment on index public.turn_runs_one_running_per_project is
+  'At most one running turn per project. Enforced here so two clients cannot both open one.';

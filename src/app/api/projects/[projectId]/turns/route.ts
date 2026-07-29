@@ -6,9 +6,12 @@ import { loadProjectContext, type LoadedContext } from "@/lib/ai/load-context";
 import { selectDiscoveryEngine } from "@/lib/ai/select-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
-import type { DiscoveryToolName } from "@/lib/ai/tools/discovery-tools";
+import {
+  loadCanvasObjects,
+  loadProjectRelationships,
+} from "@/lib/canvas/project-model-store";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
-import { applyModelOperation } from "@/lib/services/model-operations";
+import { commitModelOperations } from "@/lib/services/model-operations";
 import {
   closeTurnRun,
   openTurnRun,
@@ -34,7 +37,8 @@ function emptyProjectContext(): LoadedContext {
   return {
     fields: [],
     recentMessages: [],
-    objectIds: [],
+    objects: [],
+    relationshipIds: [],
     focalObjectId: null,
     complete: false,
   };
@@ -176,7 +180,25 @@ export async function POST(
     and offer controls that cannot work — it fails here, where a plain error
     response is still possible.
   */
-  if (!(await openTurnRun({ projectId, turnId }))) {
+  const opened = await openTurnRun({ projectId, turnId });
+  if (opened === "already_running") {
+    /*
+      One turn per project at a time (T9 edge case). The user's message is
+      already saved, so nothing they typed is lost — it will be there when the
+      running turn finishes, which is why this says so rather than asking them
+      to retype anything.
+    */
+    return errorResponse(
+      {
+        code: "engine_unavailable",
+        userMessage:
+          "This project already has a response in progress — probably in another tab. Your message is saved; wait for that turn to finish, then send again.",
+        recoverable: true,
+      },
+      409,
+    );
+  }
+  if (opened !== "opened") {
     return errorResponse(
       {
         code: "engine_unavailable",
@@ -270,10 +292,24 @@ export async function POST(
             // Context for the model is read in the same step, because it is
             // the same operation from the user's point of view: the project
             // being read before the turn thinks about it.
-            loadedContext = await loadProjectContext(supabase, projectId, {
-              objectIds: scope.objectIds,
-              focalObjectId: scope.focalObjectId,
-            });
+            loadedContext = await loadProjectContext(
+              supabase,
+              projectId,
+              {
+                // The inventory a scene may name, with enough about each object
+                // for the choice of focal object to be informed rather than a
+                // guess at a UUID.
+                objects: scope.objects.map((object) => ({
+                  id: object.id,
+                  kind: object.kind,
+                  label: object.title,
+                })),
+                relationshipIds: scope.relationshipIds,
+                focalObjectId: scope.focalObjectId,
+              },
+              // Correlated by turn, not by "whichever message is newest".
+              turnId,
+            );
             return scope;
           },
           // A partial or failed read is not "project model read": what is in
@@ -306,33 +342,64 @@ export async function POST(
           onSceneRejected: (rejection) =>
             audit("scene_rejected", { detail: { code: rejection.code } }),
           /*
-            Where a model-proposed operation is authorised and disposed of.
-            Every outcome is audited — including refusal, which is exactly the
-            kind of event that matters after the fact — and none of it travels
-            back to the engine.
+            Where the operations a successful turn produced are authorised and
+            disposed of — once, at the end, as one unit. Every outcome is
+            audited including refusal, which is exactly the kind of event that
+            matters after the fact, and none of it travels back to the engine.
+
+            Because this only runs for a turn that reached a result, an audit
+            row here describes something that actually happened rather than an
+            operation later abandoned with a failing turn.
           */
-          proposeOperation: async (name, candidate) => {
-            const outcome = await applyModelOperation(
+          commitOperations: async (operations) => {
+            const { outcomes } = await commitModelOperations(
               supabase,
-              projectId,
-              name as DiscoveryToolName,
-              candidate,
+              { projectId, userMessage: parsed.data.message },
+              operations,
             );
-            if (outcome.applied) {
-              await audit("operation_applied", {
+            let applied = 0;
+            for (const outcome of outcomes) {
+              if (outcome.applied) {
+                applied += 1;
+                await audit("operation_applied", {
+                  target: outcome.kind,
+                  detail: { count: outcome.count },
+                });
+                continue;
+              }
+              await audit("operation_rejected", {
                 target: outcome.kind,
-                detail: { count: outcome.count },
+                detail:
+                  outcome.reason === "rejected"
+                    ? { reason: outcome.reason, issue: outcome.issue }
+                    : { reason: outcome.reason },
               });
-              return;
             }
-            await audit("operation_rejected", {
-              target: outcome.kind,
-              detail:
-                outcome.reason === "rejected"
-                  ? { reason: outcome.reason, issue: outcome.issue }
-                  : { reason: outcome.reason },
-            });
+
+            /*
+              Something changed, so the canvas is told what the project now
+              holds — re-read from the application's own tables, never from
+              anything the model described.
+            */
+            if (applied > 0) {
+              const [objects, relationships] = await Promise.all([
+                loadCanvasObjects(supabase, projectId),
+                loadProjectRelationships(supabase, projectId),
+              ]);
+              emit({
+                type: "project_model_updated",
+                objects: objects.data,
+                relationships: relationships.data,
+              });
+            }
           },
+          /*
+            Emitted only once the model has actually been given the direction.
+            Announcing it when the note merely existed was the defect: the
+            interface said "applied" for a direction no request ever carried.
+          */
+          onDirectionApplied: (note) =>
+            emit({ type: "direction_applied", note }),
           takeDirection: async ({ final }) => {
             /*
               Reading and sealing are one locked operation: a direction is
@@ -361,9 +428,9 @@ export async function POST(
             const directions = result.directions;
             if (directions.length === 0) return null;
             directionCursor = directions[directions.length - 1].cursor;
-            const note = directions.map((entry) => entry.note).join("\n");
-            emit({ type: "direction_applied", note });
-            return note;
+            // Returned, not announced: whether the model uses it is the
+            // engine's to report through `onDirectionApplied`.
+            return directions.map((entry) => entry.note).join("\n");
           },
         });
 

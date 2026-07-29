@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { ContextField, ContextMessage, ProjectContext } from "./context";
+import type {
+  ContextField,
+  ContextMessage,
+  ContextObject,
+  ProjectContext,
+} from "./context";
 import { RECENT_MESSAGE_LIMIT } from "./context";
 
 /**
@@ -16,7 +21,7 @@ import { RECENT_MESSAGE_LIMIT } from "./context";
  * user's message for no benefit. The activity step reports the difference.
  */
 export interface LoadedContext extends ProjectContext {
-  /** True when both reads returned; false when the turn is working blind. */
+  /** True when every read returned; false when the turn is working blind. */
   complete: boolean;
 }
 
@@ -32,12 +37,26 @@ interface FieldRow {
 interface MessageRow {
   role: string;
   content: string;
+  turn_id: string | null;
 }
 
 export async function loadProjectContext(
   supabase: SupabaseClient,
   projectId: string,
-  scope: { objectIds: string[]; focalObjectId: string | null },
+  scope: {
+    objects: ContextObject[];
+    relationshipIds: string[];
+    focalObjectId: string | null;
+  },
+  /**
+   * This turn's id, so its own message can be excluded by identity.
+   *
+   * Dropping "whichever row is newest" assumed the newest message is always
+   * this turn's, which stops being true the moment anything else can write a
+   * message — a second tab, a retry, a race. Correlating by turn id cannot be
+   * wrong in the same way.
+   */
+  turnId: string,
 ): Promise<LoadedContext> {
   let complete = true;
 
@@ -50,12 +69,11 @@ export async function loadProjectContext(
 
   const { data: messageRows, error: messageError } = await supabase
     .from("messages")
-    .select("role, content")
+    .select("role, content, turn_id")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false })
-    // One extra: the user message for *this* turn has already been persisted,
-    // and it is delivered separately as the turn's actual prompt. Including it
-    // here as well would show the model its own question twice.
+    // One extra, because this turn's own message is among them and is dropped
+    // below — it is delivered separately as the turn's actual prompt.
     .limit(RECENT_MESSAGE_LIMIT + 1);
   if (messageError) complete = false;
 
@@ -71,20 +89,21 @@ export async function loadProjectContext(
   );
 
   const recent = ((messageRows ?? []) as MessageRow[])
+    .filter((row) => row.turn_id !== turnId)
     .filter((row) => row.role === "user" || row.role === "assistant")
+    .slice(0, RECENT_MESSAGE_LIMIT)
     .map<ContextMessage>((row) => ({
       role: row.role as "user" | "assistant",
       content: row.content,
-    }));
-  // Newest first from the query; drop the current turn's own message and put
-  // the rest back in reading order.
-  recent.shift();
-  recent.reverse();
+    }))
+    // Newest-first from the query; put it back in reading order.
+    .reverse();
 
   return {
     fields,
     recentMessages: recent,
-    objectIds: scope.objectIds,
+    objects: scope.objects,
+    relationshipIds: scope.relationshipIds,
     focalObjectId: scope.focalObjectId,
     complete,
   };

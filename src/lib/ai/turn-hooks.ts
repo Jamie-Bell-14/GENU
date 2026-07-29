@@ -5,7 +5,7 @@ import {
   type SceneRejection,
 } from "@/lib/canvas/scene";
 import type { ActivityReporter } from "./activity-reporter";
-import type { TurnHooks } from "./discovery-engine";
+import type { StagedOperation, TurnHooks } from "./discovery-engine";
 import type { TurnEvent } from "./turn-events";
 
 /**
@@ -21,13 +21,20 @@ export interface TurnPorts {
   reporter: ActivityReporter;
   onSceneAccepted(scene: CanvasScene): Promise<void>;
   onSceneRejected(rejection: SceneRejection): Promise<void>;
-  takeDirection(options: { final: boolean }): Promise<string | null>;
   /**
-   * Disposes of a structured operation the engine proposed. Optional because
-   * the scripted engine proposes none; a live engine that reaches an absent
-   * port is a wiring error and is treated as one rather than as a refusal.
+   * Reads pending steering. Deliberately does *not* announce that a direction
+   * was applied: a note existing and the model using it are different facts,
+   * and the second is the engine's to report through `onDirectionApplied`.
    */
-  proposeOperation?(name: string, candidate: unknown): Promise<void>;
+  takeDirection(options: { final: boolean }): Promise<string | null>;
+  /** The model has now actually received this direction. */
+  onDirectionApplied(note: string): void;
+  /**
+   * Disposes of the operations a successful turn produced. Optional because the
+   * scripted engine produces none; a live engine that reaches an absent port is
+   * a wiring error and is treated as one rather than as a silent refusal.
+   */
+  commitOperations?(operations: readonly StagedOperation[]): Promise<void>;
 }
 
 /**
@@ -72,14 +79,17 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
 
     takeDirection: ports.takeDirection,
 
-    async proposeOperation(name, candidate) {
-      if (!ports.proposeOperation) {
-        // Loud rather than silent: an engine proposing operations into a host
+    directionApplied: ports.onDirectionApplied,
+
+    async commitOperations(operations) {
+      if (!operations.length) return;
+      if (!ports.commitOperations) {
+        // Loud rather than silent: an engine producing operations for a host
         // that cannot dispose of them would otherwise look like a boundary
         // quietly refusing everything.
-        throw new Error(`no operation port for ${name}`);
+        throw new Error("no operation port for staged operations");
       }
-      await ports.proposeOperation(name, candidate);
+      await ports.commitOperations(operations);
     },
   };
 }

@@ -16,6 +16,7 @@ function harness(direction: string | null = null) {
   const events: EngineEvent[] = [];
   const steps: string[] = [];
   const candidates: unknown[] = [];
+  const appliedDirections: string[] = [];
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
@@ -33,18 +34,19 @@ function harness(direction: string | null = null) {
     recommendScene: async (candidate) => {
       candidates.push(candidate);
     },
-    // The scripted engine proposes no structured operations; a call here
+    // The scripted engine produces no structured operations; a commit here
     // would be a change in what it does, so the harness fails on one.
-    proposeOperation: async (name) => {
-      throw new Error(`unexpected operation: ${name}`);
+    commitOperations: async () => {
+      throw new Error("unexpected staged operations");
     },
+    directionApplied: (note) => appliedDirections.push(note),
     takeDirection: async () => {
       const next = remaining;
       remaining = null;
       return next;
     },
   };
-  return { events, steps, candidates, hooks };
+  return { events, steps, candidates, appliedDirections, hooks };
 }
 
 const input = {
@@ -170,7 +172,9 @@ describe("ScriptedDiscoveryEngine", () => {
   });
 
   it("picks up direction at the step boundary it promised", async () => {
-    const { events, steps, hooks } = harness("Focus on smaller agencies.");
+    const { events, steps, appliedDirections, hooks } = harness(
+      "Focus on smaller agencies.",
+    );
     const engine = new ScriptedDiscoveryEngine();
     expect(engine.directionApplication).toBe("next_step");
 
@@ -178,6 +182,8 @@ describe("ScriptedDiscoveryEngine", () => {
     expect(steps).toContain("considering_direction:active");
     expect(steps).toContain("considering_direction:succeeded");
     expect(result.assistantText).toContain("Focus on smaller agencies.");
+    // Announced because it was genuinely picked up, not merely received.
+    expect(appliedDirections).toEqual(["Focus on smaller agencies."]);
     // The acknowledgement reaches the user as streamed text, not silently.
     const streamed = events
       .filter((event) => event.type === "assistant_delta")

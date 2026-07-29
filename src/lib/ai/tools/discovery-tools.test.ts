@@ -82,9 +82,14 @@ describe("structured tool input", () => {
       }
     });
 
-    it("does allow an assumption to be attributed to the person", () => {
-      // The opposite rule, for the opposite reason: an assumption's origin is
-      // the point of recording it (VERTICAL_SLICE_SPEC Step 3).
+    it("refuses an assumption that declares its own origin", () => {
+      /*
+        An earlier version of this schema accepted `origin: user_stated` on an
+        assumption, reasoning that a misattribution would be visible on the
+        canvas. That was too weak — "the user can spot it" is not a control.
+        Origin is now derived by the host from a verified quotation, so the
+        field does not exist here at all.
+      */
       const result = validateToolInput("record_assumption", {
         statement: "Smaller agencies feel this most.",
         whyItMatters: "It decides who the first customer is.",
@@ -92,7 +97,26 @@ describe("structured tool input", () => {
         importance: "material",
         origin: "user_stated",
       });
+      expect(result.ok).toBe(false);
+    });
+
+    it("accepts an assumption offering a quotation as evidence", () => {
+      // The model may offer evidence of what was said; the host decides.
+      const result = validateToolInput("record_assumption", {
+        statement: "Smaller agencies feel this most.",
+        whyItMatters: "It decides who the first customer is.",
+        alternatives: ["Larger agencies have more disputes by volume."],
+        importance: "material",
+        quotedFromMessage: "smaller agencies have fewer resources",
+      });
       expect(result.ok).toBe(true);
+    });
+
+    it("refuses `researched`, which no provider can yet support", () => {
+      const result = validateToolInput("update_project_model", {
+        updates: [{ ...validUpdate.updates[0], origin: "researched" }],
+      });
+      expect(result.ok).toBe(false);
     });
   });
 
@@ -215,6 +239,7 @@ describe("provider tool definitions", () => {
       "record_assumption",
       "propose_connected_change",
       "suggest_checkpoint",
+      "suggest_actions",
       "recommend_canvas_scene",
     ]);
   });

@@ -112,11 +112,11 @@ export async function POST(request: NextRequest) {
         reporter,
         onSceneAccepted: async () => {},
         onSceneRejected: async () => {},
-        takeDirection: async ({ final }) => {
-          const note = takePendingDirections(turnId, { seal: final });
-          if (note) emit({ type: "direction_applied", note });
-          return note;
-        },
+        takeDirection: async ({ final }) =>
+          takePendingDirections(turnId, { seal: final }),
+        // Announced when the engine has actually used it, not when a note
+        // merely exists — the same rule as the real route.
+        onDirectionApplied: (note) => emit({ type: "direction_applied", note }),
       });
 
       try {

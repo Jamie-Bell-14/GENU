@@ -1,3 +1,5 @@
+import type { CanvasObject } from "@/lib/canvas/model";
+import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { CanvasScene } from "@/lib/canvas/scene";
 import {
   activityLabel,
@@ -127,6 +129,22 @@ export type TurnEvent =
    * ids can put a scene on this stream.
    */
   | { type: "scene_recommended"; scene: CanvasScene }
+  /**
+   * The project model after a turn's accepted writes, re-read by the
+   * application from its own tables.
+   *
+   * Not model-authored render data: the objects here are built by
+   * `loadCanvasObjects` from stored rows, so a turn can cause a refresh but
+   * cannot describe what appears. Without this event an assumption recorded
+   * during a turn only shows after a reload, which makes the canvas look
+   * broken at exactly the moment it is supposed to be alive
+   * (VERTICAL_SLICE_SPEC Steps 2–3).
+   */
+  | {
+      type: "project_model_updated";
+      objects: CanvasObject[];
+      relationships: ProjectRelationship[];
+    }
   /** Emitted when the running turn actually picked the direction up. */
   | { type: "direction_applied"; note: string }
   | { type: "turn_failed"; error: SafeError }
@@ -215,6 +233,14 @@ export interface TurnState {
   /** The most recent validated scene recommendation, for the canvas host. */
   recommendedScene: CanvasScene | null;
   /**
+   * The project model as last re-read by the server during this session; null
+   * until a turn changes something, when the server-rendered props still stand.
+   */
+  projectModel: {
+    objects: CanvasObject[];
+    relationships: ProjectRelationship[];
+  } | null;
+  /**
    * Steering the user added to the running turn. `applied` separates the
    * promise made when it was accepted from the moment the turn actually used
    * it, so the interface never claims the second before it happens.
@@ -255,6 +281,7 @@ export const INITIAL_TURN_STATE: TurnState = {
   activityLog: [],
   actions: [],
   recommendedScene: null,
+  projectModel: null,
   direction: null,
   error: null,
   stopped: false,
@@ -555,6 +582,21 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           // Held for the canvas host, which applies its own validation before
           // rendering. Nothing here touches project truth.
           return { ...state, recommendedScene: action.event.scene };
+
+        case "project_model_updated":
+          /*
+            Replaces the model the canvas is drawing from. Safe to take
+            wholesale because the server built it by re-reading its own tables,
+            so this is the application telling the client what it now holds —
+            not the turn describing what it would like drawn.
+          */
+          return {
+            ...state,
+            projectModel: {
+              objects: action.event.objects,
+              relationships: action.event.relationships,
+            },
+          };
 
         case "direction_applied":
           return state.direction

@@ -31,13 +31,14 @@ export default async function ProjectPage({
 
   const { data: rows } = await supabase
     .from("messages")
-    .select("id, role, content, created_at")
+    .select("id, turn_id, role, content, created_at")
     .eq("project_id", projectId)
     .order("created_at", { ascending: true })
     .limit(200);
 
   const messages: Message[] = (rows ?? []).map((row) => ({
     id: row.id as string,
+    turnId: row.turn_id as string,
     role: row.role as Message["role"],
     content: row.content as string,
     blockKind: "plain",

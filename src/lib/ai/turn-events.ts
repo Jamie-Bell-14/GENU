@@ -151,6 +151,18 @@ export type EngineEvent = Exclude<
 
 export interface Message {
   id: string;
+  /**
+   * The turn this message belongs to.
+   *
+   * Attribution cannot be positional. A recovered answer arrives after later
+   * messages have already been sent, so appending it to a flat list would show
+   * it as the response to whatever question happens to precede it. The turn id
+   * is what keeps a response with its own question.
+   *
+   * Absent only on a user message between being sent and the server naming its
+   * turn; the message's own id stands in until then.
+   */
+  turnId?: string;
   role: "user" | "assistant";
   content: string;
   blockKind: TurnBlockKind;
@@ -256,6 +268,8 @@ export type TurnAction =
   | { type: "direction_failed"; error: SafeError }
   /** The user pressed Stop. */
   | { type: "turn_stopped" }
+  /** The server named the turn a just-sent message belongs to. */
+  | { type: "turn_identified"; messageId: string; turnId: string }
   /** The stream ended unintentionally; catch-up begins for that turn. */
   | { type: "connection_lost"; turnId: string | null }
   /** Another look at an already-recorded recovery, for that turn only. */
@@ -459,6 +473,16 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
     case "direction_failed":
       return { ...state, error: action.error };
 
+    case "turn_identified":
+      return {
+        ...state,
+        messages: state.messages.map((message) =>
+          message.id === action.messageId
+            ? { ...message, turnId: action.turnId }
+            : message,
+        ),
+      };
+
     case "dismiss_recovery":
       return {
         ...state,
@@ -551,6 +575,7 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           }
           const completed: Message = {
             id: state.streaming.turnId,
+            turnId: state.streaming.turnId,
             role: "assistant",
             content: state.streaming.text,
             blockKind: state.streaming.blockKind,

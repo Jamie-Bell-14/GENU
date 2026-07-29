@@ -37,6 +37,61 @@ function AssistantTurn({
   );
 }
 
+interface TurnGroup {
+  key: string;
+  /** The question, absent only for a response with no matching turn. */
+  user?: Message;
+  responses: Message[];
+  /** Text still arriving for this turn. */
+  streaming?: TurnState["streaming"];
+}
+
+/**
+ * Groups the transcript by turn, in the order the questions were asked.
+ *
+ * The message list is in arrival order, and a recovered answer arrives after
+ * later questions have already been sent — so rendering the list directly
+ * would show that answer as the response to whichever question happens to
+ * precede it. Grouping by turn id keeps every response under its own question,
+ * whether it arrived live, on catch-up, or from the server on page load.
+ */
+function groupTurns(state: TurnState): TurnGroup[] {
+  const groups: TurnGroup[] = [];
+  const byTurn = new Map<string, TurnGroup>();
+
+  for (const message of state.messages) {
+    if (message.role === "user") {
+      // A message the server has not yet named a turn for stands on its own id.
+      const key = message.turnId ?? message.id;
+      const group: TurnGroup = { key, user: message, responses: [] };
+      groups.push(group);
+      byTurn.set(key, group);
+      continue;
+    }
+    const existing = message.turnId ? byTurn.get(message.turnId) : undefined;
+    if (existing) {
+      existing.responses.push(message);
+      continue;
+    }
+    // A response with no question in view — an unattributed legacy row. Shown
+    // rather than hidden, but not attached to somebody else's question.
+    groups.push({ key: message.id, responses: [message] });
+  }
+
+  if (state.streaming) {
+    const group = byTurn.get(state.streaming.turnId);
+    if (group) group.streaming = state.streaming;
+    else
+      groups.push({
+        key: state.streaming.turnId,
+        responses: [],
+        streaming: state.streaming,
+      });
+  }
+
+  return groups;
+}
+
 export function ConversationStream({
   state,
   onCheckAgain,
@@ -68,23 +123,23 @@ export function ConversationStream({
 
   return (
     <div className="flex flex-col gap-4 p-6">
-      {state.messages.map((message) =>
-        message.role === "user" ? (
-          <UserTurn key={message.id} message={message} />
-        ) : (
-          <AssistantTurn key={message.id} message={message} />
-        ),
-      )}
-
-      {state.streaming && state.streaming.text && (
-        <AssistantTurn
-          message={{
-            content: state.streaming.text,
-            blockKind: state.streaming.blockKind,
-            heading: state.streaming.heading,
-          }}
-        />
-      )}
+      {groupTurns(state).map((group) => (
+        <div key={group.key} className="flex flex-col gap-4">
+          {group.user && <UserTurn message={group.user} />}
+          {group.responses.map((response) => (
+            <AssistantTurn key={response.id} message={response} />
+          ))}
+          {group.streaming?.text && (
+            <AssistantTurn
+              message={{
+                content: group.streaming.text,
+                blockKind: group.streaming.blockKind,
+                heading: group.streaming.heading,
+              }}
+            />
+          )}
+        </div>
+      ))}
 
       {/* Observable activity: specific, subtle, and it fades when done.
           Only ordinary analysis belongs here — research and canvas work is

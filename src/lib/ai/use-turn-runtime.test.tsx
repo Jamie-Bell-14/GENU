@@ -59,6 +59,7 @@ describe("losing the stream mid-turn", () => {
       activity: [activityLineFor(TURN, "reading_project_model", "succeeded")],
       message: {
         id: "assistant-1",
+        turnId: TURN,
         role: "assistant",
         content: "The recorded answer.",
         blockKind: "plain",
@@ -248,6 +249,7 @@ describe("catch-up that races the server", () => {
   it("looks again on request, and takes the result once it exists", async () => {
     const persisted = {
       id: TURN,
+      turnId: TURN,
       role: "assistant",
       content: "The recorded answer.",
       blockKind: "plain",
@@ -303,6 +305,7 @@ describe("catch-up that races the server", () => {
     */
     const persisted = {
       id: TURN,
+      turnId: TURN,
       role: "assistant",
       content: "The recorded answer.",
       blockKind: "plain",
@@ -353,6 +356,7 @@ describe("catch-up that races the server", () => {
     // must not be discarded for that.
     const persisted = {
       id: TURN,
+      turnId: TURN,
       role: "assistant",
       content: "The recorded answer.",
       blockKind: "plain",
@@ -389,6 +393,7 @@ describe("catch-up that races the server", () => {
     // the result the snapshot returned.
     const persisted = {
       id: TURN,
+      turnId: TURN,
       role: "assistant",
       content: "The recorded answer.",
       blockKind: "plain",
@@ -561,6 +566,7 @@ describe("losing the stream before it identifies itself", () => {
     // it arrives. The header is the same fact, outside the fragile body.
     const persisted = {
       id: TURN,
+      turnId: TURN,
       role: "assistant",
       content: "The recorded answer.",
       blockKind: "plain",
@@ -771,6 +777,7 @@ describe("recoveries belong to their own turn", () => {
     const TURN_B = "eeeeeeee-0000-4000-8000-000000000002";
     const answerA = {
       id: TURN,
+      turnId: TURN,
       role: "assistant",
       content: "The first answer.",
       blockKind: "plain",
@@ -820,13 +827,22 @@ describe("recoveries belong to their own turn", () => {
     });
 
     expect(result.current.state.recoveries).toEqual([]);
-    expect(result.current.state.messages.map((m) => m.content)).toEqual([
-      "The first problem",
-      "The second problem",
-      "The first answer.",
-    ]);
+    /*
+      Arrival order — A's answer really did arrive last. What matters is that it
+      carries A's turn id, which is what keeps it rendered under A's question
+      rather than under B's; the rendering itself is asserted in
+      src/components/conversation/transcript.test.tsx.
+    */
+    const answer = result.current.state.messages.find(
+      (m) => m.role === "assistant",
+    );
+    expect(answer).toMatchObject({
+      content: "The first answer.",
+      turnId: TURN,
+    });
     // B is still streaming and unaffected.
     expect(result.current.state.streaming?.turnId).toBe(TURN_B);
+    expect(result.current.state.status).toBe("streaming");
 
     streamB.close();
     await act(async () => {

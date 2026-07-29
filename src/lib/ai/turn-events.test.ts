@@ -319,6 +319,7 @@ describe("stopping and losing the connection", () => {
   it("takes the recorded result on catch-up without duplicating it", () => {
     const persisted: Message = {
       id: "assistant-1",
+      turnId: TURN,
       role: "assistant",
       content: "The complete recorded answer.",
       blockKind: "plain",
@@ -436,6 +437,7 @@ describe("an unresolved recovery", () => {
       activityLog: [],
       message: {
         id: "assistant-1",
+        turnId: TURN,
         role: "assistant",
         content: "The recorded answer.",
         blockKind: "plain",

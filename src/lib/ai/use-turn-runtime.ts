@@ -271,10 +271,11 @@ export function useTurnRuntime({
     sendingRef.current = true;
     stoppedRef.current = false;
 
+    const messageId = crypto.randomUUID();
     dispatch({
       type: "user_message_sent",
       message: {
-        id: crypto.randomUUID(),
+        id: messageId,
         role: "user",
         content: message,
         blockKind: "plain",
@@ -326,6 +327,9 @@ export function useTurnRuntime({
         recover by, and the turn would vanish silently.
       */
       turnId = response.headers?.get?.("x-turn-id") ?? null;
+      // Bind the message to its turn as soon as the server names it, so a
+      // response recovered later still renders under this question.
+      if (turnId) dispatch({ type: "turn_identified", messageId, turnId });
 
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => null);
@@ -356,7 +360,10 @@ export function useTurnRuntime({
         const { events, rest } = parseEvents(buffer);
         buffer = rest;
         for (const event of events) {
-          if (event.type === "turn_started") turnId = event.turnId;
+          if (event.type === "turn_started") {
+            turnId = event.turnId;
+            dispatch({ type: "turn_identified", messageId, turnId });
+          }
           if (event.type === "done" || event.type === "turn_failed") {
             completed = true;
           }

@@ -60,6 +60,9 @@ export async function readTurnSnapshot(
       row.message_id && row.message_content !== null
         ? {
             id: row.message_id,
+            // Attribution travels with the result: a recovered answer arrives
+            // out of order and must still render under its own question.
+            turnId,
             role: "assistant",
             content: row.message_content,
             blockKind: "plain",

@@ -249,6 +249,8 @@ export type TurnAction =
   | { type: "turn_stopped" }
   /** The stream ended unintentionally; catch-up begins. */
   | { type: "connection_lost"; turnId: string | null }
+  /** The user has finished with an unresolved recovery. */
+  | { type: "dismiss_recovery" }
   /** Catch-up finished: what the server actually recorded for this turn. */
   | {
       type: "recovered";
@@ -306,7 +308,12 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         direction: null,
         error: null,
         stopped: false,
-        recovery: null,
+        /*
+          `recovery` is deliberately not cleared. An unresolved turn — one the
+          server may still be finishing — stays recoverable while the user gets
+          on with the next message; sending is not a decision to abandon it.
+          Only resolving or dismissing it clears the record.
+        */
         status: "sending",
       };
 
@@ -402,6 +409,9 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
     // only the direction is reported as not recorded.
     case "direction_failed":
       return { ...state, error: action.error };
+
+    case "dismiss_recovery":
+      return { ...state, recovery: null };
 
     case "reset_error":
       return { ...state, error: null };

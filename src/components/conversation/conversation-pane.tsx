@@ -22,7 +22,11 @@ export function ConversationPane({
       className="bg-surface-primary flex h-full min-h-0 flex-col"
     >
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <ConversationStream state={state} onCheckAgain={runtime.checkAgain} />
+        <ConversationStream
+          state={state}
+          onCheckAgain={runtime.checkAgain}
+          onDismissRecovery={runtime.dismissRecovery}
+        />
       </div>
       <Composer
         value={runtime.draft}

@@ -96,6 +96,23 @@ describe("the direction handoff, without timing", () => {
     expect(takePendingDirections(turnId)).toBeNull();
   });
 
+  it("refuses a direction once the window is sealed, before the turn closes", async () => {
+    // The window closes at the final direction boundary, which is earlier than
+    // the turn finishing. Between the two there is no step left to consume a
+    // direction, so accepting one would promise a step that will never come.
+    const turnId = "cccccccc-1111-4111-8111-111111111111";
+    openDevTurn(turnId);
+    takePendingDirections(turnId, { seal: true });
+
+    const refused = await directionRoute(
+      post("http://localhost/api/dev/directions", {
+        turnId,
+        note: "After the final boundary.",
+      }),
+    );
+    expect(refused.status).toBe(404);
+  });
+
   it("keeps directions for different turns apart", async () => {
     openDevTurn("aaaaaaaa-1111-4111-8111-111111111111");
     openDevTurn("bbbbbbbb-2222-4222-8222-222222222222");

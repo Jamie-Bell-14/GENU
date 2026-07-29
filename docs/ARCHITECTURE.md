@@ -190,6 +190,19 @@ the outcome is known. Audit writes are best-effort by design — a turn must not
 fail because its history could not be written — which is precisely why they
 cannot be the source of a fact that gates steering and recovery.
 
+`turn_runs` carries two further facts. `accepting_direction` is the **steering
+window**, which closes at the engine's final direction boundary — earlier than
+the turn finishing — because after that boundary there is no step left to
+consume a direction. Accepting one is a single locked database operation
+(`accept_turn_direction`), not a status read followed by an insert, and reading
+directions seals the window in the same transaction
+(`take_turn_directions`); so a direction is either inserted before the seal and
+consumed, or refused. `lease_expires_at` bounds a run whose worker died, so it
+does not stay eligible for direction, or recoverable, for ever.
+
+Finalisation runs before stream emission on every path, and emission is
+best-effort: a departed reader must never stop a turn recording its outcome.
+
 The host, not the engine, ends a turn: `finishTurn` stores the result, records
 the outcome, and only then emits `done`. `EngineEvent` excludes `done` for the
 same reason it excludes scene events — an engine finishing its work is not the
@@ -200,7 +213,11 @@ returned by catch-up are the same message.
 
 A dropped SSE connection is recovered rather than reloaded:
 `GET /api/projects/[id]/turns/[turnId]` returns the activity and any assistant
-message recorded for that turn. Ids are stable — activity lines are keyed by
+message recorded for that turn. State and result come from **one database
+statement** (`turn_snapshot`), so `completed` can never be paired with a result
+read that predates the insert; the turn id is also returned as an `X-Turn-Id`
+response header, so a connection that dies before the first SSE frame still has
+something to recover by. Ids are stable — activity lines are keyed by
 turn and step — so replay cannot duplicate what the client already holds. A
 deliberate Stop is not a dropped connection: it discards partial text without
 catch-up, and a truncated answer is never promoted into the transcript.

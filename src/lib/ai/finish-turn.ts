@@ -28,13 +28,19 @@ export async function finishTurn(
   ports: FinishTurnPorts,
   assistantText: string,
 ): Promise<void> {
+  /*
+    Finalisation first, emission second, on every path. If the client has gone
+    the emit is a no-op — but if it were first and it threw, the turn would
+    never record that it failed, and the run would stay eligible for direction
+    and recoverable until its lease expired.
+  */
   const fail = async (code: string, userMessage: string) => {
+    await ports.closeRun("failed");
+    await ports.audit("turn_failed", { code });
     ports.emit({
       type: "turn_failed",
       error: { code: "engine_unavailable", userMessage, recoverable: true },
     });
-    await ports.closeRun("failed");
-    await ports.audit("turn_failed", { code });
   };
 
   // An engine that produced nothing did not complete, whatever else happened.
@@ -54,9 +60,10 @@ export async function finishTurn(
   if (!(await ports.closeRun("completed"))) {
     /*
       The result is stored but the turn's state is not, so steering and
-      recovery would keep treating it as live. Saying "done" here would be
-      claiming a clean end the system cannot vouch for.
+      recovery would keep treating it as live until the lease expires. Saying
+      "done" here would be claiming a clean end the system cannot vouch for.
     */
+    await ports.audit("turn_failed", { code: "state_not_recorded" });
     ports.emit({
       type: "turn_failed",
       error: {
@@ -66,7 +73,6 @@ export async function finishTurn(
         recoverable: true,
       },
     });
-    await ports.audit("turn_failed", { code: "state_not_recorded" });
     return;
   }
 

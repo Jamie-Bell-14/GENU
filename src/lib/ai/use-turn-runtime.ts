@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { TurnStatus } from "@/lib/services/turn-status";
+import type { TurnStatus } from "@/lib/services/turn-snapshot";
 import {
   turnReducer,
   INITIAL_TURN_STATE,
@@ -39,6 +39,8 @@ export interface TurnRuntime {
   addDirection: () => Promise<void>;
   /** Looks again for a turn whose recovery has not concluded. */
   checkAgain: () => Promise<void>;
+  /** Drops an unresolved recovery the user has finished with. */
+  dismissRecovery: () => void;
   /** A direction is in flight; the control is disabled until it resolves. */
   directionPending: boolean;
   onAction: (action: ContextualAction) => void;
@@ -143,6 +145,7 @@ export function useTurnRuntime({
 
         for (let attempt = 0; attempt < CATCH_UP_ATTEMPTS; attempt += 1) {
           if (attempt > 0) await wait(CATCH_UP_DELAY_MS * attempt);
+          const last = attempt === CATCH_UP_ATTEMPTS - 1;
           let payload: CatchUpResponse | null = null;
           try {
             const response = await fetch(
@@ -156,30 +159,60 @@ export function useTurnRuntime({
           }
 
           if (!payload || payload.status === "lookup_failed") {
-            // Try again: a failed read says nothing about the turn.
+            // A failed read says nothing about the turn. Try again; if none of
+            // them succeed, say the lookup failed — never that the turn did.
+            if (last) break;
             continue;
           }
-          if (payload.status === "running") {
-            /*
-              Still finishing. Wait if there are attempts left; otherwise say
-              it is still being processed — never that it did not finish, which
-              is a conclusion the server has explicitly not reached.
-            */
-            if (attempt < CATCH_UP_ATTEMPTS - 1) continue;
+
+          const activityLog = payload.activity ?? [];
+          const message = payload.message ?? null;
+
+          /*
+            A stored result settles it, whatever the state says. `running` with
+            a persisted message means finalisation has not been recorded yet —
+            the answer exists and is not discarded for that.
+          */
+          if (message) {
             dispatch({
               type: "recovered",
-              outcome: "still_running",
-              activityLog: payload.activity ?? [],
-              message: null,
+              outcome: "completed",
+              activityLog,
+              message,
             });
             return;
           }
 
+          if (payload.status === "completed") {
+            /*
+              Completed with no result is not a turn that produced nothing; it
+              is a view that cannot be right. Look again, and if it persists,
+              report an unresolved lookup rather than inventing a verdict.
+            */
+            if (last) break;
+            continue;
+          }
+
+          if (payload.status === "running") {
+            // Still finishing. Say so; never that it did not finish.
+            if (last) {
+              dispatch({
+                type: "recovered",
+                outcome: "still_running",
+                activityLog,
+                message: null,
+              });
+              return;
+            }
+            continue;
+          }
+
+          // failed, expired or unknown: the turn is over and produced nothing.
           dispatch({
             type: "recovered",
-            outcome: payload.message ? "completed" : "unfinished",
-            activityLog: payload.activity ?? [],
-            message: payload.message ?? null,
+            outcome: "unfinished",
+            activityLog,
+            message: null,
           });
           return;
         }
@@ -209,6 +242,11 @@ export function useTurnRuntime({
     await catchUp(turnId);
   }, [catchUp, state.recovery?.state, state.recovery?.turnId]);
 
+  const dismissRecovery = useCallback(
+    () => dispatch({ type: "dismiss_recovery" }),
+    [],
+  );
+
   const send = useCallback(async () => {
     const message = draft.trim();
     // Guard against rapid double-submits racing the state update, and against
@@ -236,10 +274,27 @@ export function useTurnRuntime({
     /* Without a turn id there is nothing to look up, and saying the turn did
        not finish is the only honest answer. */
     const recover = async (id: string | null) => {
-      // Without a turn id there is nothing to look up, and the stream never
-      // got far enough to have produced anything.
-      if (!id) return;
-      await catchUp(id);
+      if (id) {
+        await catchUp(id);
+        return;
+      }
+      /*
+        No turn id from the header and none from the body: the request did not
+        get far enough to be identified, so nothing can be looked up. Say that
+        plainly rather than returning to idle as though nothing happened.
+      */
+      dispatch({
+        type: "event",
+        event: {
+          type: "turn_failed",
+          error: {
+            code: "engine_unavailable",
+            userMessage:
+              "The connection was lost before this turn started. Your message is saved — send it again when you are ready.",
+            recoverable: true,
+          },
+        },
+      });
     };
 
     try {
@@ -249,6 +304,12 @@ export function useTurnRuntime({
         body: JSON.stringify({ message }),
         signal: controller.signal,
       });
+      /*
+        Take the turn id from the header before touching the body. A connection
+        that dies before the first SSE frame would otherwise leave nothing to
+        recover by, and the turn would vanish silently.
+      */
+      turnId = response.headers?.get?.("x-turn-id") ?? null;
 
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => null);
@@ -381,6 +442,7 @@ export function useTurnRuntime({
     stop,
     addDirection,
     checkAgain,
+    dismissRecovery,
     directionPending,
     onAction,
   };

@@ -21,7 +21,7 @@ export interface TurnPorts {
   reporter: ActivityReporter;
   onSceneAccepted(scene: CanvasScene): Promise<void>;
   onSceneRejected(rejection: SceneRejection): Promise<void>;
-  takeDirection(): Promise<string | null>;
+  takeDirection(options: { final: boolean }): Promise<string | null>;
 }
 
 /**

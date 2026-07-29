@@ -150,6 +150,20 @@ create table public.turn_runs (
   turn_id uuid primary key,
   project_id uuid not null references public.projects (id) on delete cascade,
   state public.turn_run_state not null default 'running',
+  /*
+    The steering window, which is not the same fact as "the turn has not
+    finished yet". A turn stops being able to consume direction at its last
+    direction boundary — before it persists its result and closes — so
+    accepting direction on the strength of `state = 'running'` alone would
+    promise a next step that no longer exists.
+  */
+  accepting_direction boolean not null default true,
+  /*
+    A lease, so a run whose worker died does not stay eligible for direction
+    and being recovered for ever. Nothing renews it today because a scripted
+    turn is seconds long; a real engine (T9) will need to.
+  */
+  lease_expires_at timestamptz not null default now() + interval '15 minutes',
   started_at timestamptz not null default now(),
   ended_at timestamptz,
   -- A terminal state has an end time and a running one does not; neither can
@@ -223,6 +237,149 @@ comment on table public.activity_events is
   'Observable work performed during a turn, as closed step + lifecycle state. Written only by the trusted server writer; readable by the project owner.';
 comment on table public.audit_events is
   'Security and consequence record, including actions that were rejected. Append-only, trusted-writer only.';
+/*
+  Accepting a direction has to be one operation, not a status read followed by
+  an insert. Between those two statements a turn can pass its last direction
+  boundary, and the direction would then be accepted — and promised a next
+  step — with nothing left to consume it.
+
+  Taking the row lock first is what removes the window: a concurrent
+  `take_turn_directions` either committed before this and has already sealed
+  the window (so this refuses), or it waits and then sees the row this
+  inserted.
+*/
+create or replace function public.accept_turn_direction(
+  p_project_id uuid,
+  p_turn_id uuid,
+  p_note text,
+  p_application public.direction_application
+)
+returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  run public.turn_runs%rowtype;
+begin
+  select * into run
+  from public.turn_runs
+  where turn_id = p_turn_id and project_id = p_project_id
+  for update;
+
+  if not found then
+    return 'unknown';
+  end if;
+  if run.state <> 'running' then
+    return 'finished';
+  end if;
+  if now() >= run.lease_expires_at then
+    return 'expired';
+  end if;
+  if not run.accepting_direction then
+    return 'closed';
+  end if;
+
+  insert into public.turn_directions (project_id, turn_id, note, application)
+  values (p_project_id, p_turn_id, p_note, p_application);
+  return 'accepted';
+end;
+$$;
+
+/*
+  Reads the directions a turn has not yet consumed, and — at the final
+  boundary — seals the window in the same transaction, so nothing can be
+  accepted after the last step that could apply it.
+*/
+create or replace function public.take_turn_directions(
+  p_project_id uuid,
+  p_turn_id uuid,
+  p_after timestamptz,
+  p_seal boolean
+)
+returns table (note text, created_at timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  perform 1
+  from public.turn_runs
+  where turn_id = p_turn_id and project_id = p_project_id
+  for update;
+
+  if p_seal then
+    update public.turn_runs
+    set accepting_direction = false
+    where turn_id = p_turn_id and project_id = p_project_id;
+  end if;
+
+  return query
+    select d.note, d.created_at
+    from public.turn_directions d
+    where d.turn_id = p_turn_id
+      and d.project_id = p_project_id
+      and d.created_at > p_after
+    order by d.created_at
+    limit 10;
+end;
+$$;
+
+/*
+  One snapshot of what a turn amounts to.
+
+  Reading the state and the result as separate requests can assemble a
+  combination that never existed: the result read misses the insert, the state
+  read then sees `completed`, and the caller concludes the turn finished with
+  nothing. A single statement sees one snapshot, so `completed` and its result
+  arrive together or not at all.
+
+  A running turn whose lease has expired reports `expired`: its worker is gone,
+  so "still being processed" would be false.
+*/
+create or replace function public.turn_snapshot(
+  p_project_id uuid,
+  p_turn_id uuid
+)
+returns table (
+  state text,
+  message_id uuid,
+  message_content text,
+  message_created_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select
+    case
+      when r.state = 'running' and now() >= r.lease_expires_at then 'expired'
+      else r.state::text
+    end as state,
+    m.id,
+    m.content,
+    m.created_at
+  from public.turn_runs r
+  left join public.messages m
+    on m.turn_id = r.turn_id
+   and m.project_id = r.project_id
+   and m.role = 'assistant'
+  where r.turn_id = p_turn_id
+    and r.project_id = p_project_id
+    and private.is_project_owner(r.project_id);
+$$;
+
+revoke all on function public.accept_turn_direction(uuid, uuid, text, public.direction_application) from public;
+revoke all on function public.take_turn_directions(uuid, uuid, timestamptz, boolean) from public;
+revoke all on function public.turn_snapshot(uuid, uuid) from public;
+
+-- Steering is written only by the trusted server writer; the snapshot is read
+-- by the owner, and checks ownership itself because it is security definer.
+grant execute on function public.accept_turn_direction(uuid, uuid, text, public.direction_application) to service_role;
+grant execute on function public.take_turn_directions(uuid, uuid, timestamptz, boolean) to service_role;
+grant execute on function public.turn_snapshot(uuid, uuid) to authenticated;
+
 comment on table public.turn_runs is
   'Operational state of a turn: whether it is still running. Written by the trusted server writer with checked results, because steering and recovery depend on it.';
 comment on table public.turn_directions is

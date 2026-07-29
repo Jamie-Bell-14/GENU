@@ -51,6 +51,39 @@ describe("finishing a turn", () => {
     expect(events).toEqual([{ type: "done" }]);
   });
 
+  it("records the outcome before emitting, on every failure path", async () => {
+    const order: string[] = [];
+    const { ports } = setup({
+      persistResult: vi.fn(async () => false),
+      closeRun: vi.fn(async () => {
+        order.push("close");
+        return true;
+      }),
+      emit: (event) => order.push(event.type),
+    });
+    await finishTurn(ports, "The answer.");
+    // Emission first would let a dead stream stop the turn recording that it
+    // failed, leaving the run eligible for direction until its lease expires.
+    expect(order).toEqual(["close", "turn_failed"]);
+  });
+
+  it("finalises even when emitting throws", async () => {
+    const closeRun = vi.fn(async () => true);
+    await finishTurn(
+      {
+        persistResult: vi.fn(async () => false),
+        closeRun,
+        audit: vi.fn(async () => {}),
+        emit: () => {
+          throw new Error("the reader is gone");
+        },
+      },
+      "The answer.",
+    ).catch(() => {});
+
+    expect(closeRun).toHaveBeenCalledWith("failed");
+  });
+
   it("never says done when the result was not stored", async () => {
     const { events, ports } = setup({
       persistResult: vi.fn(async () => false),

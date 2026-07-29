@@ -388,3 +388,49 @@ describe("stopping and losing the connection", () => {
     expect(streaming.direction).toBeNull();
   });
 });
+
+describe("an unresolved recovery", () => {
+  function unresolved(): TurnState {
+    const state = turnReducer(streamStarted(send()), {
+      type: "connection_lost",
+      turnId: TURN,
+    });
+    return turnReducer(state, {
+      type: "recovered",
+      outcome: "still_running",
+      activityLog: [],
+      message: null,
+    });
+  }
+
+  it("survives the user sending another message", () => {
+    // Getting on with the next message is not a decision to abandon a turn
+    // the server may still be finishing.
+    const before = unresolved();
+    expect(before.recovery).toEqual({ turnId: TURN, state: "still_running" });
+
+    const after = send(before);
+    expect(after.recovery).toEqual({ turnId: TURN, state: "still_running" });
+    expect(after.status).toBe("sending");
+  });
+
+  it("is cleared only when resolved or dismissed", () => {
+    const dismissed = turnReducer(unresolved(), { type: "dismiss_recovery" });
+    expect(dismissed.recovery).toBeNull();
+
+    const resolved = turnReducer(unresolved(), {
+      type: "recovered",
+      outcome: "completed",
+      activityLog: [],
+      message: {
+        id: "assistant-1",
+        role: "assistant",
+        content: "The recorded answer.",
+        blockKind: "plain",
+        createdAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
+    expect(resolved.recovery).toBeNull();
+    expect(resolved.messages).toHaveLength(2);
+  });
+});

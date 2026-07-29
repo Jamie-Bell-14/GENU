@@ -292,6 +292,117 @@ describe("catch-up that races the server", () => {
     ]);
   }, 15_000);
 
+  it("recovers the result when the state read lags behind the insert", async () => {
+    /*
+      The failure this guards: `completed` with the message read taken before
+      the insert. That combination never existed, so it must not become a
+      verdict — the client looks again and takes the result.
+    */
+    const persisted = {
+      id: TURN,
+      role: "assistant",
+      content: "The recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          activity: [],
+          message: null,
+        }),
+      } as unknown as Response)
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          activity: [],
+          message: persisted,
+        }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    await waitFor(() => expect(result.current.state.recovery).toBeNull(), {
+      timeout: 10_000,
+    });
+    expect(result.current.state.messages.map((m) => m.content)).toEqual([
+      "A problem worth exploring",
+      "The recorded answer.",
+    ]);
+    // The conclusion that must never be drawn from completed-with-no-message.
+    expect(result.current.state.error).toBeNull();
+  }, 15_000);
+
+  it("takes a stored result even while the state still says running", async () => {
+    // Finalisation has not been recorded yet; the answer exists regardless and
+    // must not be discarded for that.
+    const persisted = {
+      id: TURN,
+      role: "assistant",
+      content: "The recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          status: "running",
+          activity: [],
+          message: persisted,
+        }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.messages).toHaveLength(2);
+    expect(result.current.state.error).toBeNull();
+  }, 15_000);
+
+  it("reports an expired worker as finished, not as still processing", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "expired", activity: [], message: null }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.error?.code).toBe("turn_interrupted");
+  }, 15_000);
+
   it("does not recover a turn whose terminal frame already arrived", async () => {
     /*
       The socket can close badly *after* `done`. The answer is not lost, and
@@ -399,6 +510,88 @@ describe("stopping a turn", () => {
     expect(result.current.state.error).toBeNull();
     expect(result.current.state.recovery).toBeNull();
   });
+});
+
+describe("losing the stream before it identifies itself", () => {
+  it("recovers by the turn id in the response header", async () => {
+    // The first SSE frame carries the turn id, and a connection can die before
+    // it arrives. The header is the same fact, outside the fragile body.
+    const persisted = {
+      id: TURN,
+      role: "assistant",
+      content: "The recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const response = {
+      ok: true,
+      headers: new Headers({ "x-turn-id": TURN }),
+      body: {
+        getReader: () => ({
+          async read(): Promise<never> {
+            throw new TypeError("network error");
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response)
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          activity: [],
+          message: persisted,
+        }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `/api/projects/${PROJECT}/turns/${TURN}`,
+      { cache: "no-store" },
+    );
+    expect(result.current.state.messages.map((m) => m.content)).toEqual([
+      "A problem worth exploring",
+      "The recorded answer.",
+    ]);
+  }, 15_000);
+
+  it("says so plainly when no turn id can be obtained at all", async () => {
+    const response = {
+      ok: true,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          async read(): Promise<never> {
+            throw new TypeError("network error");
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    // Not silence: the user is told the turn never started.
+    expect(result.current.state.error?.userMessage).toMatch(
+      /lost before this turn started/i,
+    );
+    expect(result.current.state.messages).toHaveLength(1);
+    expect(result.current.state.status).toBe("idle");
+  }, 15_000);
 });
 
 describe("adding direction", () => {

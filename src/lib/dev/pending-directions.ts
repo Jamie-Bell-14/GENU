@@ -8,6 +8,8 @@
  * `/api/dev/*` imports this file.
  */
 const pending = new Map<string, string[]>();
+/** Turns past their final direction boundary. */
+const sealed = new Set<string>();
 
 const MAX_TURNS_TRACKED = 20;
 
@@ -20,7 +22,7 @@ export function openDevTurn(turnId: string): void {
   // Bounded so a long-running dev server cannot accumulate turns without end.
   if (pending.size >= MAX_TURNS_TRACKED) {
     const oldest = pending.keys().next().value;
-    if (oldest) pending.delete(oldest);
+    if (oldest) closeDevTurn(oldest);
   }
   pending.set(turnId, []);
 }
@@ -32,18 +34,27 @@ export function isDevTurn(turnId: string): boolean {
 /** Marks a turn finished: it can no longer accept direction. */
 export function closeDevTurn(turnId: string): void {
   pending.delete(turnId);
+  sealed.delete(turnId);
 }
 
 export function addPendingDirection(turnId: string, note: string): boolean {
   const notes = pending.get(turnId);
-  if (!notes) return false;
+  if (!notes || sealed.has(turnId)) return false;
   notes.push(note);
   return true;
 }
 
-/** Returns and clears the directions added since the last call. */
-export function takePendingDirections(turnId: string): string | null {
+/**
+ * Returns and clears the directions added since the last call. `seal` closes
+ * the window in the same step, mirroring the real route's locked read-and-seal
+ * so a direction cannot be accepted after the last boundary that could use it.
+ */
+export function takePendingDirections(
+  turnId: string,
+  options: { seal?: boolean } = {},
+): string | null {
   const notes = pending.get(turnId);
+  if (options.seal) sealed.add(turnId);
   if (!notes || notes.length === 0) return null;
   pending.set(turnId, []);
   return notes.join("\n");
@@ -52,4 +63,5 @@ export function takePendingDirections(turnId: string): string | null {
 /** Test seam: the module holds process state, so tests must be able to reset. */
 export function resetDevTurns(): void {
   pending.clear();
+  sealed.clear();
 }

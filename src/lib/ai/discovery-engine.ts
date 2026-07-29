@@ -59,7 +59,13 @@ export interface TurnHooks {
     outcome?: (result: T) => "succeeded" | "failed",
   ): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
-  takeDirection(): Promise<string | null>;
+  /**
+   * Direction the user added since the last check. `final` says this is the
+   * engine's last chance to use one — the host seals the steering window on
+   * that call, so nothing can be accepted afterwards and promised a step that
+   * will never come.
+   */
+  takeDirection(options: { final: boolean }): Promise<string | null>;
 }
 
 export type DirectionApplicationMode = "applies_now" | "next_step" | "restart";
@@ -165,7 +171,8 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
       Step boundary — this is where added direction is genuinely picked up,
       which is why the engine promises "next step" rather than "applies now".
     */
-    const direction = await hooks.takeDirection();
+    // The scripted engine has exactly one direction boundary, so it is final.
+    const direction = await hooks.takeDirection({ final: true });
     if (direction) {
       const acknowledgement = `\n\nYou added: “${truncate(direction, 120)}”. It is recorded against this turn and will be used once discovery analysis is connected.`;
       const streamed = await hooks.step(

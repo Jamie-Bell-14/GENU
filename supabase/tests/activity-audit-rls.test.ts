@@ -350,6 +350,147 @@ describe.skipIf(skip)("turn_runs", () => {
   });
 });
 
+describe.skipIf(skip)("the steering window", () => {
+  const OPEN = "aaaaaaaa-0000-4000-8000-00000000000a";
+  const SEALED = "aaaaaaaa-0000-4000-8000-00000000000b";
+
+  beforeAll(async () => {
+    await asTrustedWriter();
+    await db.query(
+      `insert into turn_runs (turn_id, project_id)
+       values ($1, $3), ($2, $3)`,
+      [OPEN, SEALED, projectA],
+    );
+  });
+
+  it("accepts a direction inserted before the window is sealed", async () => {
+    await asTrustedWriter();
+    const accepted = await db.query(
+      "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+      [projectA, OPEN, "Before the seal."],
+    );
+    expect(accepted.rows[0].outcome).toBe("accepted");
+
+    // Sealing at the final boundary returns exactly what was inserted first.
+    const taken = await db.query(
+      "select note from public.take_turn_directions($1, $2, $3, true)",
+      [projectA, OPEN, new Date(0).toISOString()],
+    );
+    expect(taken.rows.map((row) => row.note)).toEqual(["Before the seal."]);
+  });
+
+  it("refuses a direction once the window has been sealed", async () => {
+    await asTrustedWriter();
+    // The final boundary passes with nothing pending.
+    await db.query(
+      "select * from public.take_turn_directions($1, $2, $3, true)",
+      [projectA, SEALED, new Date(0).toISOString()],
+    );
+
+    const refused = await db.query(
+      "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+      [projectA, SEALED, "After the seal."],
+    );
+    // The run is still 'running' — finalisation has not happened yet — but
+    // there is no step left to consume this, so it is not accepted.
+    expect(refused.rows[0].outcome).toBe("closed");
+    expect(
+      (
+        await db.query("select 1 from turn_directions where turn_id = $1", [
+          SEALED,
+        ])
+      ).rowCount,
+    ).toBe(0);
+  });
+
+  it("refuses a direction for a finished or foreign turn", async () => {
+    await asTrustedWriter();
+    await db.query(
+      `update turn_runs set state = 'completed', ended_at = now()
+       where turn_id = $1`,
+      [OPEN],
+    );
+    const finished = await db.query(
+      "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+      [projectA, OPEN, "Too late."],
+    );
+    expect(finished.rows[0].outcome).toBe("finished");
+
+    const foreign = await db.query(
+      "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+      [projectA, "cccccccc-0000-4000-8000-00000000000c", "Not ours."],
+    );
+    expect(foreign.rows[0].outcome).toBe("unknown");
+  });
+
+  it("refuses a direction once the run's lease has expired", async () => {
+    await asTrustedWriter();
+    const expired = "aaaaaaaa-0000-4000-8000-00000000000e";
+    await db.query(
+      `insert into turn_runs (turn_id, project_id, lease_expires_at)
+       values ($1, $2, now() - interval '1 minute')`,
+      [expired, projectA],
+    );
+    const refused = await db.query(
+      "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+      [projectA, expired, "The worker is gone."],
+    );
+    expect(refused.rows[0].outcome).toBe("expired");
+  });
+
+  it("reports an expired run as expired, with its result if any", async () => {
+    await asTrustedWriter();
+    const expired = "aaaaaaaa-0000-4000-8000-00000000000f";
+    await db.query(
+      `insert into turn_runs (turn_id, project_id, lease_expires_at)
+       values ($1, $2, now() - interval '1 minute')`,
+      [expired, projectA],
+    );
+
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      "select state, message_id from public.turn_snapshot($1, $2)",
+      [projectA, expired],
+    );
+    expect(rows[0]).toEqual({ state: "expired", message_id: null });
+  });
+
+  it("returns state and result from one snapshot", async () => {
+    await impersonate(USER_A);
+    const turnId = "aaaaaaaa-0000-4000-8000-000000000010";
+    await db.query(
+      `insert into messages (id, project_id, turn_id, role, content)
+       values ($1, $2, $1, 'assistant', 'The answer.')`,
+      [turnId, projectA],
+    );
+    await asTrustedWriter();
+    await db.query(
+      `insert into turn_runs (turn_id, project_id, state, ended_at)
+       values ($1, $2, 'completed', now())`,
+      [turnId, projectA],
+    );
+
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      "select state, message_content from public.turn_snapshot($1, $2)",
+      [projectA, turnId],
+    );
+    expect(rows[0]).toEqual({
+      state: "completed",
+      message_content: "The answer.",
+    });
+  });
+
+  it("does not show another user's turn through the snapshot", async () => {
+    await impersonate(USER_B);
+    const { rows } = await db.query(
+      "select * from public.turn_snapshot($1, $2)",
+      [projectA, SEALED],
+    );
+    expect(rows).toEqual([]);
+  });
+});
+
 describe.skipIf(skip)("turn_directions", () => {
   it("records steering with the mode promised to the user", async () => {
     await asTrustedWriter();

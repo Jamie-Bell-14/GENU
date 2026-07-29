@@ -67,10 +67,17 @@ export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const emit = (event: TurnEvent) =>
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
-        );
+      // Best-effort, as in the real route: a departed reader must not stop the
+      // turn finishing its own work.
+      const emit = (event: TurnEvent) => {
+        try {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+          );
+        } catch {
+          // The reader is gone.
+        }
+      };
       /*
         The turn id is the first thing on the stream, before any activity: the
         client needs it to steer the turn and to ask for catch-up if the
@@ -105,8 +112,8 @@ export async function POST(request: NextRequest) {
         reporter,
         onSceneAccepted: async () => {},
         onSceneRejected: async () => {},
-        takeDirection: async () => {
-          const note = takePendingDirections(turnId);
+        takeDirection: async ({ final }) => {
+          const note = takePendingDirections(turnId, { seal: final });
           if (note) emit({ type: "direction_applied", note });
           return note;
         },
@@ -139,6 +146,7 @@ export async function POST(request: NextRequest) {
     headers: {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store, no-transform",
+      "x-turn-id": turnId,
     },
   });
 }

@@ -107,8 +107,13 @@ export async function openTurnRun(input: {
 }
 
 /**
- * Records the turn's outcome, exactly once. The update is constrained to a
- * still-running row, so a second terminal write cannot overwrite the first.
+ * Records the turn's outcome, exactly once, and closes the steering window
+ * with it. The update is constrained to a still-running row, so a second
+ * terminal write cannot overwrite the first.
+ *
+ * A transient failure here would leave the run eligible for direction and
+ * recoverable for ever, so it is retried a bounded number of times; the row's
+ * lease is what bounds the damage if every attempt fails.
  */
 export async function closeTurnRun(input: {
   turnId: string;
@@ -119,19 +124,91 @@ export async function closeTurnRun(input: {
     reportUnavailable("turn_run_close");
     return false;
   }
-  const { error, count } = await client
-    .from("turn_runs")
-    .update(
-      { state: input.state, ended_at: new Date().toISOString() },
-      { count: "exact" },
-    )
-    .eq("turn_id", input.turnId)
-    .eq("state", "running");
-  if (error) {
-    console.error("turn_run close failed", { code: error.code });
-    return false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { error, count } = await client
+      .from("turn_runs")
+      .update(
+        {
+          state: input.state,
+          accepting_direction: false,
+          ended_at: new Date().toISOString(),
+        },
+        { count: "exact" },
+      )
+      .eq("turn_id", input.turnId)
+      .eq("state", "running");
+    if (!error) return count === 1;
+    console.error("turn_run close failed", {
+      code: error.code,
+      attempt: attempt + 1,
+    });
   }
-  return count === 1;
+  return false;
+}
+
+/**
+ * Accepts a direction only if the turn's steering window is still open, as one
+ * locked operation. A status read followed by an insert leaves a window in
+ * which the turn passes its last direction boundary between the two.
+ */
+export async function acceptDirection(input: {
+  projectId: string;
+  turnId: string;
+  note: string;
+  application: DirectionApplication;
+}): Promise<
+  "accepted" | "unknown" | "finished" | "expired" | "closed" | "unavailable"
+> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("direction");
+    return "unavailable";
+  }
+  const { data, error } = await client.rpc("accept_turn_direction", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_note: input.note,
+    p_application: input.application,
+  });
+  if (error) {
+    console.error("accept_turn_direction failed", { code: error.code });
+    return "unavailable";
+  }
+  return data as "accepted" | "unknown" | "finished" | "expired" | "closed";
+}
+
+/**
+ * Reads directions added since `after` and, at the final boundary, seals the
+ * window in the same transaction — so a direction is either inserted before
+ * sealing and consumed here, or refused.
+ */
+export async function takeDirections(input: {
+  projectId: string;
+  turnId: string;
+  after: string;
+  seal: boolean;
+}): Promise<{ note: string; createdAt: string }[]> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("take_directions");
+    return [];
+  }
+  const { data, error } = await client.rpc("take_turn_directions", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_after: input.after,
+    p_seal: input.seal,
+  });
+  if (error) {
+    console.error("take_turn_directions failed", { code: error.code });
+    return [];
+  }
+  return ((data ?? []) as { note: string; created_at: string }[]).map(
+    (row) => ({
+      note: row.note,
+      createdAt: row.created_at,
+    }),
+  );
 }
 
 export type AuditAction =
@@ -179,28 +256,4 @@ export async function recordAudit(input: AuditInput): Promise<void> {
       code: error.code,
     });
   }
-}
-
-export async function recordDirection(input: {
-  projectId: string;
-  turnId: string;
-  note: string;
-  application: DirectionApplication;
-}): Promise<boolean> {
-  const client = trustedClient();
-  if (!client) {
-    reportUnavailable("direction");
-    return false;
-  }
-  const { error } = await client.from("turn_directions").insert({
-    project_id: input.projectId,
-    turn_id: input.turnId,
-    note: input.note,
-    application: input.application,
-  });
-  if (error) {
-    console.error("turn_direction insert failed", { code: error.code });
-    return false;
-  }
-  return true;
 }

@@ -5,12 +5,12 @@ import { finishTurn } from "@/lib/ai/finish-turn";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
-import { readDirectionsSince } from "@/lib/services/directions";
 import {
   closeTurnRun,
   openTurnRun,
   recordActivity,
   recordAudit,
+  takeDirections,
   type AuditAction,
 } from "@/lib/services/trusted-writer";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -169,8 +169,18 @@ export async function POST(
   const engine = new ScriptedDiscoveryEngine();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      /*
+        Emission is best-effort. If the client has gone the controller throws,
+        and that must never stop the turn recording its outcome — a run that
+        cannot finalise stays eligible for direction and recoverable until its
+        lease expires.
+      */
       const emit = (event: TurnEvent) => {
-        controller.enqueue(encodeEvent(event));
+        try {
+          controller.enqueue(encodeEvent(event));
+        } catch {
+          // The reader is gone; the turn still finishes its own work.
+        }
       };
       const audit = (
         action: AuditAction,
@@ -248,11 +258,18 @@ export async function POST(
             }),
           onSceneRejected: (rejection) =>
             audit("scene_rejected", { detail: { code: rejection.code } }),
-          takeDirection: async () => {
-            const directions = await readDirectionsSince(supabase, {
+          takeDirection: async ({ final }) => {
+            /*
+              Reading and sealing are one locked operation: a direction is
+              either inserted before the seal and returned here, or the seal
+              wins and the endpoint refuses it. A read followed by a separate
+              seal would leave a window where neither happens.
+            */
+            const directions = await takeDirections({
               projectId,
               turnId,
               after: directionCursor,
+              seal: final,
             });
             if (directions.length === 0) return null;
             directionCursor = directions[directions.length - 1].createdAt;
@@ -302,6 +319,9 @@ export async function POST(
         );
       } catch {
         // Internal detail stays server-side (SECURITY_STANDARDS §8).
+        // Finalisation first: a dead stream must not stop the turn recording
+        // that it failed.
+        await closeTurnRun({ turnId, state: "failed" });
         emit({
           type: "turn_failed",
           error: {
@@ -311,7 +331,6 @@ export async function POST(
             recoverable: true,
           },
         });
-        await closeTurnRun({ turnId, state: "failed" });
         await audit("turn_failed");
       } finally {
         controller.close();
@@ -324,6 +343,12 @@ export async function POST(
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store, no-transform",
       connection: "keep-alive",
+      /*
+        Also outside the body. The client learns the turn id from the first SSE
+        frame, and a connection that dies before that frame would otherwise
+        leave it with nothing to recover by.
+      */
+      "x-turn-id": turnId,
     },
   });
 }

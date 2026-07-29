@@ -40,7 +40,12 @@ function AssistantTurn({
 export function ConversationStream({
   state,
   onCheckAgain,
-}: Readonly<{ state: TurnState; onCheckAgain?: () => void }>) {
+  onDismissRecovery,
+}: Readonly<{
+  state: TurnState;
+  onCheckAgain?: () => void;
+  onDismissRecovery?: () => void;
+}>) {
   const endRef = useRef<HTMLDivElement>(null);
   const count = state.messages.length;
 
@@ -111,10 +116,19 @@ export function ConversationStream({
                 ? "The connection dropped, and this turn is still being processed. Your message is saved."
                 : "The connection dropped, and this turn could not be checked just now. Your message is saved."}
           </p>
-          {state.recovery.state !== "checking" && onCheckAgain && (
-            <Button variant="outline" size="xs" onClick={onCheckAgain}>
-              Check again
-            </Button>
+          {state.recovery.state !== "checking" && (
+            <>
+              {onCheckAgain && (
+                <Button variant="outline" size="xs" onClick={onCheckAgain}>
+                  Check again
+                </Button>
+              )}
+              {onDismissRecovery && (
+                <Button variant="ghost" size="xs" onClick={onDismissRecovery}>
+                  Dismiss
+                </Button>
+              )}
+            </>
           )}
         </div>
       )}

@@ -5,8 +5,7 @@ import {
   type SafeError,
 } from "@/lib/ai/turn-events";
 import { DirectionRequestSchema } from "@/lib/services/directions";
-import { recordAudit, recordDirection } from "@/lib/services/trusted-writer";
-import { readTurnStatus } from "@/lib/services/turn-status";
+import { acceptDirection, recordAudit } from "@/lib/services/trusted-writer";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { DIRECTION_RATE_LIMIT } from "@/lib/validation/turns";
 
@@ -112,55 +111,45 @@ export async function POST(
   }
 
   /*
-    Authorising the project is not enough. The turn must belong to it *and* be
-    running: a finished turn has no step left to consume a direction, so
-    accepting one there would record a promise the system cannot keep. A
-    foreign turn, a missing turn and a finished turn all get the same answer,
-    so the response does not reveal which — and the status comes from the audit
-    trail rather than from the client's belief about what is on screen.
+    Authorising the project is not enough. The turn must belong to it, and its
+    steering window must still be open — a turn that has passed its last
+    direction boundary has nothing left to consume one, so accepting there
+    would record a promise the system cannot keep.
+
+    This is one locked database operation, not a status read followed by an
+    insert: between those two statements the turn could seal its window, and
+    the direction would be accepted into a turn that can no longer use it.
   */
-  const status = await readTurnStatus(supabase, projectId, parsed.data.turnId);
-  if (status !== "running") {
+  const application = new ScriptedDiscoveryEngine().directionApplication;
+  const outcome = await acceptDirection({
+    projectId,
+    turnId: parsed.data.turnId,
+    note: parsed.data.note,
+    application,
+  });
+
+  if (outcome !== "accepted") {
     await recordAudit({
       projectId,
       actorId: user.id,
       actorKind: "user",
       action: "direction_rejected",
       correlationId: parsed.data.turnId,
-      detail: { code: status },
+      detail: { code: outcome },
     });
+    // A missing turn, a foreign turn, a finished one and a sealed one all
+    // answer the same way, so the response reveals nothing about which.
     return errorResponse(
       {
         code:
-          status === "lookup_failed"
-            ? "engine_unavailable"
-            : "turn_interrupted",
+          outcome === "unavailable" ? "engine_unavailable" : "turn_interrupted",
         userMessage:
-          status === "lookup_failed"
+          outcome === "unavailable"
             ? "Your direction could not be recorded. Your text is unchanged — try again."
-            : "That turn is no longer running, so the direction was not recorded. Your text is unchanged.",
-        recoverable: status === "lookup_failed",
+            : "That turn is no longer taking direction, so it was not recorded. Your text is unchanged.",
+        recoverable: outcome === "unavailable",
       },
-      status === "lookup_failed" ? 503 : 409,
-    );
-  }
-
-  const application = new ScriptedDiscoveryEngine().directionApplication;
-  const stored = await recordDirection({
-    projectId,
-    turnId: parsed.data.turnId,
-    note: parsed.data.note,
-    application,
-  });
-  if (!stored) {
-    return errorResponse(
-      {
-        code: "engine_unavailable",
-        userMessage:
-          "Your direction could not be recorded, so it has not been applied. Your text is unchanged — try again.",
-        recoverable: true,
-      },
-      503,
+      outcome === "unavailable" ? 503 : 409,
     );
   }
 

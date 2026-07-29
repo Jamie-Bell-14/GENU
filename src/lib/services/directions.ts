@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import type { DirectionApplication } from "@/lib/ai/turn-events";
 
 /**
  * Mid-turn steering (DESIGN.md §9.3).
@@ -26,28 +25,6 @@ export const DirectionRequestSchema = z
   .strict();
 
 export type DirectionRequest = z.infer<typeof DirectionRequestSchema>;
-
-export async function recordDirection(
-  supabase: SupabaseClient,
-  input: {
-    projectId: string;
-    turnId: string;
-    note: string;
-    application: DirectionApplication;
-  },
-): Promise<boolean> {
-  const { error } = await supabase.from("turn_directions").insert({
-    project_id: input.projectId,
-    turn_id: input.turnId,
-    note: input.note,
-    application: input.application,
-  });
-  if (error) {
-    console.error("turn_direction insert failed", { code: error.code });
-    return false;
-  }
-  return true;
-}
 
 /**
  * Directions added since `after`, oldest first.

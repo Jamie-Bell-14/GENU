@@ -140,7 +140,9 @@ interface DiscoveryEngine {
 // What an engine may do to the outside world. Narrow on purpose.
 interface TurnHooks {
   emit(event: EngineEvent): void;         // EngineEvent excludes app-owned events
-  activity(step: ActivityStep): Promise<void>;   // names a step; never the words
+  // Reports an operation *around* the work that performs it: active on entry,
+  // complete on exit. A label can never describe work that already finished.
+  step<T>(name: ActivityStep, work: () => Promise<T>): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;  // validated by the app
   takeDirection(): Promise<string | null>;
 }
@@ -168,9 +170,25 @@ T9–T12.
 
 Activity, audit and steering are persisted in three append-only tables —
 `activity_events`, `audit_events`, `turn_directions` — correlated by the turn
-id the host generates and passes to the engine. Steering crosses two HTTP
-requests (the SSE stream and the direction POST), so the handover is storage
-rather than process memory.
+id the host generates, emits as the first frame of the stream, and passes to
+the engine. Steering crosses two HTTP requests (the SSE stream and the
+direction POST), so the handover is storage rather than process memory.
+
+Those tables have **no write grant for the browser-authenticated role**:
+append-only prevents history being rewritten, not fabricated. Every write goes
+through `src/lib/services/trusted-writer.ts` under an elevated key held only in
+server environment variables, after the calling route has authenticated the
+user and confirmed project ownership through the user-scoped client.
+`activity_events` stores a closed step enum and a lifecycle state rather than
+label text, so the words a user reads are looked up from the application's
+catalogue on read.
+
+A dropped SSE connection is recovered rather than reloaded:
+`GET /api/projects/[id]/turns/[turnId]` returns the activity and any assistant
+message recorded for that turn. Ids are stable — activity lines are keyed by
+turn and step — so replay cannot duplicate what the client already holds. A
+deliberate Stop is not a dropped connection: it discards partial text without
+catch-up, and a truncated answer is never promoted into the transcript.
 
 - Slice implementation `AnthropicDiscoveryEngine`: **one streaming Messages call with tools** `update_project_model`, `propose_connected_change`, `start_research`, `suggest_checkpoint`. Application code validates every tool input (Zod), authorises against the project, applies via services, and emits events. The model never writes anywhere.
 - A deterministic `ScriptedDiscoveryEngine` implements the same interface for Playwright/e2e and UI development — the mock/real seam demanded by the addendum.

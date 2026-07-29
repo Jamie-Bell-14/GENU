@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectScope } from "@/lib/canvas/scene";
+import { createActivityReporter } from "./activity-reporter";
 import { createTurnHooks, type TurnPorts } from "./turn-hooks";
 import type { TurnEvent } from "./turn-events";
+
+const TURN_ID = "dddddddd-0000-4000-8000-000000000001";
 
 const OBJECT_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const OBJECT_B = "aaaaaaaa-0000-4000-8000-000000000002";
@@ -28,16 +31,18 @@ function validCandidate(overrides: Record<string, unknown> = {}) {
 
 function setup(overrides: Partial<TurnPorts> = {}) {
   const events: TurnEvent[] = [];
+  const emit = (event: TurnEvent) => events.push(event);
+  const persist = vi.fn(async () => {});
   const ports: TurnPorts = {
-    emit: (event) => events.push(event),
+    emit,
     scope,
-    onActivity: vi.fn(async () => {}),
+    reporter: createActivityReporter({ turnId: TURN_ID, emit, persist }),
     onSceneAccepted: vi.fn(async () => {}),
     onSceneRejected: vi.fn(async () => {}),
     takeDirection: vi.fn(async () => null),
     ...overrides,
   };
-  return { events, ports, hooks: createTurnHooks(ports) };
+  return { events, ports, persist, hooks: createTurnHooks(ports) };
 }
 
 describe("scene recommendation boundary", () => {
@@ -112,30 +117,56 @@ describe("scene recommendation boundary", () => {
   });
 });
 
-describe("activity labels", () => {
-  it("uses the application's own words for a named step", async () => {
-    const { events, ports, hooks } = setup();
-    await hooks.activity("recording_message");
+describe("activity reporting", () => {
+  it("uses the application's own words, and reports start and finish", async () => {
+    const { events, persist, hooks } = setup();
+    await hooks.step("reading_project_model", async () => "done");
 
-    const activity = events.find((event) => event.type === "activity");
-    expect(activity).toMatchObject({
-      activity: { kind: "analysis", label: "Recording your message…" },
-    });
-    expect(ports.onActivity).toHaveBeenCalledTimes(1);
+    const lines = events
+      .filter((event) => event.type === "activity")
+      .map((event) => event.activity);
+    expect(lines.map((line) => [line.state, line.label])).toEqual([
+      ["active", "Reading the current project model…"],
+      ["complete", "Project model read"],
+    ]);
+    // Both reports describe one operation, so they share an id.
+    expect(new Set(lines.map((line) => line.id)).size).toBe(1);
+    expect(persist).toHaveBeenCalledTimes(2);
   });
 
-  it("shows the line before persistence resolves, so display never waits", async () => {
-    let resolvePersist: (() => void) | null = null;
-    const { events, hooks } = setup({
-      onActivity: () =>
-        new Promise<void>((resolve) => {
-          resolvePersist = resolve;
-        }),
+  it("brackets the work, so the active line exists only while it runs", async () => {
+    const { events, hooks } = setup();
+    let sawActiveDuringWork = false;
+
+    await hooks.step("preparing_canvas_view", async () => {
+      const lines = events.filter((event) => event.type === "activity");
+      sawActiveDuringWork =
+        lines.length === 1 && lines[0].activity.state === "active";
     });
 
-    const pending = hooks.activity("reading_project_model");
-    expect(events.filter((event) => event.type === "activity")).toHaveLength(1);
-    resolvePersist!();
-    await pending;
+    expect(sawActiveDuringWork).toBe(true);
+    expect(
+      events.filter((event) => event.type === "activity").at(-1),
+    ).toMatchObject({ activity: { state: "complete" } });
+  });
+
+  it("still reports completion when the work throws", async () => {
+    const { events, hooks } = setup();
+    await expect(
+      hooks.step("preparing_canvas_view", async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+
+    expect(
+      events.filter((event) => event.type === "activity").at(-1),
+    ).toMatchObject({ activity: { state: "complete" } });
+  });
+
+  it("returns the work's own result to the caller", async () => {
+    const { hooks } = setup();
+    await expect(
+      hooks.step("reading_project_model", async () => 42),
+    ).resolves.toBe(42);
   });
 });

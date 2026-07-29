@@ -1,12 +1,32 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { TurnEvent } from "@/lib/ai/turn-events";
+import { defaultFocalObjectId } from "@/lib/canvas/problem-map";
 import { DEMO_OBJECTS, DEMO_RELATIONSHIPS } from "@/lib/dev/demo-project";
-import { takePendingDirections } from "@/lib/dev/pending-directions";
+import {
+  openDevTurn,
+  takePendingDirections,
+} from "@/lib/dev/pending-directions";
 import { TurnRequestSchema } from "@/lib/validation/turns";
 
 export const runtime = "nodejs";
+
+/*
+  A per-chunk delay so the behaviours this route exists to demonstrate —
+  activity, steering, stopping — can actually be seen and driven. It simulates
+  a model's pace, which is what the parameter has always been for; correctness
+  does not depend on it, because the steering handoff itself is proved
+  deterministically in src/app/api/dev/turns/route.test.ts.
+
+  PPM_DEV_TURN_DELAY_MS overrides it, so the route-level tests can run the same
+  code without waiting.
+*/
+function devChunkDelayMs(): number {
+  const configured = Number(process.env.PPM_DEV_TURN_DELAY_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 250;
+}
 
 /**
  * Development-only turn endpoint: the same scripted engine, event stream and
@@ -40,18 +60,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const objectIds = DEMO_OBJECTS.map((object) => object.id);
-  const scope = {
-    objectIds: new Set(objectIds),
-    relationshipIds: new Set(
-      DEMO_RELATIONSHIPS.map((relationship) => relationship.id),
-    ),
-  };
-
   const turnId = crypto.randomUUID();
-  // A small per-chunk delay so the observable behaviours this route exists to
-  // demonstrate — activity, steering, stopping — are actually observable.
-  const engine = new ScriptedDiscoveryEngine(150);
+  openDevTurn(turnId);
+  const engine = new ScriptedDiscoveryEngine(devChunkDelayMs());
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -59,11 +70,39 @@ export async function POST(request: NextRequest) {
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
         );
+      /*
+        The turn id is the first thing on the stream, before any activity: the
+        client needs it to steer the turn and to ask for catch-up if the
+        connection drops, so it must not arrive after work has begun.
+      */
+      emit({ type: "turn_started", turnId });
+
+      const reporter = createActivityReporter({
+        turnId,
+        emit,
+        // No database here: activity is streamed and shown, not stored.
+        persist: async () => {},
+      });
+      // The same operation the real route performs, on the demo model: read
+      // what exists and work out what this project is exploring.
+      const { objectIds, scope, focalObjectId } = await reporter.step(
+        "reading_project_model",
+        async () => ({
+          objectIds: DEMO_OBJECTS.map((object) => object.id),
+          scope: {
+            objectIds: new Set(DEMO_OBJECTS.map((object) => object.id)),
+            relationshipIds: new Set(
+              DEMO_RELATIONSHIPS.map((relationship) => relationship.id),
+            ),
+          },
+          focalObjectId: defaultFocalObjectId(DEMO_OBJECTS, DEMO_RELATIONSHIPS),
+        }),
+      );
+
       const hooks = createTurnHooks({
         emit,
         scope,
-        // No database here: activity is streamed and shown, not stored.
-        onActivity: async () => {},
+        reporter,
         onSceneAccepted: async () => {},
         onSceneRejected: async () => {},
         takeDirection: async () => {
@@ -78,7 +117,7 @@ export async function POST(request: NextRequest) {
           projectId: "demo",
           turnId,
           userMessage: parsed.data.message,
-          context: { objectIds },
+          context: { objectIds, focalObjectId },
         },
         hooks,
         request.signal,

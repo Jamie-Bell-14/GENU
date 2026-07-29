@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { CanvasScene } from "@/lib/canvas/scene";
 import {
+  activityLineFor,
   turnReducer,
   INITIAL_TURN_STATE,
   NO_ACTIVITY,
   type Message,
   type TurnState,
 } from "./turn-events";
+
+const TURN = "t1";
 
 const userMessage: Message = {
   id: "m1",
@@ -82,14 +85,18 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "activity",
-        activity: { id: "a1", kind: "analysis", label: "Recording…" },
+        activity: activityLineFor(TURN, "reading_project_model", "active"),
       },
     });
-    expect(state.activity.conversation?.label).toBe("Recording…");
+    expect(state.activity.conversation?.label).toBe(
+      "Reading the current project model…",
+    );
     state = turnReducer(state, { type: "event", event: { type: "done" } });
     expect(state.activity.conversation).toBeNull();
     // The line fades from the working surface but stays retrievable.
-    expect(state.activityLog.map((line) => line.label)).toEqual(["Recording…"]);
+    expect(state.activityLog.map((line) => line.step)).toEqual([
+      "reading_project_model",
+    ]);
   });
 
   it("never shows more than three contextual actions", () => {
@@ -166,37 +173,54 @@ describe("turnReducer", () => {
 });
 
 describe("activity history, scenes and steering", () => {
-  const line = (id: string, label: string) =>
-    ({ id, label, kind: "analysis" }) as const;
+  const report = (
+    state: TurnState,
+    step: "reading_project_model" | "preparing_canvas_view",
+    lifecycle: "active" | "complete",
+  ) =>
+    turnReducer(state, {
+      type: "event",
+      event: {
+        type: "activity",
+        activity: activityLineFor(TURN, step, lifecycle),
+      },
+    });
 
   it("keeps a retrievable log after the working line has faded", () => {
     let state = streamStarted(send());
-    for (const [id, label] of [
-      ["a1", "Recording your message…"],
-      ["a2", "Reading the current project model…"],
-    ]) {
-      state = turnReducer(state, {
-        type: "event",
-        event: { type: "activity", activity: line(id, label) },
-      });
-    }
+    state = report(state, "reading_project_model", "active");
+    state = report(state, "reading_project_model", "complete");
+    state = report(state, "preparing_canvas_view", "active");
+    state = report(state, "preparing_canvas_view", "complete");
     state = turnReducer(state, { type: "event", event: { type: "done" } });
 
     expect(state.activity).toEqual(NO_ACTIVITY);
-    expect(state.activityLog.map((entry) => entry.label)).toEqual([
-      "Recording your message…",
-      "Reading the current project model…",
+    expect(state.activityLog.map((entry) => entry.step)).toEqual([
+      "reading_project_model",
+      "preparing_canvas_view",
     ]);
+    expect(state.activityLog.every((entry) => entry.state === "complete")).toBe(
+      true,
+    );
+  });
+
+  it("does not leave a finished step looking active on its own surface", () => {
+    let state = streamStarted(send());
+    state = report(state, "reading_project_model", "active");
+    state = report(state, "reading_project_model", "complete");
+    // Canvas work starts while the conversation's step is already finished.
+    state = report(state, "preparing_canvas_view", "active");
+
+    expect(state.activity.conversation?.state).toBe("complete");
+    expect(state.activity.canvas?.state).toBe("active");
   });
 
   it("does not duplicate a line that is delivered twice", () => {
     let state = streamStarted(send());
-    for (let i = 0; i < 2; i += 1) {
-      state = turnReducer(state, {
-        type: "event",
-        event: { type: "activity", activity: line("a1", "Recording…") },
-      });
-    }
+    state = report(state, "reading_project_model", "active");
+    state = report(state, "reading_project_model", "complete");
+    // A reconnect replays what was already received.
+    state = report(state, "reading_project_model", "complete");
     expect(state.activityLog).toHaveLength(1);
   });
 
@@ -257,5 +281,92 @@ describe("activity history, scenes and steering", () => {
       application: "next_step",
     });
     expect(send(withDirection).direction).toBeNull();
+  });
+});
+
+describe("stopping and losing the connection", () => {
+  function withPartialText(): TurnState {
+    return turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "assistant_delta", text: "A half-finished thought" },
+    });
+  }
+
+  it("never turns a stopped response into a completed answer", () => {
+    const state = turnReducer(withPartialText(), { type: "turn_stopped" });
+
+    expect(state.messages).toEqual([userMessage]);
+    expect(state.streaming).toBeNull();
+    expect(state.activity).toEqual(NO_ACTIVITY);
+    expect(state.status).toBe("idle");
+    expect(state.stopped).toBe(true);
+    // Stopping is a decision, not a failure.
+    expect(state.error).toBeNull();
+  });
+
+  it("discards partial text when the connection drops too", () => {
+    const state = turnReducer(withPartialText(), { type: "connection_lost" });
+    expect(state.messages).toEqual([userMessage]);
+    expect(state.recovering).toBe(true);
+    expect(state.status).toBe("idle");
+  });
+
+  it("takes the recorded result on catch-up without duplicating it", () => {
+    const persisted: Message = {
+      id: "assistant-1",
+      role: "assistant",
+      content: "The complete recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    let state = turnReducer(withPartialText(), { type: "connection_lost" });
+    state = turnReducer(state, {
+      type: "recovered",
+      activityLog: [activityLineFor(TURN, "reading_project_model", "complete")],
+      message: persisted,
+    });
+
+    expect(state.messages.map((message) => message.content)).toEqual([
+      userMessage.content,
+      "The complete recorded answer.",
+    ]);
+    expect(state.recovering).toBe(false);
+    expect(state.error).toBeNull();
+
+    // Catching up twice must not append the same message again.
+    const again = turnReducer(state, {
+      type: "recovered",
+      activityLog: [activityLineFor(TURN, "reading_project_model", "complete")],
+      message: persisted,
+    });
+    expect(again.messages).toHaveLength(2);
+    expect(again.activityLog).toHaveLength(1);
+  });
+
+  it("says the turn did not finish when nothing was recorded", () => {
+    let state = turnReducer(withPartialText(), { type: "connection_lost" });
+    state = turnReducer(state, {
+      type: "recovered",
+      activityLog: [],
+      message: null,
+    });
+    expect(state.messages).toEqual([userMessage]);
+    expect(state.error?.code).toBe("turn_interrupted");
+  });
+
+  it("reports a refused direction without ending the turn", () => {
+    const streaming = turnReducer(streamStarted(send()), {
+      type: "direction_failed",
+      error: {
+        code: "engine_unavailable",
+        userMessage: "Your direction could not be recorded.",
+        recoverable: true,
+      },
+    });
+    expect(streaming.error?.userMessage).toBe(
+      "Your direction could not be recorded.",
+    );
+    expect(streaming.status).toBe("streaming");
+    expect(streaming.direction).toBeNull();
   });
 });

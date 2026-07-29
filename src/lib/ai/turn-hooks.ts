@@ -4,9 +4,9 @@ import {
   type ProjectScope,
   type SceneRejection,
 } from "@/lib/canvas/scene";
-import { activityLine } from "@/lib/services/activity";
+import type { ActivityReporter } from "./activity-reporter";
 import type { TurnHooks } from "./discovery-engine";
-import type { ActivityLine, TurnEvent } from "./turn-events";
+import type { TurnEvent } from "./turn-events";
 
 /**
  * What a host must supply to run a turn. Everything that touches storage is a
@@ -17,8 +17,8 @@ import type { ActivityLine, TurnEvent } from "./turn-events";
 export interface TurnPorts {
   emit(event: TurnEvent): void;
   scope: ProjectScope;
-  /** Persist a line of activity. Failures must not abort the turn. */
-  onActivity(line: ActivityLine): Promise<void>;
+  /** Reports operations around the work that performs them. */
+  reporter: ActivityReporter;
   onSceneAccepted(scene: CanvasScene): Promise<void>;
   onSceneRejected(rejection: SceneRejection): Promise<void>;
   takeDirection(): Promise<string | null>;
@@ -38,12 +38,7 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
   return {
     emit: ports.emit,
 
-    async activity(step) {
-      const line = activityLine(step);
-      // Shown immediately; persistence follows so the panel can be rebuilt.
-      ports.emit({ type: "activity", activity: line });
-      await ports.onActivity(line);
-    },
+    step: (name, work) => ports.reporter.step(name, work),
 
     async recommendScene(candidate) {
       const result = validateScene(candidate, ports.scope);

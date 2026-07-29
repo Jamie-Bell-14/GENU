@@ -5,9 +5,17 @@ import type { Message, TurnState } from "@/lib/ai/turn-events";
 import { TurnBlock } from "./turn-block";
 import { ActivityIndicator } from "@/components/activity/activity-indicator";
 
+/*
+  Each turn is a labelled region. The label is what lets a reader — and a test
+  — address "the message you wrote" as distinct from the assistant quoting it
+  back, which is otherwise the same words twice on one screen.
+*/
 function UserTurn({ message }: Readonly<{ message: Message }>) {
   return (
-    <article className="border-edge-subtle border-t pt-4">
+    <article
+      aria-label="Your turn"
+      className="border-edge-subtle border-t pt-4"
+    >
       <p className="text-fg-tertiary mb-1 text-xs font-medium">You</p>
       <p className="text-sm leading-relaxed whitespace-pre-wrap">
         {message.content}
@@ -20,7 +28,7 @@ function AssistantTurn({
   message,
 }: Readonly<{ message: Pick<Message, "content" | "blockKind" | "heading"> }>) {
   return (
-    <article className="text-fg-primary">
+    <article aria-label="Response" className="text-fg-primary">
       <TurnBlock kind={message.blockKind} heading={message.heading}>
         <span className="whitespace-pre-wrap">{message.content}</span>
       </TurnBlock>
@@ -78,6 +86,20 @@ export function ConversationStream({ state }: Readonly<{ state: TurnState }>) {
           <p className="text-fg-tertiary text-xs">Sending…</p>
         )}
       </div>
+
+      {/* Stopping is a decision, not a failure: it is stated plainly and
+          without error styling, and the partial answer is not shown. */}
+      {state.stopped && (
+        <p className="text-fg-tertiary text-xs">
+          You stopped this response. Your message is saved.
+        </p>
+      )}
+
+      {state.recovering && (
+        <p className="text-fg-tertiary text-xs">
+          The connection dropped. Checking what was recorded…
+        </p>
+      )}
 
       {state.error && (
         <p

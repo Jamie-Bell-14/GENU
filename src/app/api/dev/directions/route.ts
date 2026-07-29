@@ -36,7 +36,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  addPendingDirection(parsed.data.turnId, parsed.data.note);
+  // A direction must belong to a turn this endpoint actually started, the
+  // dev-route equivalent of the real route's ownership check.
+  if (!addPendingDirection(parsed.data.turnId, parsed.data.note)) {
+    return NextResponse.json(
+      {
+        error: {
+          code: "engine_unavailable",
+          userMessage:
+            "That turn is no longer running, so the direction was not recorded. Your text is unchanged.",
+          recoverable: true,
+        },
+      },
+      { status: 404 },
+    );
+  }
+
   const application = new ScriptedDiscoveryEngine().directionApplication;
   return NextResponse.json({
     application,

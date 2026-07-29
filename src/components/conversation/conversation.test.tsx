@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { INITIAL_TURN_STATE, type TurnState } from "@/lib/ai/turn-events";
+import {
+  activityLineFor,
+  INITIAL_TURN_STATE,
+  type TurnState,
+} from "@/lib/ai/turn-events";
 import { MAX_MESSAGE_LENGTH } from "@/lib/validation/turns";
 import { Composer } from "./composer";
 import { ConversationStream } from "./conversation-stream";
@@ -75,17 +79,19 @@ describe("ConversationStream", () => {
             },
           ],
           activity: {
-            conversation: {
-              id: "a1",
-              kind: "analysis",
-              label: "Recording your message…",
-            },
+            conversation: activityLineFor(
+              "t1",
+              "reading_project_model",
+              "active",
+            ),
             canvas: null,
           },
         })}
       />,
     );
-    const live = screen.getByText("Recording your message…").closest("div");
+    const live = screen
+      .getByText("Reading the current project model…")
+      .closest("div");
     expect(live).toHaveAttribute("aria-live", "polite");
 
     rerender(

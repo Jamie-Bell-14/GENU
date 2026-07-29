@@ -1,47 +1,39 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ACTIVITY_STEPS, type ActivityStep } from "@/lib/ai/activity-steps";
-import type { ActivityLine } from "@/lib/ai/turn-events";
+import { isActivityStep, type ActivityState } from "@/lib/ai/activity-steps";
+import { activityLineFor, type ActivityLine } from "@/lib/ai/turn-events";
 
 /**
- * Activity recording (docs/VERTICAL_SLICE_TASKS.md T8).
- *
- * The label is looked up from the application's catalogue by step name, so the
- * text a user reads as "what the system is doing" can only be one of the
- * strings written in this repository.
+ * The read side of activity (docs/VERTICAL_SLICE_TASKS.md T8). Writing is the
+ * trusted server writer's job — see `trusted-writer.ts` for why.
  */
-export function activityLine(step: ActivityStep): ActivityLine {
-  const { kind, label } = ACTIVITY_STEPS[step];
-  return { id: crypto.randomUUID(), kind, label };
-}
 
 interface ActivityRow {
-  id: string;
-  kind: ActivityLine["kind"];
-  label: string;
+  turn_id: string;
+  step: string;
+  state: ActivityState;
   created_at: string;
 }
 
 /**
- * Persists one line of activity. Recording is best-effort by design: a failed
- * insert must not abort a turn the user is watching, because the activity is a
- * narration of work, not the work itself. The audit trail — which does matter
- * for security — is written separately.
+ * Rebuilds displayable lines from stored rows. Each operation is stored twice
+ * — active, then complete — so rows are collapsed by turn and step, keeping the
+ * latest state. The label is looked up from the application's catalogue rather
+ * than read from the database, so the words a user sees can only be words this
+ * repository contains.
  */
-export async function recordActivity(
-  supabase: SupabaseClient,
-  input: { projectId: string; turnId: string; line: ActivityLine },
-): Promise<void> {
-  const { error } = await supabase.from("activity_events").insert({
-    id: input.line.id,
-    project_id: input.projectId,
-    turn_id: input.turnId,
-    kind: input.line.kind,
-    label: input.line.label,
-  });
-  if (error) {
-    // No project content in logs (SECURITY_STANDARDS §14.1).
-    console.error("activity_event insert failed", { code: error.code });
+export function linesFromRows(rows: readonly ActivityRow[]): ActivityLine[] {
+  const byId = new Map<string, ActivityLine>();
+  for (const row of rows) {
+    if (!isActivityStep(row.step)) continue; // Unknown vocabulary is not shown.
+    const line = activityLineFor(
+      row.turn_id,
+      row.step,
+      row.state,
+      row.created_at,
+    );
+    byId.set(line.id, line);
   }
+  return [...byId.values()];
 }
 
 /**
@@ -51,22 +43,17 @@ export async function recordActivity(
 export async function loadActivityHistory(
   supabase: SupabaseClient,
   projectId: string,
-  limit = 100,
+  options: { turnId?: string; limit?: number } = {},
 ): Promise<ActivityLine[]> {
-  const { data, error } = await supabase
+  let query = supabase
     .from("activity_events")
-    .select("id, kind, label, created_at")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: false })
-    .limit(limit);
+    .select("turn_id, step, state, created_at")
+    .eq("project_id", projectId);
+  if (options.turnId) query = query.eq("turn_id", options.turnId);
+
+  const { data, error } = await query
+    .order("created_at", { ascending: true })
+    .limit(options.limit ?? 200);
   if (error || !data) return [];
-  // Newest first from the database; oldest first for reading.
-  return (data as ActivityRow[])
-    .map((row) => ({
-      id: row.id,
-      kind: row.kind,
-      label: row.label,
-      at: row.created_at,
-    }))
-    .reverse();
+  return linesFromRows(data as ActivityRow[]);
 }

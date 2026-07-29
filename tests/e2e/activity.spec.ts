@@ -1,5 +1,20 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+/**
+ * Scanning a page that is still hydrating reports violations that do not exist
+ * a frame later. Waiting for the document to be interactive and for the render
+ * to settle makes the scan a fact about the page rather than about timing.
+ */
+async function settle(page: Page) {
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+}
 
 /**
  * T8 acceptance: a scripted multi-step turn must be observable, steerable,
@@ -24,11 +39,17 @@ test("activity appears while work happens and fades when it is done", async ({
   const conversation = page.getByRole("region", { name: "Conversation" });
   await send(page, "Tenants and landlords argue about property condition.");
 
-  const line = conversation.getByText("Reading the current project model…");
-  await expect(line).toBeVisible();
-  // The result remains after the temporary line has gone.
+  /*
+    The step is reported at the conversation while the turn runs — in whichever
+    lifecycle state it is currently in, since reading the demo model is fast —
+    and is gone once the turn ends, with the result still on screen.
+  */
+  const modelStep = conversation.getByText(
+    /Reading the current project model…|Project model read/,
+  );
+  await expect(modelStep).toBeVisible();
   await expect(conversation.getByText(/not connected yet/)).toBeVisible();
-  await expect(line).toBeHidden();
+  await expect(modelStep).toBeHidden();
 });
 
 test("canvas work is reported at the canvas, not in the conversation", async ({
@@ -38,12 +59,12 @@ test("canvas work is reported at the canvas, not in the conversation", async ({
   await send(page, "Tenants and landlords argue about property condition.");
 
   await expect(
-    canvas.getByText("Preparing a canvas view of the current problem…"),
+    canvas.getByText(/Preparing a canvas view|Canvas view prepared/),
   ).toBeVisible();
   await expect(
     page
       .getByRole("region", { name: "Conversation" })
-      .getByText("Preparing a canvas view"),
+      .getByText(/canvas view/i),
   ).toBeHidden();
 });
 
@@ -67,10 +88,8 @@ test("the full activity history stays retrievable after the turn", async ({
 
   await page.getByRole("button", { name: "Activity history" }).click();
   const panel = page.getByRole("dialog");
-  await expect(panel.getByText("Recording your message…")).toBeVisible();
-  await expect(
-    panel.getByText("Preparing a canvas view of the current problem…"),
-  ).toBeVisible();
+  await expect(panel.getByText("Project model read")).toBeVisible();
+  await expect(panel.getByText("Canvas view prepared")).toBeVisible();
 
   await page.keyboard.press("Escape");
   await expect(panel).toBeHidden();
@@ -90,27 +109,56 @@ test("a turn can be steered, and the system states what it will do", async ({
   await expect(
     page.getByText(/applied at the next step of this turn/),
   ).toBeVisible();
-  // …and the turn then reports that it actually picked it up.
+  // …and the turn then reports what actually happened to it. Whether the
+  // direction reached the boundary in time is a real property of the running
+  // turn, so both outcomes are accepted here and neither is silence. The
+  // handoff itself is proved without timing in the route and engine tests.
   await expect(
-    page.getByText("Your direction was picked up by this turn."),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Focus on smaller letting agencies."),
+    page.getByText(
+      /Your direction was picked up by this turn\.|this turn had already passed its last step/,
+    ),
   ).toBeVisible();
 });
 
-test("a turn can be stopped and says so without losing the message", async ({
+test("a direction for a turn that is not running is refused, not silently dropped", async ({
   page,
 }) => {
   await send(page, "Tenants and landlords argue about property condition.");
+  await expect(
+    page.getByRole("button", { name: "Add direction" }),
+  ).toBeVisible();
+
+  const refused = await page.evaluate(async () => {
+    const response = await fetch("/api/dev/directions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        turnId: "99999999-9999-4999-8999-999999999999",
+        note: "Steer a turn that does not exist.",
+      }),
+    });
+    return response.status;
+  });
+  expect(refused).toBe(404);
+});
+
+test("a stopped turn keeps the message and does not present a partial answer", async ({
+  page,
+}) => {
+  const conversation = page.getByRole("region", { name: "Conversation" });
+  await send(page, "Tenants and landlords argue about property condition.");
+
+  // Wait until text has actually started arriving, so the stop is mid-answer.
+  const response = conversation.getByRole("article", { name: "Response" });
+  await expect(response).toContainText("You said");
   await page.getByRole("button", { name: "Stop" }).click();
 
-  const conversation = page.getByRole("region", { name: "Conversation" });
+  await expect(page.getByText("You stopped this response.")).toBeVisible();
   await expect(
-    conversation.getByText(
-      "Tenants and landlords argue about property condition.",
-    ),
-  ).toBeVisible();
+    conversation.getByRole("article", { name: "Your turn" }),
+  ).toContainText("Tenants and landlords argue about property condition.");
+  // The truncated answer is discarded rather than left looking finished.
+  await expect(response).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 });
 
@@ -119,7 +167,7 @@ test("a recommended canvas view is offered, not applied", async ({ page }) => {
   await send(page, "Tenants and landlords argue about property condition.");
 
   await expect(
-    canvas.getByText(/Showing the problem currently in focus/),
+    canvas.getByText(/Showing the problem this project is exploring/),
   ).toBeVisible();
   // Until the user takes it, the view they were reading is unchanged.
   await expect(page.getByLabel("Object in focus")).toContainText(
@@ -135,6 +183,7 @@ test("the activity panel has no axe violations", async ({ page }) => {
   await page.getByRole("button", { name: "Activity history" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
 
+  await settle(page);
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });

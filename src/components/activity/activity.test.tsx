@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import {
+  activityLineFor,
   activitySurface,
   INITIAL_TURN_STATE,
   NO_ACTIVITY,
@@ -14,17 +15,11 @@ import type { CanvasObject } from "@/lib/canvas/model";
 import { ActivityHistory } from "./activity-history";
 import { ActivityIndicator } from "./activity-indicator";
 
-const analysis: ActivityLine = {
-  id: "a1",
-  kind: "analysis",
-  label: "Reading the current project model…",
-};
+const TURN = "dddddddd-0000-4000-8000-000000000001";
 
-const canvasWork: ActivityLine = {
-  id: "a2",
-  kind: "model_update",
-  label: "Preparing a canvas view of the current problem…",
-};
+const analysis = activityLineFor(TURN, "reading_project_model", "active");
+const analysisDone = activityLineFor(TURN, "reading_project_model", "complete");
+const canvasWork = activityLineFor(TURN, "preparing_canvas_view", "active");
 
 const objects: CanvasObject[] = [
   {
@@ -89,6 +84,19 @@ describe("activity placement", () => {
     expect(screen.queryByText(analysis.label)).not.toBeInTheDocument();
   });
 
+  it("pulses work in progress and not work that has finished", () => {
+    const { container, rerender } = render(
+      <ActivityIndicator activity={analysis} />,
+    );
+    expect(
+      container.querySelector(".motion-safe\\:animate-pulse"),
+    ).not.toBeNull();
+
+    rerender(<ActivityIndicator activity={analysisDone} />);
+    expect(container.querySelector(".motion-safe\\:animate-pulse")).toBeNull();
+    expect(screen.getByText("Project model read")).toBeInTheDocument();
+  });
+
   it("states no progress percentage anywhere", () => {
     const { container } = render(<ActivityIndicator activity={analysis} />);
     expect(container.textContent).not.toMatch(/\d+\s?%/);
@@ -102,7 +110,7 @@ describe("activity history", () => {
     render(
       <ActivityHistory
         lines={[
-          { ...analysis, at: "2026-07-28T09:00:00.000Z" },
+          { ...analysisDone, at: "2026-07-28T09:00:00.000Z" },
           { ...canvasWork, at: "2026-07-28T09:01:00.000Z" },
         ]}
       />,
@@ -113,7 +121,7 @@ describe("activity history", () => {
     const entries = within(dialog).getAllByRole("listitem");
     expect(entries[0]).toHaveTextContent(canvasWork.label);
     expect(entries[0]).toHaveTextContent("Project model");
-    expect(entries[1]).toHaveTextContent(analysis.label);
+    expect(entries[1]).toHaveTextContent(analysisDone.label);
   });
 
   it("says the history is empty rather than showing an empty panel", async () => {

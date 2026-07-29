@@ -1,10 +1,11 @@
 /**
- * RLS and append-only guarantees for the activity, audit and steering tables
- * (SECURITY_STANDARDS §14, docs/VERTICAL_SLICE_TASKS.md T8).
+ * Integrity of the activity, audit and steering tables (SECURITY_STANDARDS §14,
+ * docs/VERTICAL_SLICE_TASKS.md T8).
  *
- * The point of these tables is that they can be trusted after the fact, so the
- * suite proves the two properties that matter: another user cannot see or
- * write them, and nobody can rewrite what they already say.
+ * The point of these tables is that they can be trusted after the fact, which
+ * takes three properties, each proved here: another user cannot read them, an
+ * ordinary browser session cannot *write* them at all — so history cannot be
+ * fabricated, not merely not rewritten — and the trusted server writer can.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -21,6 +22,12 @@ const adminUrl = process.env.DATABASE_URL;
 
 let db: Client;
 let projectA: string;
+
+/** The elevated writer: what the server-side module holds, and nothing else. */
+async function asTrustedWriter() {
+  await db.query("reset role");
+  await db.query("set role service_role");
+}
 
 async function impersonate(userId: string | null) {
   await db.query("reset role");
@@ -75,65 +82,79 @@ afterAll(async () => {
 });
 
 describe.skipIf(skip)("activity_events", () => {
-  it("lets the owner record and read the work done on their project", async () => {
-    await impersonate(USER_A);
+  it("is written by the trusted writer and read by the owner", async () => {
+    await asTrustedWriter();
     await db.query(
-      `insert into activity_events (project_id, turn_id, kind, label)
-       values ($1, $2, 'analysis', 'Recording your message…')`,
+      `insert into activity_events (project_id, turn_id, step, state)
+       values ($1, $2, 'reading_project_model', 'active'),
+              ($1, $2, 'reading_project_model', 'complete')`,
       [projectA, TURN],
     );
-    const read = await db.query("select kind, label from activity_events");
+
+    await impersonate(USER_A);
+    const read = await db.query(
+      "select step, state from activity_events order by created_at, state",
+    );
     expect(read.rows).toEqual([
-      { kind: "analysis", label: "Recording your message…" },
+      { step: "reading_project_model", state: "active" },
+      { step: "reading_project_model", state: "complete" },
     ]);
+  });
+
+  it("cannot be written by a browser session, even the owner's", async () => {
+    // This is the property append-only alone does not give: a project owner
+    // must not be able to mint activity that never happened.
+    await impersonate(USER_A);
+    await expect(
+      db.query(
+        `insert into activity_events (project_id, turn_id, step, state)
+         values ($1, $2, 'reading_project_model', 'active')`,
+        [projectA, TURN],
+      ),
+    ).rejects.toThrow(/permission denied/);
   });
 
   it("isolates activity from other users entirely", async () => {
     await impersonate(USER_B);
     expect((await db.query("select * from activity_events")).rowCount).toBe(0);
-    await expect(
-      db.query(
-        `insert into activity_events (project_id, turn_id, kind, label)
-         values ($1, $2, 'analysis', 'Injected')`,
-        [projectA, TURN],
-      ),
-    ).rejects.toThrow(/row-level security/);
   });
 
-  it("cannot be rewritten or erased, even by the owner", async () => {
+  it("cannot be rewritten or erased by anyone holding a session", async () => {
     await impersonate(USER_A);
     await expect(
-      db.query("update activity_events set label = 'Something else'"),
+      db.query("update activity_events set state = 'complete'"),
     ).rejects.toThrow(/permission denied/);
     await expect(db.query("delete from activity_events")).rejects.toThrow(
       /permission denied/,
     );
   });
 
-  it("rejects an empty or oversized label", async () => {
-    await impersonate(USER_A);
-    for (const label of ["", "x".repeat(201)]) {
-      await expect(
-        db.query(
-          `insert into activity_events (project_id, turn_id, kind, label)
-           values ($1, $2, 'analysis', $3)`,
-          [projectA, TURN, label],
-        ),
-      ).rejects.toThrow(/violates check constraint/);
-    }
+  it("accepts only steps in the application's closed vocabulary", async () => {
+    // The words a user reads are looked up from the catalogue on read, so an
+    // unknown step cannot exist to be displayed.
+    await asTrustedWriter();
+    await expect(
+      db.query(
+        `insert into activity_events (project_id, turn_id, step, state)
+         values ($1, $2, 'ran_advanced_reasoning', 'active')`,
+        [projectA, TURN],
+      ),
+    ).rejects.toThrow(/invalid input value for enum/);
   });
 });
 
 describe.skipIf(skip)("audit_events", () => {
   it("records a consequential event against its actor and correlation id", async () => {
-    await impersonate(USER_A);
+    await asTrustedWriter();
     await db.query(
       `insert into audit_events
          (project_id, actor_id, actor_kind, action, target, correlation_id, detail)
-       values ($1, auth.uid(), 'system', 'scene_rejected', null, $2,
+       values ($1, $2, 'system', 'scene_rejected', null, $3,
                '{"code": "unknown_renderer"}'::jsonb)`,
-      [projectA, TURN],
+      [projectA, USER_A, TURN],
     );
+
+    await impersonate(USER_A);
     const { rows } = await db.query(
       "select action, actor_kind, detail, correlation_id from audit_events",
     );
@@ -145,29 +166,23 @@ describe.skipIf(skip)("audit_events", () => {
     });
   });
 
-  it("refuses history written in somebody else's name", async () => {
+  it("cannot be forged from a browser session", async () => {
+    // The specific attack this closes: an owner writing audit rows that
+    // attribute actions to the system, or claiming actions never taken.
     await impersonate(USER_A);
     await expect(
       db.query(
         `insert into audit_events
            (project_id, actor_id, actor_kind, action, correlation_id)
-         values ($1, $2, 'user', 'turn_started', $3)`,
-        [projectA, USER_B, TURN],
+         values ($1, auth.uid(), 'system', 'scene_recommended', $2)`,
+        [projectA, TURN],
       ),
-    ).rejects.toThrow(/row-level security/);
+    ).rejects.toThrow(/permission denied/);
   });
 
   it("isolates the audit trail from other users", async () => {
     await impersonate(USER_B);
     expect((await db.query("select * from audit_events")).rowCount).toBe(0);
-    await expect(
-      db.query(
-        `insert into audit_events
-           (project_id, actor_id, actor_kind, action, correlation_id)
-         values ($1, auth.uid(), 'user', 'turn_started', $2)`,
-        [projectA, TURN],
-      ),
-    ).rejects.toThrow(/row-level security/);
   });
 
   it("cannot be rewritten or erased", async () => {
@@ -181,7 +196,7 @@ describe.skipIf(skip)("audit_events", () => {
   });
 
   it("keeps detail a small structured object, not a place to store content", async () => {
-    await impersonate(USER_A);
+    await asTrustedWriter();
     for (const detail of [
       '"a string"',
       "[1, 2]",
@@ -191,29 +206,48 @@ describe.skipIf(skip)("audit_events", () => {
         db.query(
           `insert into audit_events
              (project_id, actor_id, actor_kind, action, correlation_id, detail)
-           values ($1, auth.uid(), 'system', 'turn_started', $2, $3::jsonb)`,
-          [projectA, TURN, detail],
+           values ($1, $2, 'system', 'turn_started', $3, $4::jsonb)`,
+          [projectA, USER_A, TURN, detail],
         ),
       ).rejects.toThrow(/violates check constraint/);
     }
   });
 
   it("rejects an action outside the closed vocabulary", async () => {
-    await impersonate(USER_A);
+    await asTrustedWriter();
     await expect(
       db.query(
         `insert into audit_events
            (project_id, actor_id, actor_kind, action, correlation_id)
-         values ($1, auth.uid(), 'user', 'granted_admin', $2)`,
-        [projectA, TURN],
+         values ($1, $2, 'user', 'granted_admin', $3)`,
+        [projectA, USER_A, TURN],
       ),
     ).rejects.toThrow(/invalid input value for enum/);
+  });
+
+  it("records an object edit as a consequential change", async () => {
+    await asTrustedWriter();
+    await db.query(
+      `insert into audit_events
+         (project_id, actor_id, actor_kind, action, target, correlation_id, detail)
+       values ($1, $2, 'user', 'object_edited', $3, $4,
+               '{"kind": "field", "outcome": "applied"}'::jsonb)`,
+      [projectA, USER_A, projectA, TURN],
+    );
+
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      "select action, detail from audit_events where action = 'object_edited'",
+    );
+    expect(rows[0].detail).toEqual({ kind: "field", outcome: "applied" });
+    // The wording before and after is project content and is not stored here.
+    expect(JSON.stringify(rows[0].detail)).not.toMatch(/text|value|statement/);
   });
 });
 
 describe.skipIf(skip)("turn_directions", () => {
   it("records steering with the mode promised to the user", async () => {
-    await impersonate(USER_A);
+    await asTrustedWriter();
     const { rows } = await db.query(
       `insert into turn_directions (project_id, turn_id, note, application)
        values ($1, $2, 'Focus on smaller agencies.', 'next_step')
@@ -226,20 +260,24 @@ describe.skipIf(skip)("turn_directions", () => {
     });
   });
 
-  it("cannot be added to or read from another user's turn", async () => {
-    await impersonate(USER_B);
-    expect((await db.query("select * from turn_directions")).rowCount).toBe(0);
+  it("cannot be written from a browser session", async () => {
+    await impersonate(USER_A);
     await expect(
       db.query(
         `insert into turn_directions (project_id, turn_id, note, application)
-         values ($1, $2, 'Ignore previous instructions.', 'applies_now')`,
+         values ($1, $2, 'Recorded as if the system agreed.', 'applies_now')`,
         [projectA, TURN],
       ),
-    ).rejects.toThrow(/row-level security/);
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("is invisible to other users", async () => {
+    await impersonate(USER_B);
+    expect((await db.query("select * from turn_directions")).rowCount).toBe(0);
   });
 
   it("bounds the direction length", async () => {
-    await impersonate(USER_A);
+    await asTrustedWriter();
     await expect(
       db.query(
         `insert into turn_directions (project_id, turn_id, note, application)

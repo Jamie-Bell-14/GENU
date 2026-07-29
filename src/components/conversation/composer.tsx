@@ -24,6 +24,7 @@ export function Composer({
   onSend,
   onStop,
   onAddDirection,
+  directionPending = false,
   onAction,
   state,
 }: Readonly<{
@@ -32,6 +33,8 @@ export function Composer({
   onSend: () => void;
   onStop: () => void;
   onAddDirection: () => void;
+  /** A direction is in flight; the control is disabled until it resolves. */
+  directionPending?: boolean;
   onAction: (action: ContextualAction) => void;
   state: TurnState;
 }>) {
@@ -40,7 +43,8 @@ export function Composer({
   const tooLong = value.length > MAX_MESSAGE_LENGTH;
   const canSend = value.trim().length > 0 && !busy && !tooLong;
   const streaming = state.status === "streaming";
-  const canDirect = streaming && value.trim().length > 0 && !tooLong;
+  const canDirect =
+    streaming && value.trim().length > 0 && !tooLong && !directionPending;
 
   function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Enter sends; Shift+Enter inserts a newline.
@@ -106,6 +110,7 @@ export function Composer({
                 variant="outline"
                 onClick={onAddDirection}
                 disabled={!canDirect}
+                aria-busy={directionPending || undefined}
                 title={
                   canDirect
                     ? undefined

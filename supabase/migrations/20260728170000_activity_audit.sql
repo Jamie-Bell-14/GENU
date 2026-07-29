@@ -17,8 +17,19 @@
     requests (the SSE stream and the direction POST), so the handover has to be
     storage, not process memory.
 
-  None of the three has an UPDATE or DELETE policy: history is not editable by
-  ordinary users (SECURITY_STANDARDS §14.2).
+  Trust model. Append-only stops history being rewritten; it does not stop
+  history being *fabricated*. All three tables are therefore written only by a
+  trusted server-side writer holding an elevated key
+  (SECURITY_STANDARDS §11.2: elevated keys in trusted server environments
+  only). The browser-authenticated role can SELECT its own project's rows and
+  has no INSERT, UPDATE or DELETE grant on any of them, so a user cannot mint
+  activity that never happened, audit entries attributing actions to the
+  system, or steering history.
+
+  Vocabulary. `activity_events` stores a closed step enum rather than free
+  text, so the words a user reads as "what the system is doing" cannot be
+  chosen at the storage boundary at all — they are looked up from the
+  application's catalogue on read.
 */
 
 create type public.activity_kind as enum (
@@ -28,15 +39,28 @@ create type public.activity_kind as enum (
   'document_update'
 );
 
+/*
+  The closed set of operations the application can report. Adding a value here
+  means adding a step the system genuinely performs; it is deliberately a
+  migration rather than a string, so the vocabulary cannot drift.
+*/
+create type public.activity_step as enum (
+  'reading_project_model',
+  'considering_direction',
+  'preparing_canvas_view'
+);
+
+-- Activity has a lifecycle: a step is reported when it starts and again when
+-- it finishes, so a completed operation is never displayed as still running.
+create type public.activity_state as enum ('active', 'complete');
+
 create table public.activity_events (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects (id) on delete cascade,
   -- Correlates every line of a turn's observable work.
   turn_id uuid not null,
-  kind public.activity_kind not null,
-  -- Application-authored label describing a real operation. Never model prose
-  -- (docs/ARCHITECTURE.md §8); the length bound reflects a single UI line.
-  label text not null check (char_length(label) between 1 and 200),
+  step public.activity_step not null,
+  state public.activity_state not null,
   created_at timestamptz not null default now()
 );
 
@@ -54,8 +78,11 @@ create type public.audit_action as enum (
   'turn_completed',
   'turn_failed',
   'direction_recorded',
+  'direction_rejected',
   'scene_recommended',
-  'scene_rejected'
+  'scene_rejected',
+  'object_edited',
+  'scope_truncated'
 );
 
 create type public.audit_actor_kind as enum ('user', 'system');
@@ -110,33 +137,37 @@ alter table public.activity_events enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.turn_directions enable row level security;
 
+-- Read-only for the owner. There is no INSERT, UPDATE or DELETE policy for
+-- `authenticated` on any of these tables, and no grant either, so a browser
+-- session cannot write history under any circumstances.
 create policy activity_events_select on public.activity_events
   for select to authenticated using (private.is_project_owner(project_id));
-create policy activity_events_insert on public.activity_events
-  for insert to authenticated with check (private.is_project_owner(project_id));
 
 create policy audit_events_select on public.audit_events
   for select to authenticated using (private.is_project_owner(project_id));
--- An audit row must name the acting user; nobody can write history as
--- somebody else, and nobody can write into another user's project.
-create policy audit_events_insert on public.audit_events
-  for insert to authenticated
-  with check (private.is_project_owner(project_id) and actor_id = auth.uid());
 
 create policy turn_directions_select on public.turn_directions
   for select to authenticated using (private.is_project_owner(project_id));
-create policy turn_directions_insert on public.turn_directions
-  for insert to authenticated with check (private.is_project_owner(project_id));
 
--- Insert and select only: no grant exists for UPDATE or DELETE, so append-only
--- is enforced by privilege as well as by the absent policies.
-grant select, insert on public.activity_events to authenticated;
-grant select, insert on public.audit_events to authenticated;
-grant select, insert on public.turn_directions to authenticated;
+grant select on public.activity_events to authenticated;
+grant select on public.audit_events to authenticated;
+grant select on public.turn_directions to authenticated;
+
+/*
+  The trusted writer. `service_role` bypasses RLS, so authorisation for these
+  writes happens in the route that calls it: it authenticates the user and
+  confirms project ownership through the user-scoped client *before* the
+  trusted writer is used. The elevated key exists only in server environment
+  variables and is reached through one module that exposes no general-purpose
+  client (see src/lib/services/trusted-writer.ts).
+*/
+grant select, insert on public.activity_events to service_role;
+grant select, insert on public.audit_events to service_role;
+grant select, insert on public.turn_directions to service_role;
 
 comment on table public.activity_events is
-  'Observable work performed during a turn. Labels are application-authored and describe real operations.';
+  'Observable work performed during a turn, as closed step + lifecycle state. Written only by the trusted server writer; readable by the project owner.';
 comment on table public.audit_events is
-  'Security and consequence record, including actions that were rejected. Append-only.';
+  'Security and consequence record, including actions that were rejected. Append-only, trusted-writer only.';
 comment on table public.turn_directions is
   'Mid-turn steering, with the application mode promised to the user when it was accepted.';

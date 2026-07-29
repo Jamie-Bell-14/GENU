@@ -29,8 +29,16 @@ export function ActivityIndicator({
         <>
           <span
             aria-hidden
-            /* Motion is a token, so reduced-motion settings stop it. */
-            className="bg-fg-tertiary size-1.5 shrink-0 rounded-full motion-safe:animate-pulse"
+            /*
+              Only work that is actually running pulses. A finished step keeps
+              its place — so the surface still says what it last did — but
+              stops looking live, which is what would otherwise overstate it.
+              Motion is a token, so reduced-motion settings stop it.
+            */
+            className={cn(
+              "bg-fg-tertiary size-1.5 shrink-0 rounded-full",
+              activity.state === "active" && "motion-safe:animate-pulse",
+            )}
           />
           <span className="truncate">{activity.label}</span>
         </>

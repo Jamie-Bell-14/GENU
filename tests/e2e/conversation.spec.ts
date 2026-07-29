@@ -1,5 +1,20 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+/**
+ * Scanning a page that is still hydrating reports violations that do not exist
+ * a frame later. Waiting for the document to be interactive and for the render
+ * to settle makes the scan a fact about the page rather than about timing.
+ */
+async function settle(page: Page) {
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+}
 
 test.beforeEach(async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
@@ -23,14 +38,20 @@ test("sends a message and streams an attributed response", async ({ page }) => {
   await composer.fill("Tenants and landlords argue about property condition.");
   await page.getByRole("button", { name: /send/i }).click();
 
-  // Scoped to the conversation: the canvas also carries "You stated" labels.
+  /*
+    Scoped to the turn the user wrote. The assistant reflects the same words
+    back, so "the message you sent" has to be addressed as a region, not as
+    text that happens to appear once — which is also how a screen-reader user
+    tells them apart.
+  */
   const conversation = page.getByRole("region", { name: "Conversation" });
-  await expect(conversation.getByText("You", { exact: true })).toBeVisible();
-  await expect(
-    conversation.getByText(
-      "Tenants and landlords argue about property condition.",
-    ),
-  ).toBeVisible();
+  const yourMessage = conversation.getByRole("article", {
+    name: "Your turn",
+  });
+  await expect(yourMessage).toContainText(
+    "Tenants and landlords argue about property condition.",
+  );
+  await expect(yourMessage.getByText("You", { exact: true })).toBeVisible();
   await expect(
     page.getByText(/This message is saved to the project/),
   ).toBeVisible();
@@ -50,7 +71,9 @@ test("Enter sends and Shift+Enter inserts a newline", async ({ page }) => {
 
   await page.keyboard.press("Enter");
   await expect(composer).toHaveValue("");
-  await expect(page.getByText("first line", { exact: false })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Your turn" })).toContainText(
+    "first line",
+  );
 });
 
 test("rejects an over-length message before sending", async ({ page }) => {
@@ -73,6 +96,7 @@ test("conversation surface has no axe violations after a turn", async ({
     page.getByText(/This message is saved to the project/),
   ).toBeVisible();
 
+  await settle(page);
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });

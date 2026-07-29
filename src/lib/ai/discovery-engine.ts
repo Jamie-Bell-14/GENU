@@ -7,7 +7,14 @@ import type { EngineEvent } from "./turn-events";
  * more than that is sent (SECURITY_STANDARDS §11.5, data minimisation).
  */
 export interface TurnContext {
+  /** Every object a scene may name, in a deterministic order. */
   objectIds: string[];
+  /**
+   * The object the project is currently exploring, chosen by the application
+   * from the real project model. An engine may name it in a recommendation; it
+   * may not decide what "in focus" means.
+   */
+  focalObjectId: string | null;
 }
 
 export interface TurnInput {
@@ -42,7 +49,11 @@ export interface TurnResult {
  */
 export interface TurnHooks {
   emit(event: EngineEvent): void;
-  activity(step: ActivityStep): Promise<void>;
+  /**
+   * Reports an operation *around* the work that performs it, so a label can
+   * never be emitted for work that already finished or never happens.
+   */
+  step<T>(name: ActivityStep, work: () => Promise<T>): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
   takeDirection(): Promise<string | null>;
 }
@@ -91,8 +102,6 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     hooks: TurnHooks,
     signal?: AbortSignal,
   ): Promise<TurnResult> {
-    hooks.emit({ type: "turn_started", turnId: input.turnId });
-
     const interrupted = () => {
       hooks.emit({
         type: "turn_failed",
@@ -106,8 +115,6 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
       return { assistantText: "" };
     };
 
-    // Step 1 — record the message.
-    await hooks.activity("recording_message");
     if (signal?.aborted) return interrupted();
 
     const trimmed = input.userMessage.trim();
@@ -120,31 +127,30 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     ];
 
     /*
-      Step 2 — decide what the canvas should show, before explaining anything.
-      The candidate is a plain object; the application decides whether it is
-      renderable. Doing this before the response is streamed also means the
-      canvas reports its own work while that work is what is happening, rather
-      than in the instant before the turn ends.
+      Decide what the canvas should show, before explaining anything. The
+      candidate is a plain object; the application decides whether it is
+      renderable. The focal object comes from the application's own reading of
+      the project — the engine names it, it does not choose what is in focus.
     */
-    const focalObjectId = input.context?.objectIds[0];
+    const focalObjectId = input.context?.focalObjectId;
     if (focalObjectId) {
-      await hooks.activity("reading_project_model");
-      await hooks.activity("preparing_canvas_view");
-      await hooks.recommendScene({
-        renderer: "problem_exploration",
-        purpose: "explore_problem",
-        focalObjectId,
-        visibleObjectIds: input.context?.objectIds.slice(0, 60) ?? [],
-        visibleRelationshipIds: [],
-        emphasis: "none",
-        reason:
-          "Showing the problem currently in focus while discovery analysis is not connected.",
-        transition: "replace",
-      });
+      await hooks.step("preparing_canvas_view", () =>
+        hooks.recommendScene({
+          renderer: "problem_exploration",
+          purpose: "explore_problem",
+          focalObjectId,
+          visibleObjectIds: input.context?.objectIds.slice(0, 60) ?? [],
+          visibleRelationshipIds: [],
+          emphasis: "none",
+          reason:
+            "Showing the problem this project is exploring. Discovery analysis is not connected yet.",
+          transition: "replace",
+        }),
+      );
     }
     if (signal?.aborted) return interrupted();
 
-    // Step 3 — explain, in text.
+    // Explain, in text.
     hooks.emit({ type: "block", kind: "plain" });
     if (!(await this.stream(lines.join("\n"), hooks, signal))) {
       return interrupted();
@@ -156,11 +162,11 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     */
     const direction = await hooks.takeDirection();
     if (direction) {
-      await hooks.activity("considering_direction");
       const acknowledgement = `\n\nYou added: “${truncate(direction, 120)}”. It is recorded against this turn and will be used once discovery analysis is connected.`;
-      if (!(await this.stream(acknowledgement, hooks, signal))) {
-        return interrupted();
-      }
+      const streamed = await hooks.step("considering_direction", () =>
+        this.stream(acknowledgement, hooks, signal),
+      );
+      if (!streamed) return interrupted();
       lines.push(acknowledgement);
     }
 

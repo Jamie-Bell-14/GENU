@@ -30,6 +30,7 @@ export function ConversationPane({
         onSend={runtime.send}
         onStop={runtime.stop}
         onAddDirection={runtime.addDirection}
+        directionPending={runtime.directionPending}
         onAction={runtime.onAction}
         state={state}
       />

@@ -10,7 +10,9 @@ export default defineConfig({
     than a production build because the /dev review routes deliberately 404 in
     production.
   */
-  workers: 4,
+  // CI runners have two cores; four workers there oversubscribe the dev server
+  // and produce failures that are about scheduling rather than the product.
+  workers: process.env.CI ? 2 : 4,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",

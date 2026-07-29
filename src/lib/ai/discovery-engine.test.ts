@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { ACTIVITY_STEPS, isActivityStep } from "./activity-steps";
+import {
+  ACTIVITY_STEPS,
+  isActivityStep,
+  type ActivityStep,
+} from "./activity-steps";
 import { ScriptedDiscoveryEngine, type TurnHooks } from "./discovery-engine";
 import type { EngineEvent } from "./turn-events";
 
 const TURN_ID = "dddddddd-0000-4000-8000-000000000001";
 const OBJECT_A = "aaaaaaaa-0000-4000-8000-000000000001";
+const OTHER_OBJECT = "aaaaaaaa-0000-4000-8000-000000000002";
+const THIRD_OBJECT = "aaaaaaaa-0000-4000-8000-000000000003";
 
 function harness(direction: string | null = null) {
   const events: EngineEvent[] = [];
@@ -13,8 +19,13 @@ function harness(direction: string | null = null) {
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
-    activity: async (step) => {
-      steps.push(step);
+    step: async (name, work) => {
+      steps.push(`${name}:active`);
+      try {
+        return await work();
+      } finally {
+        steps.push(`${name}:complete`);
+      }
     },
     recommendScene: async (candidate) => {
       candidates.push(candidate);
@@ -32,25 +43,37 @@ const input = {
   projectId: "p1",
   turnId: TURN_ID,
   userMessage: "Landlords and tenants argue about property condition.",
-  context: { objectIds: [OBJECT_A] },
+  context: { objectIds: [OBJECT_A], focalObjectId: OBJECT_A },
 };
 
 describe("ScriptedDiscoveryEngine", () => {
-  it("uses the correlation id the host supplied, not one of its own", async () => {
+  it("leaves the turn id to the host rather than minting one", async () => {
+    // The host emits `turn_started`, because the client needs the id before
+    // any work begins in order to steer or recover the turn.
     const { events, hooks } = harness();
     await new ScriptedDiscoveryEngine().runTurn(input, hooks);
-    expect(events[0]).toEqual({ type: "turn_started", turnId: TURN_ID });
+    expect(events.some((event) => event.type === "turn_started")).toBe(false);
   });
 
   it("names only steps the application has a label for", async () => {
     const { steps, hooks } = harness();
     await new ScriptedDiscoveryEngine().runTurn(input, hooks);
     expect(steps.length).toBeGreaterThan(0);
-    for (const step of steps) {
-      expect(isActivityStep(step)).toBe(true);
-      expect(ACTIVITY_STEPS[step as keyof typeof ACTIVITY_STEPS].label).toEqual(
+    for (const entry of steps) {
+      const [name, state] = entry.split(":");
+      expect(isActivityStep(name)).toBe(true);
+      expect(ACTIVITY_STEPS[name as ActivityStep][state as "active"]).toEqual(
         expect.any(String),
       );
+    }
+  });
+
+  it("reports every step as complete once its work has finished", async () => {
+    const { steps, hooks } = harness();
+    await new ScriptedDiscoveryEngine().runTurn(input, hooks);
+    const started = steps.filter((entry) => entry.endsWith(":active"));
+    for (const entry of started) {
+      expect(steps).toContain(entry.replace(":active", ":complete"));
     }
   });
 
@@ -60,9 +83,20 @@ describe("ScriptedDiscoveryEngine", () => {
     expect(result.assistantText).toContain("not connected yet");
   });
 
-  it("recommends a scene naming an object the host supplied", async () => {
+  it("names the focal object the application chose, not the first id it was given", async () => {
     const { candidates, hooks } = harness();
-    await new ScriptedDiscoveryEngine().runTurn(input, hooks);
+    await new ScriptedDiscoveryEngine().runTurn(
+      {
+        ...input,
+        // Deliberately not first: the engine must not confuse "first row
+        // returned" with "what this project is exploring".
+        context: {
+          objectIds: [OTHER_OBJECT, OBJECT_A, THIRD_OBJECT],
+          focalObjectId: OBJECT_A,
+        },
+      },
+      hooks,
+    );
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({
       renderer: "problem_exploration",
@@ -70,10 +104,18 @@ describe("ScriptedDiscoveryEngine", () => {
     });
   });
 
+  it("does not claim the view is the user's current focus", async () => {
+    const { candidates, hooks } = harness();
+    await new ScriptedDiscoveryEngine().runTurn(input, hooks);
+    expect((candidates[0] as { reason: string }).reason).not.toMatch(
+      /currently in focus/i,
+    );
+  });
+
   it("recommends nothing when the project has no objects to name", async () => {
     const { candidates, hooks } = harness();
     await new ScriptedDiscoveryEngine().runTurn(
-      { ...input, context: { objectIds: [] } },
+      { ...input, context: { objectIds: [], focalObjectId: null } },
       hooks,
     );
     expect(candidates).toHaveLength(0);
@@ -85,7 +127,8 @@ describe("ScriptedDiscoveryEngine", () => {
     expect(engine.directionApplication).toBe("next_step");
 
     const result = await engine.runTurn(input, hooks);
-    expect(steps).toContain("considering_direction");
+    expect(steps).toContain("considering_direction:active");
+    expect(steps).toContain("considering_direction:complete");
     expect(result.assistantText).toContain("Focus on smaller agencies.");
     // The acknowledgement reaches the user as streamed text, not silently.
     const streamed = events
@@ -98,7 +141,7 @@ describe("ScriptedDiscoveryEngine", () => {
   it("does not mention direction when none was added", async () => {
     const { steps, hooks } = harness();
     const result = await new ScriptedDiscoveryEngine().runTurn(input, hooks);
-    expect(steps).not.toContain("considering_direction");
+    expect(steps).not.toContain("considering_direction:active");
     expect(result.assistantText).not.toContain("You added");
   });
 

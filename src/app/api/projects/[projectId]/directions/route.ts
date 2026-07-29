@@ -4,11 +4,8 @@ import {
   DIRECTION_APPLICATION_MESSAGES,
   type SafeError,
 } from "@/lib/ai/turn-events";
-import { recordAudit } from "@/lib/services/audit";
-import {
-  DirectionRequestSchema,
-  recordDirection,
-} from "@/lib/services/directions";
+import { DirectionRequestSchema } from "@/lib/services/directions";
+import { recordAudit, recordDirection } from "@/lib/services/trusted-writer";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { DIRECTION_RATE_LIMIT } from "@/lib/validation/turns";
 
@@ -113,8 +110,42 @@ export async function POST(
     );
   }
 
+  /*
+    Authorising the project is not enough: the turn named in the body must
+    belong to it, or a direction could be attached to another project's turn.
+    The user message is written before the stream opens, so a real turn always
+    has one. A missing or foreign turn gets the same unavailable answer, so the
+    response does not reveal which.
+  */
+  const { data: turn } = await supabase
+    .from("messages")
+    .select("turn_id")
+    .eq("project_id", projectId)
+    .eq("turn_id", parsed.data.turnId)
+    .limit(1)
+    .maybeSingle();
+  if (!turn) {
+    await recordAudit({
+      projectId,
+      actorId: user.id,
+      actorKind: "user",
+      action: "direction_rejected",
+      correlationId: parsed.data.turnId,
+      detail: { code: "turn_not_in_project" },
+    });
+    return errorResponse(
+      {
+        code: "engine_unavailable",
+        userMessage:
+          "That turn is not available, so the direction was not recorded. Your text is unchanged.",
+        recoverable: false,
+      },
+      404,
+    );
+  }
+
   const application = new ScriptedDiscoveryEngine().directionApplication;
-  const stored = await recordDirection(supabase, {
+  const stored = await recordDirection({
     projectId,
     turnId: parsed.data.turnId,
     note: parsed.data.note,
@@ -132,7 +163,7 @@ export async function POST(
     );
   }
 
-  await recordAudit(supabase, {
+  await recordAudit({
     projectId,
     actorId: user.id,
     actorKind: "user",

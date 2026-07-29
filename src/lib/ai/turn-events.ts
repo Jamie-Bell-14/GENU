@@ -1,4 +1,10 @@
 import type { CanvasScene } from "@/lib/canvas/scene";
+import {
+  activityLabel,
+  ACTIVITY_STEPS,
+  type ActivityState,
+  type ActivityStep,
+} from "./activity-steps";
 
 /**
  * The turn event vocabulary (docs/ARCHITECTURE.md §8). Every event the UI
@@ -19,12 +25,48 @@ export function activitySurface(kind: ActivityKind): "conversation" | "canvas" {
   return kind === "analysis" ? "conversation" : "canvas";
 }
 
+/**
+ * One reported operation. `state` is what makes the report honest: a step is
+ * announced when it starts and announced again when it finishes, so nothing
+ * that has completed keeps a live indicator while other work continues.
+ *
+ * The id is stable across both reports of the same operation, so a surface
+ * replaces the active line rather than accumulating two, and a replayed stream
+ * cannot duplicate it.
+ */
 export interface ActivityLine {
   id: string;
+  step: ActivityStep;
+  state: ActivityState;
   label: string;
   kind: ActivityKind;
   /** ISO timestamp; present on persisted history, absent on live events. */
   at?: string;
+}
+
+/**
+ * The line id is derived from the turn and the step rather than generated, so
+ * the active and complete reports of one operation share it — and so a stream
+ * replayed after a reconnect resolves to the same line instead of a duplicate.
+ */
+export function activityLineId(turnId: string, step: ActivityStep): string {
+  return `${turnId}:${step}`;
+}
+
+export function activityLineFor(
+  turnId: string,
+  step: ActivityStep,
+  state: ActivityState,
+  at?: string,
+): ActivityLine {
+  return {
+    id: activityLineId(turnId, step),
+    step,
+    state,
+    label: activityLabel(step, state),
+    kind: ACTIVITY_STEPS[step].kind,
+    ...(at ? { at } : {}),
+  };
 }
 
 /** How a mid-turn direction will be used (DESIGN.md §9.3). */
@@ -150,6 +192,14 @@ export interface TurnState {
     applied: boolean;
   } | null;
   error: SafeError | null;
+  /**
+   * The user stopped the turn. Distinct from `error`: stopping is a deliberate
+   * act, not a failure, and the partial answer is discarded rather than
+   * presented as complete.
+   */
+  stopped: boolean;
+  /** The stream was lost unintentionally and catch-up is in progress. */
+  recovering: boolean;
   status: "idle" | "sending" | "streaming";
 }
 
@@ -162,6 +212,8 @@ export const INITIAL_TURN_STATE: TurnState = {
   recommendedScene: null,
   direction: null,
   error: null,
+  stopped: false,
+  recovering: false,
   status: "idle",
 };
 
@@ -174,19 +226,38 @@ export type TurnAction =
       note: string;
       application: DirectionApplication;
     }
+  /** The direction endpoint refused or could not be reached. */
+  | { type: "direction_failed"; error: SafeError }
+  /** The user pressed Stop. */
+  | { type: "turn_stopped" }
+  /** The stream ended unintentionally; catch-up begins. */
+  | { type: "connection_lost" }
+  /** Catch-up finished: what the server actually recorded for this turn. */
+  | {
+      type: "recovered";
+      activityLog: ActivityLine[];
+      message: Message | null;
+    }
   | { type: "reset_error" }
   | { type: "hydrate"; messages: Message[]; activityLog?: ActivityLine[] };
 
 const MAX_ACTIVITY_LOG = 200;
 
+/**
+ * Merges a line into the history. One operation is reported twice — active,
+ * then complete — under a single id, so the later report replaces the earlier
+ * one rather than adding a second entry. That also means a stream replayed
+ * after a reconnect cannot duplicate anything.
+ */
 function appendActivity(
   log: ActivityLine[],
   activity: ActivityLine,
 ): ActivityLine[] {
-  // Re-delivered lines (a reconnect replaying part of a stream) must not
-  // duplicate in the history panel.
-  if (log.some((line) => line.id === activity.id)) return log;
-  return [...log, activity].slice(-MAX_ACTIVITY_LOG);
+  const existing = log.findIndex((line) => line.id === activity.id);
+  if (existing === -1) return [...log, activity].slice(-MAX_ACTIVITY_LOG);
+  const next = [...log];
+  next[existing] = activity;
+  return next;
 }
 
 /**
@@ -210,8 +281,60 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         actions: [],
         direction: null,
         error: null,
+        stopped: false,
+        recovering: false,
         status: "sending",
       };
+
+    /*
+      Stopping discards whatever text had arrived. A truncated answer must not
+      be presented as a completed one, and the reducer is the only place that
+      could turn streamed text into a message, so this is where the rule
+      belongs. The user's own message stays.
+    */
+    case "turn_stopped":
+      return {
+        ...state,
+        streaming: null,
+        activity: NO_ACTIVITY,
+        stopped: true,
+        status: "idle",
+      };
+
+    case "connection_lost":
+      // Same discard rule: nothing partial is promoted. What the server
+      // actually recorded is fetched instead.
+      return {
+        ...state,
+        streaming: null,
+        activity: NO_ACTIVITY,
+        recovering: true,
+        status: "idle",
+      };
+
+    case "recovered": {
+      const known = new Set(state.messages.map((message) => message.id));
+      return {
+        ...state,
+        activityLog: action.activityLog.reduce(
+          appendActivity,
+          state.activityLog,
+        ),
+        messages:
+          action.message && !known.has(action.message.id)
+            ? [...state.messages, action.message]
+            : state.messages,
+        recovering: false,
+        error: action.message
+          ? null
+          : {
+              code: "turn_interrupted",
+              userMessage:
+                "The connection dropped and this turn did not finish. Your message is saved — send another when you are ready.",
+              recoverable: true,
+            },
+      };
+    }
 
     case "direction_accepted":
       return {
@@ -222,6 +345,11 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           applied: false,
         },
       };
+
+    // A refused direction is not a failed turn: the turn keeps running and
+    // only the direction is reported as not recorded.
+    case "direction_failed":
+      return { ...state, error: action.error };
 
     case "reset_error":
       return { ...state, error: null };

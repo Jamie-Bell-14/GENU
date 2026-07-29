@@ -1,5 +1,20 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+/**
+ * Scanning a page that is still hydrating reports violations that do not exist
+ * a frame later. Waiting for the document to be interactive and for the render
+ * to settle makes the scan a fact about the page rather than about timing.
+ */
+async function settle(page: Page) {
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+}
 
 // Dev-only review page: exists in `next dev` (the e2e web server), not in
 // production builds.
@@ -23,6 +38,7 @@ for (const theme of ["dark", "light"] as const) {
       () => localStorage.getItem("ppm.appearance") !== null,
     );
 
+    await settle(page);
     const results = await new AxeBuilder({ page }).analyze();
     expect(results.violations).toEqual([]);
   });

@@ -16,6 +16,7 @@ const DB_NAME = "ppm_activity_rls_test";
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
 const TURN = "33333333-3333-4333-8333-333333333333";
+const OPERATION = "44444444-4444-4444-8444-444444444444";
 
 const skip = process.env.RLS_TESTS === "skip";
 const adminUrl = process.env.DATABASE_URL;
@@ -85,10 +86,11 @@ describe.skipIf(skip)("activity_events", () => {
   it("is written by the trusted writer and read by the owner", async () => {
     await asTrustedWriter();
     await db.query(
-      `insert into activity_events (project_id, turn_id, step, state)
-       values ($1, $2, 'reading_project_model', 'active'),
-              ($1, $2, 'reading_project_model', 'complete')`,
-      [projectA, TURN],
+      `insert into activity_events
+         (project_id, turn_id, operation_id, step, state)
+       values ($1, $2, $3, 'reading_project_model', 'active'),
+              ($1, $2, $3, 'reading_project_model', 'succeeded')`,
+      [projectA, TURN, OPERATION],
     );
 
     await impersonate(USER_A);
@@ -97,7 +99,7 @@ describe.skipIf(skip)("activity_events", () => {
     );
     expect(read.rows).toEqual([
       { step: "reading_project_model", state: "active" },
-      { step: "reading_project_model", state: "complete" },
+      { step: "reading_project_model", state: "succeeded" },
     ]);
   });
 
@@ -107,9 +109,10 @@ describe.skipIf(skip)("activity_events", () => {
     await impersonate(USER_A);
     await expect(
       db.query(
-        `insert into activity_events (project_id, turn_id, step, state)
-         values ($1, $2, 'reading_project_model', 'active')`,
-        [projectA, TURN],
+        `insert into activity_events
+           (project_id, turn_id, operation_id, step, state)
+         values ($1, $2, $3, 'reading_project_model', 'active')`,
+        [projectA, TURN, OPERATION],
       ),
     ).rejects.toThrow(/permission denied/);
   });
@@ -122,11 +125,32 @@ describe.skipIf(skip)("activity_events", () => {
   it("cannot be rewritten or erased by anyone holding a session", async () => {
     await impersonate(USER_A);
     await expect(
-      db.query("update activity_events set state = 'complete'"),
+      db.query("update activity_events set state = 'succeeded'"),
     ).rejects.toThrow(/permission denied/);
     await expect(db.query("delete from activity_events")).rejects.toThrow(
       /permission denied/,
     );
+  });
+
+  it("keeps two invocations of the same step as two operations", async () => {
+    // Identity is the invocation, not the step name: a turn that runs the same
+    // real operation twice must not lose one of them.
+    await asTrustedWriter();
+    const second = "55555555-5555-4555-8555-555555555555";
+    await db.query(
+      `insert into activity_events
+         (project_id, turn_id, operation_id, step, state)
+       values ($1, $2, $3, 'considering_direction', 'succeeded'),
+              ($1, $2, $4, 'considering_direction', 'failed')`,
+      [projectA, TURN, OPERATION, second],
+    );
+
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      `select distinct operation_id from activity_events
+       where step = 'considering_direction'`,
+    );
+    expect(rows).toHaveLength(2);
   });
 
   it("accepts only steps in the application's closed vocabulary", async () => {
@@ -135,9 +159,10 @@ describe.skipIf(skip)("activity_events", () => {
     await asTrustedWriter();
     await expect(
       db.query(
-        `insert into activity_events (project_id, turn_id, step, state)
-         values ($1, $2, 'ran_advanced_reasoning', 'active')`,
-        [projectA, TURN],
+        `insert into activity_events
+           (project_id, turn_id, operation_id, step, state)
+         values ($1, $2, $3, 'ran_advanced_reasoning', 'active')`,
+        [projectA, TURN, OPERATION],
       ),
     ).rejects.toThrow(/invalid input value for enum/);
   });

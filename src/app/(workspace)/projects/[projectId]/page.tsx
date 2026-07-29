@@ -57,7 +57,8 @@ export default async function ProjectPage({
       projectId={project.id}
       projectName={project.name}
       initialMessages={messages}
-      initialActivity={activity}
+      initialActivity={activity.lines}
+      activityTruncated={activity.truncated}
       canvasObjects={canvasObjects}
       canvasRelationships={canvasRelationships}
     />

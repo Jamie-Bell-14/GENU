@@ -39,7 +39,12 @@ export function Composer({
   state: TurnState;
 }>) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const busy = state.status !== "idle";
+  /*
+    Recovery counts as busy. The runtime refuses a send while catch-up is in
+    flight, so an enabled Send button would be a control that silently does
+    nothing.
+  */
+  const busy = state.status !== "idle" || state.recovering;
   const tooLong = value.length > MAX_MESSAGE_LENGTH;
   const canSend = value.trim().length > 0 && !busy && !tooLong;
   const streaming = state.status === "streaming";
@@ -127,7 +132,7 @@ export function Composer({
           ) : (
             <Button onClick={onSend} disabled={!canSend} aria-busy={busy}>
               <SendIcon data-icon="inline-start" aria-hidden />
-              Send
+              {state.recovering ? "Recovering…" : "Send"}
             </Button>
           )}
         </div>

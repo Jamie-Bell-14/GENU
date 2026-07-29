@@ -53,7 +53,11 @@ export interface TurnHooks {
    * Reports an operation *around* the work that performs it, so a label can
    * never be emitted for work that already finished or never happens.
    */
-  step<T>(name: ActivityStep, work: () => Promise<T>): Promise<T>;
+  step<T>(
+    name: ActivityStep,
+    work: () => Promise<T>,
+    outcome?: (result: T) => "succeeded" | "failed",
+  ): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
   takeDirection(): Promise<string | null>;
 }
@@ -134,19 +138,20 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     */
     const focalObjectId = input.context?.focalObjectId;
     if (focalObjectId) {
-      await hooks.step("preparing_canvas_view", () =>
-        hooks.recommendScene({
-          renderer: "problem_exploration",
-          purpose: "explore_problem",
+      await hooks.recommendScene({
+        renderer: "problem_exploration",
+        purpose: "explore_problem",
+        focalObjectId,
+        visibleObjectIds: visibleWithFocus(
           focalObjectId,
-          visibleObjectIds: input.context?.objectIds.slice(0, 60) ?? [],
-          visibleRelationshipIds: [],
-          emphasis: "none",
-          reason:
-            "Showing the problem this project is exploring. Discovery analysis is not connected yet.",
-          transition: "replace",
-        }),
-      );
+          input.context?.objectIds ?? [],
+        ),
+        visibleRelationshipIds: [],
+        emphasis: "none",
+        reason:
+          "Showing the problem this project is exploring. Discovery analysis is not connected yet.",
+        transition: "replace",
+      });
     }
     if (signal?.aborted) return interrupted();
 
@@ -163,8 +168,12 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     const direction = await hooks.takeDirection();
     if (direction) {
       const acknowledgement = `\n\nYou added: “${truncate(direction, 120)}”. It is recorded against this turn and will be used once discovery analysis is connected.`;
-      const streamed = await hooks.step("considering_direction", () =>
-        this.stream(acknowledgement, hooks, signal),
+      const streamed = await hooks.step(
+        "considering_direction",
+        () => this.stream(acknowledgement, hooks, signal),
+        // A turn stopped part-way through the acknowledgement did not take the
+        // direction into account, whatever the label would otherwise say.
+        (delivered) => (delivered ? "succeeded" : "failed"),
       );
       if (!streamed) return interrupted();
       lines.push(acknowledgement);
@@ -197,6 +206,25 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     }
     return true;
   }
+}
+
+/** The scene schema's ceiling on how many objects one view may name. */
+const MAX_VISIBLE_OBJECTS = 60;
+
+/**
+ * Builds the visible set with the focal object guaranteed to be in it.
+ *
+ * Taking the first N ids and hoping the focal object is among them fails on any
+ * project large enough for it not to be — the scene is then rejected as
+ * `focal_not_visible`, which looks like a validation bug rather than what it
+ * is. The focal object leads; the rest fills deterministically behind it.
+ */
+function visibleWithFocus(
+  focalObjectId: string,
+  objectIds: string[],
+): string[] {
+  const rest = objectIds.filter((id) => id !== focalObjectId);
+  return [focalObjectId, ...rest.slice(0, MAX_VISIBLE_OBJECTS - 1)];
 }
 
 function truncate(value: string, max: number): string {

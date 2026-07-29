@@ -38,16 +38,30 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
   return {
     emit: ports.emit,
 
-    step: (name, work) => ports.reporter.step(name, work),
+    step: (name, work, outcome) => ports.reporter.step(name, work, outcome),
 
+    /*
+      The step is reported here rather than by the engine, because only this
+      side knows whether a scene was actually prepared. Wrapping the call in
+      the engine would report "canvas view prepared" for a rejected candidate.
+      The outcome still does not travel back to the engine: it returns void
+      either way, so the validation boundary cannot be probed.
+    */
     async recommendScene(candidate) {
-      const result = validateScene(candidate, ports.scope);
-      if (!result.ok) {
-        await ports.onSceneRejected(result.rejection);
-        return;
-      }
-      ports.emit({ type: "scene_recommended", scene: result.scene });
-      await ports.onSceneAccepted(result.scene);
+      await ports.reporter.step(
+        "preparing_canvas_view",
+        async () => {
+          const result = validateScene(candidate, ports.scope);
+          if (!result.ok) {
+            await ports.onSceneRejected(result.rejection);
+            return false;
+          }
+          ports.emit({ type: "scene_recommended", scene: result.scene });
+          await ports.onSceneAccepted(result.scene);
+          return true;
+        },
+        (accepted) => (accepted ? "succeeded" : "failed"),
+      );
     },
 
     takeDirection: ports.takeDirection,

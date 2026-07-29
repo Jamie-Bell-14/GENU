@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { TurnStatus } from "@/lib/services/turn-status";
 import {
   turnReducer,
   INITIAL_TURN_STATE,
@@ -41,6 +42,24 @@ export interface TurnRuntime {
   onAction: (action: ContextualAction) => void;
 }
 
+/**
+ * Catch-up polling. Bounded on purpose: a turn that is still finishing gets a
+ * few chances to land, and after that the interface says what it knows rather
+ * than waiting indefinitely.
+ */
+const CATCH_UP_ATTEMPTS = 4;
+const CATCH_UP_DELAY_MS = 400;
+
+interface CatchUpResponse {
+  status: TurnStatus;
+  activity?: ActivityLine[];
+  message?: Message | null;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const DIRECTION_UNAVAILABLE: SafeError = {
   code: "engine_unavailable",
   userMessage:
@@ -78,6 +97,8 @@ export function useTurnRuntime({
   /** Set only by the Stop control, so a deliberate stop is never mistaken for
    *  a dropped connection — they need different recoveries. */
   const stoppedRef = useRef(false);
+  /** Mirrors `state.recovering` for the guard, which cannot read state. */
+  const recoveringRef = useRef(false);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -92,39 +113,73 @@ export function useTurnRuntime({
     : `/api/projects/${projectId}/directions`;
 
   /**
-   * Recovers a turn whose stream was lost. The byte stream cannot be resumed,
-   * but everything that mattered was recorded under the turn id, so the client
-   * asks what the server actually holds. Ids are stable, so anything already
-   * received is merged rather than duplicated.
+   * Recovers a turn whose stream was lost.
+   *
+   * The byte stream cannot be resumed, but everything that mattered was
+   * recorded under the turn id, so the client asks what the server actually
+   * holds. Two things it must not do: conclude "the turn produced nothing"
+   * from a single read taken while the server is still finishing, and report a
+   * failed lookup as a failed turn. So it polls a bounded number of times
+   * while the server says the turn is still running, and reports a lookup
+   * failure as exactly that.
    */
   const catchUp = useCallback(
     async (turnId: string) => {
-      if (isDemo) {
-        // The dev endpoints persist nothing, so there is nothing to recover
-        // and the state says so rather than implying a lost result exists.
-        dispatch({ type: "recovered", activityLog: [], message: null });
-        return;
-      }
+      recoveringRef.current = true;
       try {
-        const response = await fetch(
-          `/api/projects/${projectId}/turns/${turnId}`,
-          { cache: "no-store" },
-        );
-        if (!response.ok) {
-          dispatch({ type: "recovered", activityLog: [], message: null });
+        if (isDemo) {
+          // The dev endpoints persist nothing, so there is nothing to recover
+          // and the state says so rather than implying a lost result exists.
+          dispatch({
+            type: "recovered",
+            outcome: "unfinished",
+            activityLog: [],
+            message: null,
+          });
           return;
         }
-        const payload = (await response.json()) as {
-          activity: ActivityLine[];
-          message: Message | null;
-        };
+
+        for (let attempt = 0; attempt < CATCH_UP_ATTEMPTS; attempt += 1) {
+          if (attempt > 0) await wait(CATCH_UP_DELAY_MS * attempt);
+          let payload: CatchUpResponse | null = null;
+          try {
+            const response = await fetch(
+              `/api/projects/${projectId}/turns/${turnId}`,
+              { cache: "no-store" },
+            );
+            if (response.ok)
+              payload = (await response.json()) as CatchUpResponse;
+          } catch {
+            payload = null;
+          }
+
+          if (!payload || payload.status === "lookup_failed") {
+            // Try again: a failed read says nothing about the turn.
+            continue;
+          }
+          // Still finishing — wait rather than declaring it produced nothing.
+          if (payload.status === "running" && attempt < CATCH_UP_ATTEMPTS - 1) {
+            continue;
+          }
+
+          dispatch({
+            type: "recovered",
+            outcome: payload.message ? "completed" : "unfinished",
+            activityLog: payload.activity ?? [],
+            message: payload.message ?? null,
+          });
+          return;
+        }
+
+        // Every attempt failed to reach a usable answer.
         dispatch({
           type: "recovered",
-          activityLog: payload.activity ?? [],
-          message: payload.message ?? null,
+          outcome: "lookup_failed",
+          activityLog: [],
+          message: null,
         });
-      } catch {
-        dispatch({ type: "recovered", activityLog: [], message: null });
+      } finally {
+        recoveringRef.current = false;
       }
     },
     [isDemo, projectId],
@@ -132,8 +187,9 @@ export function useTurnRuntime({
 
   const send = useCallback(async () => {
     const message = draft.trim();
-    // Guard against rapid double-submits racing the state update.
-    if (!message || sendingRef.current) return;
+    // Guard against rapid double-submits racing the state update, and against
+    // starting a new turn while the previous one is still being recovered.
+    if (!message || sendingRef.current || recoveringRef.current) return;
     sendingRef.current = true;
     stoppedRef.current = false;
 
@@ -153,6 +209,17 @@ export function useTurnRuntime({
     abortRef.current = controller;
     let turnId: string | null = null;
     let completed = false;
+    /* Without a turn id there is nothing to look up, and saying the turn did
+       not finish is the only honest answer. */
+    const recover = async (id: string | null) =>
+      id
+        ? catchUp(id)
+        : dispatch({
+            type: "recovered",
+            outcome: "unfinished",
+            activityLog: [],
+            message: null,
+          });
 
     try {
       const response = await fetch(turnsEndpoint, {
@@ -203,8 +270,7 @@ export function useTurnRuntime({
         // not the turn finished. Partial text is discarded and the server is
         // asked what it actually recorded.
         dispatch({ type: "connection_lost" });
-        if (turnId) await catchUp(turnId);
-        else dispatch({ type: "recovered", activityLog: [], message: null });
+        await recover(turnId);
         return;
       }
       dispatch({ type: "event", event: { type: "done" } });
@@ -218,8 +284,7 @@ export function useTurnRuntime({
         dispatch({ type: "turn_stopped" });
       } else {
         dispatch({ type: "connection_lost" });
-        if (turnId) await catchUp(turnId);
-        else dispatch({ type: "recovered", activityLog: [], message: null });
+        await recover(turnId);
       }
     } finally {
       sendingRef.current = false;

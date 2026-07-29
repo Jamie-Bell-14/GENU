@@ -166,9 +166,9 @@ describe("dev turn and direction endpoints", () => {
       .filter((event) => event.type === "activity")
       .map((event) => `${event.activity.step}:${event.activity.state}`);
     expect(activity).toContain("preparing_canvas_view:active");
-    expect(activity).toContain("preparing_canvas_view:complete");
+    expect(activity).toContain("preparing_canvas_view:succeeded");
     for (const entry of activity.filter((line) => line.endsWith(":active"))) {
-      expect(activity).toContain(entry.replace(":active", ":complete"));
+      expect(activity).toContain(entry.replace(":active", ":succeeded"));
     }
   });
 
@@ -186,6 +186,41 @@ describe("dev turn and direction endpoints", () => {
         focalObjectId: "22222222-2222-4222-8222-000000000001",
       },
     });
+  });
+
+  it("accepts direction while a turn is open and refuses it once closed", async () => {
+    const response = await turnRoute(
+      post("http://localhost/api/dev/turns", { message: "A problem" }),
+    );
+    const reader = response.body!.getReader();
+    const events: TurnEvent[] = [];
+    expect(
+      await readUntil(reader, events, (event) => event.type === "turn_started"),
+    ).toBe(true);
+    const turnId = (
+      events.find((event) => event.type === "turn_started") as {
+        turnId: string;
+      }
+    ).turnId;
+
+    const whileOpen = await directionRoute(
+      post("http://localhost/api/dev/directions", {
+        turnId,
+        note: "While the turn is running.",
+      }),
+    );
+    expect(whileOpen.status).toBe(200);
+
+    await drain(reader, events);
+
+    // The turn is finished, so there is no step left to consume a direction.
+    const afterClose = await directionRoute(
+      post("http://localhost/api/dev/directions", {
+        turnId,
+        note: "After the turn finished.",
+      }),
+    );
+    expect(afterClose.status).toBe(404);
   });
 
   it("refuses a direction for a turn it never started", async () => {

@@ -26,6 +26,13 @@ export interface TurnScope {
    * as the whole project would hide that.
    */
   truncated: boolean;
+  /** The read itself failed. Distinct from a project that is simply empty. */
+  failed: boolean;
+}
+
+/** A scope that is both complete and error-free — the only honest "read". */
+export function scopeIsWhole(scope: TurnScope): boolean {
+  return !scope.truncated && !scope.failed;
 }
 
 /**
@@ -70,9 +77,8 @@ export async function loadTurnScope(
     objectIds,
     focalObjectId: defaultFocalObjectId(canvasObjects, canvasRelationships),
     truncated:
-      Boolean(objects.error) ||
-      Boolean(relationships.error) ||
       objectRows.length >= OBJECT_LIMIT ||
       relationshipRows.length >= RELATIONSHIP_LIMIT,
+    failed: Boolean(objects.error) || Boolean(relationships.error),
   };
 }

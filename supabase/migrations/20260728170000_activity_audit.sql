@@ -50,15 +50,26 @@ create type public.activity_step as enum (
   'preparing_canvas_view'
 );
 
--- Activity has a lifecycle: a step is reported when it starts and again when
--- it finishes, so a completed operation is never displayed as still running.
-create type public.activity_state as enum ('active', 'complete');
+/*
+  Activity has a lifecycle: a step is reported when it starts and again when it
+  stops, saying which of the two ways it stopped. A single "complete" state
+  would claim success for work that failed, so ending and succeeding are
+  separate facts.
+*/
+create type public.activity_state as enum ('active', 'succeeded', 'failed');
 
 create table public.activity_events (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects (id) on delete cascade,
   -- Correlates every line of a turn's observable work.
   turn_id uuid not null,
+  /*
+    Identifies one *invocation* of a step. The same operation can run more than
+    once in a turn, so the reports are grouped by this rather than by step
+    name — otherwise a repeat would overwrite its predecessor and history would
+    quietly lose an operation that really happened.
+  */
+  operation_id uuid not null,
   step public.activity_step not null,
   state public.activity_state not null,
   created_at timestamptz not null default now()
@@ -67,6 +78,8 @@ create table public.activity_events (
 create index activity_events_project_idx
   on public.activity_events (project_id, created_at desc);
 create index activity_events_turn_idx on public.activity_events (turn_id);
+create index activity_events_operation_idx
+  on public.activity_events (operation_id);
 
 /*
   Closed audit vocabulary. Deliberately small and specific: an enum forces a

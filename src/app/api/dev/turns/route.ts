@@ -6,6 +6,7 @@ import type { TurnEvent } from "@/lib/ai/turn-events";
 import { defaultFocalObjectId } from "@/lib/canvas/problem-map";
 import { DEMO_OBJECTS, DEMO_RELATIONSHIPS } from "@/lib/dev/demo-project";
 import {
+  closeDevTurn,
   openDevTurn,
   takePendingDirections,
 } from "@/lib/dev/pending-directions";
@@ -78,7 +79,6 @@ export async function POST(request: NextRequest) {
       emit({ type: "turn_started", turnId });
 
       const reporter = createActivityReporter({
-        turnId,
         emit,
         // No database here: activity is streamed and shown, not stored.
         persist: async () => {},
@@ -112,17 +112,23 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      await engine.runTurn(
-        {
-          projectId: "demo",
-          turnId,
-          userMessage: parsed.data.message,
-          context: { objectIds, focalObjectId },
-        },
-        hooks,
-        request.signal,
-      );
-      controller.close();
+      try {
+        await engine.runTurn(
+          {
+            projectId: "demo",
+            turnId,
+            userMessage: parsed.data.message,
+            context: { objectIds, focalObjectId },
+          },
+          hooks,
+          request.signal,
+        );
+      } finally {
+        // The turn is over, so it can no longer take direction. Without this
+        // the endpoint would keep accepting steering for a finished turn.
+        closeDevTurn(turnId);
+        controller.close();
+      }
     },
   });
 

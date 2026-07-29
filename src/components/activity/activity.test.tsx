@@ -18,7 +18,11 @@ import { ActivityIndicator } from "./activity-indicator";
 const TURN = "dddddddd-0000-4000-8000-000000000001";
 
 const analysis = activityLineFor(TURN, "reading_project_model", "active");
-const analysisDone = activityLineFor(TURN, "reading_project_model", "complete");
+const analysisDone = activityLineFor(
+  TURN,
+  "reading_project_model",
+  "succeeded",
+);
 const canvasWork = activityLineFor(TURN, "preparing_canvas_view", "active");
 
 const objects: CanvasObject[] = [
@@ -122,6 +126,15 @@ describe("activity history", () => {
     expect(entries[0]).toHaveTextContent(canvasWork.label);
     expect(entries[0]).toHaveTextContent("Project model");
     expect(entries[1]).toHaveTextContent(analysisDone.label);
+  });
+
+  it("does not present a bounded slice as the complete history", async () => {
+    const user = userEvent.setup();
+    render(<ActivityHistory lines={[analysisDone]} truncated />);
+    await user.click(screen.getByRole("button", { name: "Activity history" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Recent activity");
+    expect(dialog).toHaveTextContent("Older activity is not shown here.");
   });
 
   it("says the history is empty rather than showing an empty panel", async () => {

@@ -27,12 +27,13 @@ export function activitySurface(kind: ActivityKind): "conversation" | "canvas" {
 
 /**
  * One reported operation. `state` is what makes the report honest: a step is
- * announced when it starts and announced again when it finishes, so nothing
- * that has completed keeps a live indicator while other work continues.
+ * announced when it starts and announced again when it finishes, saying
+ * whether it achieved what it set out to do — so nothing that has finished
+ * keeps a live indicator, and nothing that failed reads as success.
  *
- * The id is stable across both reports of the same operation, so a surface
- * replaces the active line rather than accumulating two, and a replayed stream
- * cannot duplicate it.
+ * The id is the operation's, stable across its reports, so a surface replaces
+ * the running line rather than accumulating two and a replayed stream cannot
+ * duplicate it.
  */
 export interface ActivityLine {
   id: string;
@@ -45,22 +46,23 @@ export interface ActivityLine {
 }
 
 /**
- * The line id is derived from the turn and the step rather than generated, so
- * the active and complete reports of one operation share it — and so a stream
- * replayed after a reconnect resolves to the same line instead of a duplicate.
+ * Builds a line for one *invocation* of a step.
+ *
+ * The id identifies the invocation, not the step name: the same real operation
+ * can happen more than once in a turn, and collapsing those would lose history
+ * as soon as a turn does repeated model, research or direction work. Its
+ * running and finished reports share the id, so they resolve to one entry, and
+ * a stream replayed after a reconnect resolves to the same entry rather than a
+ * duplicate.
  */
-export function activityLineId(turnId: string, step: ActivityStep): string {
-  return `${turnId}:${step}`;
-}
-
 export function activityLineFor(
-  turnId: string,
+  operationId: string,
   step: ActivityStep,
   state: ActivityState,
   at?: string,
 ): ActivityLine {
   return {
-    id: activityLineId(turnId, step),
+    id: operationId,
     step,
     state,
     label: activityLabel(step, state),
@@ -235,6 +237,8 @@ export type TurnAction =
   /** Catch-up finished: what the server actually recorded for this turn. */
   | {
       type: "recovered";
+      /** How the turn really ended, or that the lookup itself failed. */
+      outcome: "completed" | "unfinished" | "lookup_failed";
       activityLog: ActivityLine[];
       message: Message | null;
     }
@@ -244,10 +248,11 @@ export type TurnAction =
 const MAX_ACTIVITY_LOG = 200;
 
 /**
- * Merges a line into the history. One operation is reported twice — active,
- * then complete — under a single id, so the later report replaces the earlier
- * one rather than adding a second entry. That also means a stream replayed
- * after a reconnect cannot duplicate anything.
+ * Merges a line into the history. One operation is reported twice — running,
+ * then finished — under a single id, so the later report replaces the earlier
+ * one rather than adding a second entry. Two invocations of the same step have
+ * different ids and stay two entries. A stream replayed after a reconnect
+ * cannot duplicate anything.
  */
 function appendActivity(
   log: ActivityLine[],
@@ -314,6 +319,27 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
 
     case "recovered": {
       const known = new Set(state.messages.map((message) => message.id));
+      /*
+        Three different facts, three different things to say. "We could not
+        find out" must never be reported as "your turn produced nothing" — that
+        would be a conclusion the system has not earned.
+      */
+      const error: SafeError | null =
+        action.outcome === "completed"
+          ? null
+          : action.outcome === "lookup_failed"
+            ? {
+                code: "engine_unavailable",
+                userMessage:
+                  "The connection dropped and this turn could not be checked. Your message is saved; reload to see what was recorded.",
+                recoverable: true,
+              }
+            : {
+                code: "turn_interrupted",
+                userMessage:
+                  "The connection dropped and this turn did not finish. Your message is saved — send another when you are ready.",
+                recoverable: true,
+              };
       return {
         ...state,
         activityLog: action.activityLog.reduce(
@@ -325,20 +351,16 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             ? [...state.messages, action.message]
             : state.messages,
         recovering: false,
-        error: action.message
-          ? null
-          : {
-              code: "turn_interrupted",
-              userMessage:
-                "The connection dropped and this turn did not finish. Your message is saved — send another when you are ready.",
-              recoverable: true,
-            },
+        error,
       };
     }
 
     case "direction_accepted":
       return {
         ...state,
+        // A retry that succeeds clears the failure it replaces, so the two are
+        // never shown together.
+        error: null,
         direction: {
           note: action.note,
           application: action.application,

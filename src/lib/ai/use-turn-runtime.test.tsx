@@ -56,7 +56,7 @@ function renderRuntime() {
 describe("losing the stream mid-turn", () => {
   it("catches up from what the server recorded, without duplicating events", async () => {
     const catchUp = {
-      activity: [activityLineFor(TURN, "reading_project_model", "complete")],
+      activity: [activityLineFor(TURN, "reading_project_model", "succeeded")],
       message: {
         id: "assistant-1",
         role: "assistant",
@@ -81,7 +81,7 @@ describe("losing the stream mid-turn", () => {
       // The catch-up request.
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => catchUp,
+        json: async () => ({ status: "completed", ...catchUp }),
       } as unknown as Response);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -106,7 +106,7 @@ describe("losing the stream mid-turn", () => {
     expect(contents.some((text) => text.includes("half a sen"))).toBe(false);
     // The line arrived live and again on catch-up: it appears once.
     expect(result.current.state.activityLog).toHaveLength(1);
-    expect(result.current.state.activityLog[0].state).toBe("complete");
+    expect(result.current.state.activityLog[0].state).toBe("succeeded");
     expect(result.current.state.status).toBe("idle");
   });
 
@@ -118,9 +118,9 @@ describe("losing the stream mid-turn", () => {
           end: false,
         }),
       )
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         ok: true,
-        json: async () => ({ activity: [], message: null }),
+        json: async () => ({ status: "failed", activity: [], message: null }),
       } as unknown as Response);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -134,6 +134,87 @@ describe("losing the stream mid-turn", () => {
       expect(result.current.state.error?.code).toBe("turn_interrupted"),
     );
     expect(result.current.state.messages).toHaveLength(1);
+  });
+});
+
+describe("catch-up that races the server", () => {
+  it("waits for a turn that is still finishing instead of declaring it empty", async () => {
+    const persisted = {
+      id: "assistant-1",
+      role: "assistant",
+      content: "The recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      // The server has not finished writing the result yet.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: "running", activity: [], message: null }),
+      } as unknown as Response)
+      // A moment later it has.
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          activity: [],
+          message: persisted,
+        }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    await waitFor(() => expect(result.current.state.recovering).toBe(false), {
+      timeout: 5000,
+    });
+    expect(result.current.state.messages.map((m) => m.content)).toEqual([
+      "A problem worth exploring",
+      "The recorded answer.",
+    ]);
+    // Recovered once, not once per poll.
+    expect(
+      result.current.state.messages.filter((m) => m.id === "assistant-1"),
+    ).toHaveLength(1);
+    expect(result.current.state.error).toBeNull();
+  });
+
+  it("reports a failed lookup as a failed lookup, not as an unfinished turn", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: false,
+        json: async () => ({ status: "lookup_failed" }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    await waitFor(() => expect(result.current.state.recovering).toBe(false), {
+      timeout: 5000,
+    });
+    expect(result.current.state.error?.userMessage).toMatch(
+      /could not be checked/i,
+    );
+    // The conclusion the client must not reach.
+    expect(result.current.state.error?.userMessage).not.toMatch(
+      /did not finish/i,
+    );
   });
 });
 
@@ -333,6 +414,40 @@ describe("adding direction", () => {
       applied: false,
     });
     expect(result.current.draft).toBe("");
+  });
+
+  it("clears a previous direction failure once a retry succeeds", async () => {
+    const { result, fetchMock } = await streamingTurn();
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({
+        error: {
+          code: "engine_unavailable",
+          userMessage: "That turn is no longer running.",
+          recoverable: false,
+        },
+      }),
+    } as unknown as Response);
+
+    act(() => result.current.setDraft("Focus on smaller agencies"));
+    await act(async () => {
+      await result.current.addDirection();
+    });
+    expect(result.current.state.error).not.toBeNull();
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ application: "next_step" }),
+    } as unknown as Response);
+    await act(async () => {
+      await result.current.addDirection();
+    });
+
+    // The stale failure and the new promise must not be shown together.
+    expect(result.current.state.error).toBeNull();
+    expect(result.current.state.direction).toMatchObject({
+      application: "next_step",
+    });
   });
 
   it("sends the direction against the running turn's id", async () => {

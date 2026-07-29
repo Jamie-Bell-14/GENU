@@ -6,6 +6,7 @@ import {
 } from "@/lib/ai/turn-events";
 import { DirectionRequestSchema } from "@/lib/services/directions";
 import { recordAudit, recordDirection } from "@/lib/services/trusted-writer";
+import { readTurnStatus } from "@/lib/services/turn-status";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { DIRECTION_RATE_LIMIT } from "@/lib/validation/turns";
 
@@ -111,36 +112,36 @@ export async function POST(
   }
 
   /*
-    Authorising the project is not enough: the turn named in the body must
-    belong to it, or a direction could be attached to another project's turn.
-    The user message is written before the stream opens, so a real turn always
-    has one. A missing or foreign turn gets the same unavailable answer, so the
-    response does not reveal which.
+    Authorising the project is not enough. The turn must belong to it *and* be
+    running: a finished turn has no step left to consume a direction, so
+    accepting one there would record a promise the system cannot keep. A
+    foreign turn, a missing turn and a finished turn all get the same answer,
+    so the response does not reveal which — and the status comes from the audit
+    trail rather than from the client's belief about what is on screen.
   */
-  const { data: turn } = await supabase
-    .from("messages")
-    .select("turn_id")
-    .eq("project_id", projectId)
-    .eq("turn_id", parsed.data.turnId)
-    .limit(1)
-    .maybeSingle();
-  if (!turn) {
+  const status = await readTurnStatus(supabase, projectId, parsed.data.turnId);
+  if (status !== "running") {
     await recordAudit({
       projectId,
       actorId: user.id,
       actorKind: "user",
       action: "direction_rejected",
       correlationId: parsed.data.turnId,
-      detail: { code: "turn_not_in_project" },
+      detail: { code: status },
     });
     return errorResponse(
       {
-        code: "engine_unavailable",
+        code:
+          status === "lookup_failed"
+            ? "engine_unavailable"
+            : "turn_interrupted",
         userMessage:
-          "That turn is not available, so the direction was not recorded. Your text is unchanged.",
-        recoverable: false,
+          status === "lookup_failed"
+            ? "Your direction could not be recorded. Your text is unchanged — try again."
+            : "That turn is no longer running, so the direction was not recorded. Your text is unchanged.",
+        recoverable: status === "lookup_failed",
       },
-      404,
+      status === "lookup_failed" ? 503 : 409,
     );
   }
 

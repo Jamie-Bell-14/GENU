@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { Message } from "@/lib/ai/turn-events";
 import { loadActivityHistory } from "@/lib/services/activity";
+import { readTurnStatus } from "@/lib/services/turn-status";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -12,10 +13,12 @@ export const runtime = "nodejs";
  * An SSE connection can drop without either side deciding to end the turn. The
  * client cannot resume the byte stream, but it does not need to: everything
  * that mattered was recorded server-side under the turn id. This returns what
- * the server actually holds for that turn, so the workspace recovers without a
- * full page reload and without inventing anything it did not receive.
+ * the server actually holds, together with **why** — a turn that is still
+ * finishing, one that finished, and a lookup that failed are three different
+ * facts, and inferring "the turn did not finish" from one empty read would be
+ * a false conclusion.
  *
- * Ids are stable — activity lines are keyed by turn and step, the assistant
+ * Ids are stable — activity lines are keyed by operation, the assistant
  * message by its row id — so replaying this after a partial stream cannot
  * duplicate what the client already has.
  */
@@ -40,7 +43,8 @@ export async function GET(
     .maybeSingle();
   if (!project) return new NextResponse(null, { status: 404 });
 
-  const [activity, assistant] = await Promise.all([
+  const [status, activity, assistant] = await Promise.all([
+    readTurnStatus(supabase, projectId, turnId),
     loadActivityHistory(supabase, projectId, { turnId }),
     supabase
       .from("messages")
@@ -52,6 +56,18 @@ export async function GET(
       .limit(1)
       .maybeSingle(),
   ]);
+
+  /*
+    A read that failed is reported as a failure, not as an empty result. The
+    client can then say "recovery failed" instead of telling the user their
+    turn produced nothing.
+  */
+  if (status === "lookup_failed" || activity.failed || assistant.error) {
+    return NextResponse.json(
+      { status: "lookup_failed" },
+      { status: 503, headers: { "cache-control": "no-store" } },
+    );
+  }
 
   const row = assistant.data as {
     id: string;
@@ -70,7 +86,7 @@ export async function GET(
     : null;
 
   return NextResponse.json(
-    { activity, message },
+    { status, activity: activity.lines, message },
     { headers: { "cache-control": "no-store" } },
   );
 }

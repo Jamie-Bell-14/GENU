@@ -31,10 +31,14 @@ function timeOf(line: ActivityLine): string {
  * The persistent activity control (DESIGN.md §9.1): temporary lines fade from
  * the working surfaces, but the record of what the system did stays
  * retrievable here rather than being lost with the turn.
+ *
+ * It shows *recent* activity, not all of it. The read is bounded, so the panel
+ * says so rather than presenting a capped slice as the complete history.
  */
 export function ActivityHistory({
   lines,
-}: Readonly<{ lines: readonly ActivityLine[] }>) {
+  truncated = false,
+}: Readonly<{ lines: readonly ActivityLine[]; truncated?: boolean }>) {
   const newestFirst = [...lines].reverse();
 
   return (
@@ -46,10 +50,10 @@ export function ActivityHistory({
       </SheetTrigger>
       <SheetContent side="right" className="w-96 max-w-full">
         <SheetHeader>
-          <SheetTitle>Activity</SheetTitle>
+          <SheetTitle>Recent activity</SheetTitle>
           <SheetDescription>
-            What the system did, in the order it happened. Each line describes a
-            real operation.
+            What the system did, newest first. Each line describes a real
+            operation and says whether it succeeded.
           </SheetDescription>
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
@@ -68,6 +72,11 @@ export function ActivityHistory({
                 </li>
               ))}
             </ol>
+          )}
+          {truncated && (
+            <p className="text-fg-tertiary mt-3 text-xs">
+              Older activity is not shown here.
+            </p>
           )}
         </div>
       </SheetContent>

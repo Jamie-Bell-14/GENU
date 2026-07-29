@@ -176,22 +176,23 @@ describe("activity history, scenes and steering", () => {
   const report = (
     state: TurnState,
     step: "reading_project_model" | "preparing_canvas_view",
-    lifecycle: "active" | "complete",
+    lifecycle: "active" | "succeeded" | "failed",
+    operationId = `${TURN}:${step}`,
   ) =>
     turnReducer(state, {
       type: "event",
       event: {
         type: "activity",
-        activity: activityLineFor(TURN, step, lifecycle),
+        activity: activityLineFor(operationId, step, lifecycle),
       },
     });
 
   it("keeps a retrievable log after the working line has faded", () => {
     let state = streamStarted(send());
     state = report(state, "reading_project_model", "active");
-    state = report(state, "reading_project_model", "complete");
+    state = report(state, "reading_project_model", "succeeded");
     state = report(state, "preparing_canvas_view", "active");
-    state = report(state, "preparing_canvas_view", "complete");
+    state = report(state, "preparing_canvas_view", "succeeded");
     state = turnReducer(state, { type: "event", event: { type: "done" } });
 
     expect(state.activity).toEqual(NO_ACTIVITY);
@@ -199,28 +200,28 @@ describe("activity history, scenes and steering", () => {
       "reading_project_model",
       "preparing_canvas_view",
     ]);
-    expect(state.activityLog.every((entry) => entry.state === "complete")).toBe(
-      true,
-    );
+    expect(
+      state.activityLog.every((entry) => entry.state === "succeeded"),
+    ).toBe(true);
   });
 
   it("does not leave a finished step looking active on its own surface", () => {
     let state = streamStarted(send());
     state = report(state, "reading_project_model", "active");
-    state = report(state, "reading_project_model", "complete");
+    state = report(state, "reading_project_model", "succeeded");
     // Canvas work starts while the conversation's step is already finished.
     state = report(state, "preparing_canvas_view", "active");
 
-    expect(state.activity.conversation?.state).toBe("complete");
+    expect(state.activity.conversation?.state).toBe("succeeded");
     expect(state.activity.canvas?.state).toBe("active");
   });
 
   it("does not duplicate a line that is delivered twice", () => {
     let state = streamStarted(send());
     state = report(state, "reading_project_model", "active");
-    state = report(state, "reading_project_model", "complete");
+    state = report(state, "reading_project_model", "succeeded");
     // A reconnect replays what was already received.
-    state = report(state, "reading_project_model", "complete");
+    state = report(state, "reading_project_model", "succeeded");
     expect(state.activityLog).toHaveLength(1);
   });
 
@@ -322,7 +323,10 @@ describe("stopping and losing the connection", () => {
     let state = turnReducer(withPartialText(), { type: "connection_lost" });
     state = turnReducer(state, {
       type: "recovered",
-      activityLog: [activityLineFor(TURN, "reading_project_model", "complete")],
+      outcome: "completed",
+      activityLog: [
+        activityLineFor(TURN, "reading_project_model", "succeeded"),
+      ],
       message: persisted,
     });
 
@@ -336,7 +340,10 @@ describe("stopping and losing the connection", () => {
     // Catching up twice must not append the same message again.
     const again = turnReducer(state, {
       type: "recovered",
-      activityLog: [activityLineFor(TURN, "reading_project_model", "complete")],
+      outcome: "completed",
+      activityLog: [
+        activityLineFor(TURN, "reading_project_model", "succeeded"),
+      ],
       message: persisted,
     });
     expect(again.messages).toHaveLength(2);
@@ -347,6 +354,7 @@ describe("stopping and losing the connection", () => {
     let state = turnReducer(withPartialText(), { type: "connection_lost" });
     state = turnReducer(state, {
       type: "recovered",
+      outcome: "unfinished",
       activityLog: [],
       message: null,
     });

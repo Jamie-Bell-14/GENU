@@ -29,6 +29,11 @@ export function isDevTurn(turnId: string): boolean {
   return pending.has(turnId);
 }
 
+/** Marks a turn finished: it can no longer accept direction. */
+export function closeDevTurn(turnId: string): void {
+  pending.delete(turnId);
+}
+
 export function addPendingDirection(turnId: string, note: string): boolean {
   const notes = pending.get(turnId);
   if (!notes) return false;

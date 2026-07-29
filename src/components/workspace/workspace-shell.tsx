@@ -58,6 +58,7 @@ export function WorkspaceShell({
   projectName,
   initialMessages = [],
   initialActivity = [],
+  activityTruncated = false,
   canvasObjects = [],
   canvasRelationships = [],
   onEditObject,
@@ -67,6 +68,8 @@ export function WorkspaceShell({
   initialMessages?: Message[];
   /** Activity already recorded for this project, newest last. */
   initialActivity?: ActivityLine[];
+  /** True when older activity exists beyond what was loaded. */
+  activityTruncated?: boolean;
   canvasObjects?: CanvasObject[];
   canvasRelationships?: ProjectRelationship[];
   onEditObject?: EditSubmit;
@@ -159,7 +162,10 @@ export function WorkspaceShell({
             <ToggleGroupItem value="balanced">Balanced</ToggleGroupItem>
             <ToggleGroupItem value="canvas">Canvas</ToggleGroupItem>
           </ToggleGroup>
-          <ActivityHistory lines={runtime.state.activityLog} />
+          <ActivityHistory
+            lines={runtime.state.activityLog}
+            truncated={activityTruncated}
+          />
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="ghost" size="icon-sm" aria-label="Settings">

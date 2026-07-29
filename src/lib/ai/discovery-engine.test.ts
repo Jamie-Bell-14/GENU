@@ -19,12 +19,15 @@ function harness(direction: string | null = null) {
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
-    step: async (name, work) => {
+    step: async (name, work, outcome) => {
       steps.push(`${name}:active`);
+      let finished = "failed";
       try {
-        return await work();
+        const result = await work();
+        finished = outcome ? outcome(result) : "succeeded";
+        return result;
       } finally {
-        steps.push(`${name}:complete`);
+        steps.push(`${name}:${finished}`);
       }
     },
     recommendScene: async (candidate) => {
@@ -56,24 +59,41 @@ describe("ScriptedDiscoveryEngine", () => {
   });
 
   it("names only steps the application has a label for", async () => {
-    const { steps, hooks } = harness();
+    const { steps, hooks } = harness("Focus on smaller agencies.");
     await new ScriptedDiscoveryEngine().runTurn(input, hooks);
     expect(steps.length).toBeGreaterThan(0);
     for (const entry of steps) {
       const [name, state] = entry.split(":");
       expect(isActivityStep(name)).toBe(true);
-      expect(ACTIVITY_STEPS[name as ActivityStep][state as "active"]).toEqual(
-        expect.any(String),
-      );
+      expect(
+        ACTIVITY_STEPS[name as ActivityStep][
+          state as "active" | "succeeded" | "failed"
+        ],
+      ).toEqual(expect.any(String));
     }
   });
 
-  it("reports every step as complete once its work has finished", async () => {
+  it("does not report the canvas step itself", async () => {
+    // Only the application knows whether a candidate became a scene, so that
+    // step is reported at the validation boundary, not here.
     const { steps, hooks } = harness();
     await new ScriptedDiscoveryEngine().runTurn(input, hooks);
+    expect(steps).toEqual([]);
+  });
+
+  it("reports every step it starts as finished, one way or the other", async () => {
+    const { steps, hooks } = harness("Focus on smaller agencies.");
+    await new ScriptedDiscoveryEngine().runTurn(input, hooks);
     const started = steps.filter((entry) => entry.endsWith(":active"));
+    expect(started.length).toBeGreaterThan(0);
     for (const entry of started) {
-      expect(steps).toContain(entry.replace(":active", ":complete"));
+      const name = entry.replace(":active", "");
+      expect(
+        steps.some(
+          (other) =>
+            other === `${name}:succeeded` || other === `${name}:failed`,
+        ),
+      ).toBe(true);
     }
   });
 
@@ -112,6 +132,29 @@ describe("ScriptedDiscoveryEngine", () => {
     );
   });
 
+  it("keeps the focal object in its own scene, however large the project", async () => {
+    // A scene may name at most 60 objects. Taking the first 60 and hoping the
+    // focal object is among them fails on any project big enough for it not to
+    // be, and validation then rejects the scene as focal_not_visible.
+    const many = Array.from(
+      { length: 200 },
+      (_, index) =>
+        `bbbbbbbb-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    );
+    const focal = many[150];
+    const { candidates, hooks } = harness();
+    await new ScriptedDiscoveryEngine().runTurn(
+      { ...input, context: { objectIds: many, focalObjectId: focal } },
+      hooks,
+    );
+
+    const visible = (candidates[0] as { visibleObjectIds: string[] })
+      .visibleObjectIds;
+    expect(visible).toContain(focal);
+    expect(visible.filter((id) => id === focal)).toHaveLength(1);
+    expect(visible.length).toBeLessThanOrEqual(60);
+  });
+
   it("recommends nothing when the project has no objects to name", async () => {
     const { candidates, hooks } = harness();
     await new ScriptedDiscoveryEngine().runTurn(
@@ -128,7 +171,7 @@ describe("ScriptedDiscoveryEngine", () => {
 
     const result = await engine.runTurn(input, hooks);
     expect(steps).toContain("considering_direction:active");
-    expect(steps).toContain("considering_direction:complete");
+    expect(steps).toContain("considering_direction:succeeded");
     expect(result.assistantText).toContain("Focus on smaller agencies.");
     // The acknowledgement reaches the user as streamed text, not silently.
     const streamed = events

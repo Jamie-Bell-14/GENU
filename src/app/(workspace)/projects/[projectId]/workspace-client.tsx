@@ -18,6 +18,7 @@ export function WorkspaceClient({
   projectName,
   initialMessages,
   initialActivity,
+  activityTruncated,
   canvasObjects,
   canvasRelationships,
 }: Readonly<{
@@ -25,6 +26,7 @@ export function WorkspaceClient({
   projectName: string;
   initialMessages: Message[];
   initialActivity: ActivityLine[];
+  activityTruncated: boolean;
   canvasObjects: CanvasObject[];
   canvasRelationships: ProjectRelationship[];
 }>) {
@@ -48,6 +50,7 @@ export function WorkspaceClient({
       projectName={projectName}
       initialMessages={initialMessages}
       initialActivity={initialActivity}
+      activityTruncated={activityTruncated}
       canvasObjects={canvasObjects}
       canvasRelationships={canvasRelationships}
       onEditObject={onEditObject}

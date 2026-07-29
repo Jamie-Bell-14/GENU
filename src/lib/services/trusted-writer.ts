@@ -51,13 +51,14 @@ function reportUnavailable(what: string) {
 }
 
 /**
- * Records one report of a step. A step is reported twice — active, then
- * complete — as two append-only rows; the reader collapses them back into one
- * line per operation, keyed by turn and step.
+ * Records one report of a step. A step is reported twice — running, then
+ * finished — as two append-only rows sharing an operation id; the reader
+ * collapses them back into one line per invocation.
  */
 export async function recordActivity(input: {
   projectId: string;
   turnId: string;
+  operationId: string;
   step: ActivityStep;
   state: ActivityState;
 }): Promise<void> {
@@ -66,6 +67,7 @@ export async function recordActivity(input: {
   const { error } = await client.from("activity_events").insert({
     project_id: input.projectId,
     turn_id: input.turnId,
+    operation_id: input.operationId,
     step: input.step,
     state: input.state,
   });

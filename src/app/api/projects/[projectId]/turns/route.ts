@@ -3,7 +3,7 @@ import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
-import { loadTurnScope } from "@/lib/canvas/project-scope";
+import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { readDirectionsSince } from "@/lib/services/directions";
 import {
   recordActivity,
@@ -180,10 +180,9 @@ export async function POST(
       emit({ type: "turn_started", turnId });
 
       const reporter = createActivityReporter({
-        turnId,
         emit,
-        persist: (step, state) =>
-          recordActivity({ projectId, turnId, step, state }),
+        persist: (operationId, step, state) =>
+          recordActivity({ projectId, turnId, operationId, step, state }),
       });
 
       /*
@@ -199,14 +198,21 @@ export async function POST(
         // Every id a scene may name comes from rows this user can already
         // read, and the focal object is the application's reading of the
         // project rather than an engine's guess.
-        const turnScope = await reporter.step("reading_project_model", () =>
-          loadTurnScope(supabase, projectId),
+        const turnScope = await reporter.step(
+          "reading_project_model",
+          () => loadTurnScope(supabase, projectId),
+          // A partial or failed read is not "project model read": the scope in
+          // hand is narrower than the project, so the label says so.
+          (scope) => (scopeIsWhole(scope) ? "succeeded" : "failed"),
         );
-        if (turnScope.truncated) {
-          // An incomplete scope fails closed, so say so rather than treating
-          // a partial read as the whole project.
+        if (!scopeIsWhole(turnScope)) {
+          // An incomplete scope fails closed, so record why rather than
+          // treating a partial read as the whole project.
           await audit("scope_truncated", {
-            detail: { objects: turnScope.objectIds.length },
+            detail: {
+              objects: turnScope.objectIds.length,
+              reason: turnScope.failed ? "read_failed" : "limit_reached",
+            },
           });
         }
 

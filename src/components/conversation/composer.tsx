@@ -2,7 +2,11 @@
 
 import { useRef } from "react";
 import { SendIcon, SquareIcon } from "lucide-react";
-import type { ContextualAction, TurnState } from "@/lib/ai/turn-events";
+import {
+  DIRECTION_APPLICATION_MESSAGES,
+  type ContextualAction,
+  type TurnState,
+} from "@/lib/ai/turn-events";
 import { MAX_MESSAGE_LENGTH } from "@/lib/validation/turns";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -19,6 +23,8 @@ export function Composer({
   onChange,
   onSend,
   onStop,
+  onAddDirection,
+  directionPending = false,
   onAction,
   state,
 }: Readonly<{
@@ -26,13 +32,25 @@ export function Composer({
   onChange: (value: string) => void;
   onSend: () => void;
   onStop: () => void;
+  onAddDirection: () => void;
+  /** A direction is in flight; the control is disabled until it resolves. */
+  directionPending?: boolean;
   onAction: (action: ContextualAction) => void;
   state: TurnState;
 }>) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const busy = state.status !== "idle";
+  /*
+    Recovery counts as busy. The runtime refuses a send while catch-up is in
+    flight, so an enabled Send button would be a control that silently does
+    nothing.
+  */
+  const checking = state.recoveries.some((entry) => entry.state === "checking");
+  const busy = state.status !== "idle" || checking;
   const tooLong = value.length > MAX_MESSAGE_LENGTH;
   const canSend = value.trim().length > 0 && !busy && !tooLong;
+  const streaming = state.status === "streaming";
+  const canDirect =
+    streaming && value.trim().length > 0 && !tooLong && !directionPending;
 
   function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Enter sends; Shift+Enter inserts a newline.
@@ -45,6 +63,19 @@ export function Composer({
   return (
     <div className="border-edge-subtle bg-surface-primary border-t p-4">
       <div className="mx-auto flex max-w-(--composer-max-width) flex-col gap-2">
+        {/* What happened to added direction, stated only once it is true: the
+            promise while the turn runs, then whether it was actually reached
+            (DESIGN.md §9.3). */}
+        {state.direction && (
+          <p className="text-fg-tertiary text-xs">
+            {state.direction.applied
+              ? "Your direction was picked up by this turn."
+              : streaming
+                ? DIRECTION_APPLICATION_MESSAGES[state.direction.application]
+                : "Your direction was recorded, but this turn had already passed its last step."}
+          </p>
+        )}
+
         {state.actions.length > 0 && (
           <div
             className="flex flex-wrap gap-2"
@@ -77,15 +108,32 @@ export function Composer({
             rows={2}
             className="max-h-40 min-h-16 flex-1 resize-y"
           />
-          {state.status === "streaming" ? (
-            <Button variant="outline" onClick={onStop}>
-              <SquareIcon data-icon="inline-start" aria-hidden />
-              Stop
-            </Button>
+          {streaming ? (
+            /* Steerable work (DESIGN.md §9.3): both controls are available
+               while the turn runs, and neither moves the composer. */
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={onAddDirection}
+                disabled={!canDirect}
+                aria-busy={directionPending || undefined}
+                title={
+                  canDirect
+                    ? undefined
+                    : "Type the direction you want to add first."
+                }
+              >
+                Add direction
+              </Button>
+              <Button variant="outline" onClick={onStop}>
+                <SquareIcon data-icon="inline-start" aria-hidden />
+                Stop
+              </Button>
+            </div>
           ) : (
             <Button onClick={onSend} disabled={!canSend} aria-busy={busy}>
               <SendIcon data-icon="inline-start" aria-hidden />
-              Send
+              {checking ? "Recovering…" : "Send"}
             </Button>
           )}
         </div>

@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { CanvasScene } from "@/lib/canvas/scene";
 import {
+  activityLineFor,
   turnReducer,
   INITIAL_TURN_STATE,
+  NO_ACTIVITY,
   type Message,
   type TurnState,
 } from "./turn-events";
+
+const TURN = "t1";
 
 const userMessage: Message = {
   id: "m1",
@@ -78,11 +83,20 @@ describe("turnReducer", () => {
     let state = streamStarted(send());
     state = turnReducer(state, {
       type: "event",
-      event: { type: "activity", kind: "analysis", label: "Recording…" },
+      event: {
+        type: "activity",
+        activity: activityLineFor(TURN, "reading_project_model", "active"),
+      },
     });
-    expect(state.activity).toBe("Recording…");
+    expect(state.activity.conversation?.label).toBe(
+      "Reading the current project model…",
+    );
     state = turnReducer(state, { type: "event", event: { type: "done" } });
-    expect(state.activity).toBeNull();
+    expect(state.activity.conversation).toBeNull();
+    // The line fades from the working surface but stays retrievable.
+    expect(state.activityLog.map((line) => line.step)).toEqual([
+      "reading_project_model",
+    ]);
   });
 
   it("never shows more than three contextual actions", () => {
@@ -155,5 +169,282 @@ describe("turnReducer", () => {
       },
     });
     expect(send(failed).error).toBeNull();
+  });
+});
+
+describe("activity history, scenes and steering", () => {
+  const report = (
+    state: TurnState,
+    step: "reading_project_model" | "preparing_canvas_view",
+    lifecycle: "active" | "succeeded" | "failed",
+    operationId = `${TURN}:${step}`,
+  ) =>
+    turnReducer(state, {
+      type: "event",
+      event: {
+        type: "activity",
+        activity: activityLineFor(operationId, step, lifecycle),
+      },
+    });
+
+  it("keeps a retrievable log after the working line has faded", () => {
+    let state = streamStarted(send());
+    state = report(state, "reading_project_model", "active");
+    state = report(state, "reading_project_model", "succeeded");
+    state = report(state, "preparing_canvas_view", "active");
+    state = report(state, "preparing_canvas_view", "succeeded");
+    state = turnReducer(state, { type: "event", event: { type: "done" } });
+
+    expect(state.activity).toEqual(NO_ACTIVITY);
+    expect(state.activityLog.map((entry) => entry.step)).toEqual([
+      "reading_project_model",
+      "preparing_canvas_view",
+    ]);
+    expect(
+      state.activityLog.every((entry) => entry.state === "succeeded"),
+    ).toBe(true);
+  });
+
+  it("does not leave a finished step looking active on its own surface", () => {
+    let state = streamStarted(send());
+    state = report(state, "reading_project_model", "active");
+    state = report(state, "reading_project_model", "succeeded");
+    // Canvas work starts while the conversation's step is already finished.
+    state = report(state, "preparing_canvas_view", "active");
+
+    expect(state.activity.conversation?.state).toBe("succeeded");
+    expect(state.activity.canvas?.state).toBe("active");
+  });
+
+  it("does not duplicate a line that is delivered twice", () => {
+    let state = streamStarted(send());
+    state = report(state, "reading_project_model", "active");
+    state = report(state, "reading_project_model", "succeeded");
+    // A reconnect replays what was already received.
+    state = report(state, "reading_project_model", "succeeded");
+    expect(state.activityLog).toHaveLength(1);
+  });
+
+  it("holds a recommended scene without touching the project model", () => {
+    const scene: CanvasScene = {
+      renderer: "problem_exploration",
+      purpose: "explore_problem",
+      focalObjectId: "aaaaaaaa-0000-4000-8000-000000000001",
+      visibleObjectIds: ["aaaaaaaa-0000-4000-8000-000000000001"],
+      visibleRelationshipIds: [],
+      emphasis: "none",
+      reason: "Showing the problem in focus.",
+      transition: "replace",
+    };
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "scene_recommended", scene },
+    });
+
+    expect(state.recommendedScene).toEqual(scene);
+    // Nothing about project truth lives in turn state, so there is nothing a
+    // scene could have changed.
+    expect(state.messages).toEqual([userMessage]);
+  });
+
+  it("separates the promise made about a direction from its application", () => {
+    let state = streamStarted(send());
+    state = turnReducer(state, {
+      type: "direction_accepted",
+      note: "Focus on smaller agencies.",
+      application: "next_step",
+    });
+    expect(state.direction).toEqual({
+      note: "Focus on smaller agencies.",
+      application: "next_step",
+      applied: false,
+    });
+
+    state = turnReducer(state, {
+      type: "event",
+      event: { type: "direction_applied", note: "Focus on smaller agencies." },
+    });
+    expect(state.direction?.applied).toBe(true);
+  });
+
+  it("ignores an applied direction that was never accepted here", () => {
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "direction_applied", note: "unseen" },
+    });
+    expect(state.direction).toBeNull();
+  });
+
+  it("clears the previous direction when a new message is sent", () => {
+    const withDirection = turnReducer(streamStarted(send()), {
+      type: "direction_accepted",
+      note: "Focus on smaller agencies.",
+      application: "next_step",
+    });
+    expect(send(withDirection).direction).toBeNull();
+  });
+});
+
+describe("stopping and losing the connection", () => {
+  function withPartialText(): TurnState {
+    return turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "assistant_delta", text: "A half-finished thought" },
+    });
+  }
+
+  it("never turns a stopped response into a completed answer", () => {
+    const state = turnReducer(withPartialText(), { type: "turn_stopped" });
+
+    expect(state.messages).toEqual([userMessage]);
+    expect(state.streaming).toBeNull();
+    expect(state.activity).toEqual(NO_ACTIVITY);
+    expect(state.status).toBe("idle");
+    expect(state.stopped).toBe(true);
+    // Stopping is a decision, not a failure.
+    expect(state.error).toBeNull();
+    expect(state.recoveries).toEqual([]);
+  });
+
+  it("discards partial text when the connection drops too", () => {
+    const state = turnReducer(withPartialText(), {
+      type: "connection_lost",
+      turnId: TURN,
+    });
+    expect(state.messages).toEqual([userMessage]);
+    expect(state.recoveries).toEqual([{ turnId: TURN, state: "checking" }]);
+    expect(state.status).toBe("idle");
+  });
+
+  it("takes the recorded result on catch-up without duplicating it", () => {
+    const persisted: Message = {
+      id: "assistant-1",
+      turnId: TURN,
+      role: "assistant",
+      content: "The complete recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    let state = turnReducer(withPartialText(), {
+      type: "connection_lost",
+      turnId: TURN,
+    });
+    state = turnReducer(state, {
+      type: "recovered",
+      turnId: TURN,
+      outcome: "completed",
+      activityLog: [
+        activityLineFor(TURN, "reading_project_model", "succeeded"),
+      ],
+      message: persisted,
+    });
+
+    expect(state.messages.map((message) => message.content)).toEqual([
+      userMessage.content,
+      "The complete recorded answer.",
+    ]);
+    expect(state.recoveries).toEqual([]);
+    expect(state.error).toBeNull();
+
+    // Catching up twice must not append the same message again.
+    const again = turnReducer(state, {
+      type: "recovered",
+      turnId: TURN,
+      outcome: "completed",
+      activityLog: [
+        activityLineFor(TURN, "reading_project_model", "succeeded"),
+      ],
+      message: persisted,
+    });
+    expect(again.messages).toHaveLength(2);
+    expect(again.activityLog).toHaveLength(1);
+  });
+
+  it("says the turn did not finish when nothing was recorded", () => {
+    let state = turnReducer(withPartialText(), {
+      type: "connection_lost",
+      turnId: TURN,
+    });
+    state = turnReducer(state, {
+      type: "recovered",
+      turnId: TURN,
+      outcome: "unfinished",
+      activityLog: [],
+      message: null,
+    });
+    expect(state.messages).toEqual([userMessage]);
+    expect(state.error?.code).toBe("turn_interrupted");
+  });
+
+  it("reports a refused direction without ending the turn", () => {
+    const streaming = turnReducer(streamStarted(send()), {
+      type: "direction_failed",
+      error: {
+        code: "engine_unavailable",
+        userMessage: "Your direction could not be recorded.",
+        recoverable: true,
+      },
+    });
+    expect(streaming.error?.userMessage).toBe(
+      "Your direction could not be recorded.",
+    );
+    expect(streaming.status).toBe("streaming");
+    expect(streaming.direction).toBeNull();
+  });
+});
+
+describe("an unresolved recovery", () => {
+  function unresolved(): TurnState {
+    const state = turnReducer(streamStarted(send()), {
+      type: "connection_lost",
+      turnId: TURN,
+    });
+    return turnReducer(state, {
+      type: "recovered",
+      turnId: TURN,
+      outcome: "still_running",
+      activityLog: [],
+      message: null,
+    });
+  }
+
+  it("survives the user sending another message", () => {
+    // Getting on with the next message is not a decision to abandon a turn
+    // the server may still be finishing.
+    const before = unresolved();
+    expect(before.recoveries).toEqual([
+      { turnId: TURN, state: "still_running" },
+    ]);
+
+    const after = send(before);
+    expect(after.recoveries).toEqual([
+      { turnId: TURN, state: "still_running" },
+    ]);
+    expect(after.status).toBe("sending");
+  });
+
+  it("is cleared only when resolved or dismissed", () => {
+    const dismissed = turnReducer(unresolved(), {
+      type: "dismiss_recovery",
+      turnId: TURN,
+    });
+    expect(dismissed.recoveries).toEqual([]);
+
+    const resolved = turnReducer(unresolved(), {
+      type: "recovered",
+      turnId: TURN,
+      outcome: "completed",
+      activityLog: [],
+      message: {
+        id: "assistant-1",
+        turnId: TURN,
+        role: "assistant",
+        content: "The recorded answer.",
+        blockKind: "plain",
+        createdAt: "2026-07-29T00:00:00.000Z",
+      },
+    });
+    expect(resolved.recoveries).toEqual([]);
+    expect(resolved.messages).toHaveLength(2);
   });
 });

@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { INITIAL_TURN_STATE, type TurnState } from "@/lib/ai/turn-events";
+import {
+  activityLineFor,
+  INITIAL_TURN_STATE,
+  type TurnState,
+} from "@/lib/ai/turn-events";
 import { MAX_MESSAGE_LENGTH } from "@/lib/validation/turns";
 import { Composer } from "./composer";
 import { ConversationStream } from "./conversation-stream";
@@ -74,11 +78,20 @@ describe("ConversationStream", () => {
               createdAt: "2026-07-28T00:00:00.000Z",
             },
           ],
-          activity: "Recording your message…",
+          activity: {
+            conversation: activityLineFor(
+              "t1",
+              "reading_project_model",
+              "active",
+            ),
+            canvas: null,
+          },
         })}
       />,
     );
-    const live = screen.getByText("Recording your message…").closest("div");
+    const live = screen
+      .getByText("Reading the current project model…")
+      .closest("div");
     expect(live).toHaveAttribute("aria-live", "polite");
 
     rerender(
@@ -117,6 +130,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={onSend}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={INITIAL_TURN_STATE}
       />,
@@ -136,6 +150,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={INITIAL_TURN_STATE}
       />,
@@ -152,6 +167,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={onStop}
+        onAddDirection={noop}
         onAction={noop}
         state={stateWith({ status: "streaming" })}
       />,
@@ -168,6 +184,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={INITIAL_TURN_STATE}
       />,
@@ -185,6 +202,7 @@ describe("Composer", () => {
         onChange={noop}
         onSend={noop}
         onStop={noop}
+        onAddDirection={noop}
         onAction={noop}
         state={stateWith({
           actions: [{ id: "a", label: "Research this" }],

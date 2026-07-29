@@ -1,6 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
+import { createActivityReporter } from "@/lib/ai/activity-reporter";
+import { finishTurn } from "@/lib/ai/finish-turn";
+import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
+import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
+import {
+  closeTurnRun,
+  openTurnRun,
+  recordActivity,
+  recordAudit,
+  takeDirections,
+  DIRECTION_CURSOR_START,
+  type AuditAction,
+} from "@/lib/services/trusted-writer";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TurnRequestSchema, TURN_RATE_LIMIT } from "@/lib/validation/turns";
 
@@ -136,28 +149,193 @@ export async function POST(
     );
   }
 
+  /*
+    Operational state before the stream opens. Steering and recovery both read
+    it, so a turn that cannot record that it is running must not open a stream
+    and offer controls that cannot work — it fails here, where a plain error
+    response is still possible.
+  */
+  if (!(await openTurnRun({ projectId, turnId }))) {
+    return errorResponse(
+      {
+        code: "engine_unavailable",
+        userMessage:
+          "The workspace could not start this turn. Your message is saved — try again.",
+        recoverable: true,
+      },
+      503,
+    );
+  }
+
   const engine = new ScriptedDiscoveryEngine();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      /*
+        Emission is best-effort. If the client has gone the controller throws,
+        and that must never stop the turn recording its outcome — a run that
+        cannot finalise stays eligible for direction and recoverable until its
+        lease expires.
+      */
       const emit = (event: TurnEvent) => {
-        controller.enqueue(encodeEvent(event));
+        try {
+          controller.enqueue(encodeEvent(event));
+        } catch {
+          // The reader is gone; the turn still finishes its own work.
+        }
       };
+      const audit = (
+        action: AuditAction,
+        extra: {
+          target?: string;
+          detail?: Record<string, string | number>;
+        } = {},
+      ) =>
+        recordAudit({
+          projectId,
+          actorId: user.id,
+          actorKind: action === "turn_started" ? "user" : "system",
+          action,
+          correlationId: turnId,
+          ...extra,
+        });
+
+      /*
+        Reporting happens around the work that performs it, so a label is never
+        emitted for something that already finished (T8: activity describes
+        observable work).
+      */
+      /*
+        The turn id is the first thing on the stream, before any activity: the
+        client needs it to steer the turn and to ask for catch-up if the
+        connection drops, so it must not arrive after work has begun.
+      */
+      emit({ type: "turn_started", turnId });
+
+      const reporter = createActivityReporter({
+        emit,
+        persist: (operationId, step, state) =>
+          recordActivity({ projectId, turnId, operationId, step, state }),
+      });
+
+      /*
+        Steering arrives on a separate request, so the turn reads directions
+        newer than a cursor it advances itself. The table stays append-only:
+        "already applied" is state of this run, not an edit to history.
+      */
+      let directionCursor = DIRECTION_CURSOR_START;
+
       try {
-        const result = await engine.runTurn(
-          { projectId, userMessage: parsed.data.message },
-          emit,
-          request.signal,
+        await audit("turn_started");
+
+        // Every id a scene may name comes from rows this user can already
+        // read, and the focal object is the application's reading of the
+        // project rather than an engine's guess.
+        const turnScope = await reporter.step(
+          "reading_project_model",
+          () => loadTurnScope(supabase, projectId),
+          // A partial or failed read is not "project model read": the scope in
+          // hand is narrower than the project, so the label says so.
+          (scope) => (scopeIsWhole(scope) ? "succeeded" : "failed"),
         );
-        if (result.assistantText) {
-          await supabase.from("messages").insert({
-            project_id: projectId,
-            turn_id: turnId,
-            role: "assistant",
-            content: result.assistantText,
+        if (!scopeIsWhole(turnScope)) {
+          // An incomplete scope fails closed, so record why rather than
+          // treating a partial read as the whole project.
+          await audit("scope_truncated", {
+            detail: {
+              objects: turnScope.objectIds.length,
+              reason: turnScope.failed ? "read_failed" : "limit_reached",
+            },
           });
         }
+
+        const hooks = createTurnHooks({
+          emit,
+          scope: turnScope.scope,
+          reporter,
+          onSceneAccepted: (scene) =>
+            audit("scene_recommended", {
+              target: scene.renderer,
+              detail: { objects: scene.visibleObjectIds.length },
+            }),
+          onSceneRejected: (rejection) =>
+            audit("scene_rejected", { detail: { code: rejection.code } }),
+          takeDirection: async ({ final }) => {
+            /*
+              Reading and sealing are one locked operation: a direction is
+              either inserted before the seal and returned here, or the seal
+              wins and the endpoint refuses it. A read followed by a separate
+              seal would leave a window where neither happens.
+            */
+            const result = await takeDirections({
+              projectId,
+              turnId,
+              after: directionCursor,
+              seal: final,
+            });
+            if (!result.ok) {
+              /*
+                The read failed, so the seal did not happen either. At a final
+                boundary that leaves the window open with no step left to
+                consume anything, so the turn fails rather than continuing —
+                closing it in the catch below seals the window as a side
+                effect. A non-final boundary can simply try again later; the
+                cursor has not advanced.
+              */
+              if (final) throw new Error("direction_seal_failed");
+              return null;
+            }
+            const directions = result.directions;
+            if (directions.length === 0) return null;
+            directionCursor = directions[directions.length - 1].cursor;
+            const note = directions.map((entry) => entry.note).join("\n");
+            emit({ type: "direction_applied", note });
+            return note;
+          },
+        });
+
+        const result = await engine.runTurn(
+          {
+            projectId,
+            turnId,
+            userMessage: parsed.data.message,
+            context: {
+              objectIds: turnScope.objectIds,
+              focalObjectId: turnScope.focalObjectId,
+            },
+          },
+          hooks,
+          request.signal,
+        );
+        /*
+          The host — not the engine — decides the turn is over, and only after
+          the result is stored and the outcome recorded (see finish-turn.ts).
+
+          The assistant row is keyed by the turn id, so the message the client
+          rendered live and the message catch-up returns are the same message.
+        */
+        await finishTurn(
+          {
+            persistResult: async (text) => {
+              const { error } = await supabase.from("messages").insert({
+                id: turnId,
+                project_id: projectId,
+                turn_id: turnId,
+                role: "assistant",
+                content: text,
+              });
+              return !error;
+            },
+            closeRun: (state) => closeTurnRun({ turnId, state }),
+            audit: (action, detail) => audit(action, { detail }),
+            emit,
+          },
+          result.assistantText,
+        );
       } catch {
         // Internal detail stays server-side (SECURITY_STANDARDS §8).
+        // Finalisation first: a dead stream must not stop the turn recording
+        // that it failed.
+        await closeTurnRun({ turnId, state: "failed" });
         emit({
           type: "turn_failed",
           error: {
@@ -167,6 +345,7 @@ export async function POST(
             recoverable: true,
           },
         });
+        await audit("turn_failed");
       } finally {
         controller.close();
       }
@@ -178,6 +357,12 @@ export async function POST(
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store, no-transform",
       connection: "keep-alive",
+      /*
+        Also outside the body. The client learns the turn id from the first SSE
+        frame, and a connection that dies before that frame would otherwise
+        leave it with nothing to recover by.
+      */
+      "x-turn-id": turnId,
     },
   });
 }

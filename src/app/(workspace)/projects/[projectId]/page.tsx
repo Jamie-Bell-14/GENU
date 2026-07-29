@@ -6,6 +6,7 @@ import {
   loadCanvasObjects,
   loadProjectRelationships,
 } from "@/lib/canvas/project-model-store";
+import { loadActivityHistory } from "@/lib/services/activity";
 
 // Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
@@ -30,22 +31,26 @@ export default async function ProjectPage({
 
   const { data: rows } = await supabase
     .from("messages")
-    .select("id, role, content, created_at")
+    .select("id, turn_id, role, content, created_at")
     .eq("project_id", projectId)
     .order("created_at", { ascending: true })
     .limit(200);
 
   const messages: Message[] = (rows ?? []).map((row) => ({
     id: row.id as string,
+    turnId: row.turn_id as string,
     role: row.role as Message["role"],
     content: row.content as string,
     blockKind: "plain",
     createdAt: row.created_at as string,
   }));
 
-  const [canvasObjects, canvasRelationships] = await Promise.all([
+  const [canvasObjects, canvasRelationships, activity] = await Promise.all([
     loadCanvasObjects(supabase, projectId),
     loadProjectRelationships(supabase, projectId),
+    // Activity recorded before this page load, so the history panel survives
+    // a reload rather than starting empty (T8).
+    loadActivityHistory(supabase, projectId),
   ]);
 
   return (
@@ -53,8 +58,10 @@ export default async function ProjectPage({
       projectId={project.id}
       projectName={project.name}
       initialMessages={messages}
-      canvasObjects={canvasObjects}
-      canvasRelationships={canvasRelationships}
+      initialActivity={activity.lines}
+      activityTruncated={activity.truncated}
+      canvasObjects={canvasObjects.data}
+      canvasRelationships={canvasRelationships.data}
     />
   );
 }

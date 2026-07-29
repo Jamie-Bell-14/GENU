@@ -5,7 +5,7 @@ import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import type { EditSubmit } from "@/components/canvas/object-editor";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
-import type { Message } from "@/lib/ai/turn-events";
+import type { ActivityLine, Message } from "@/lib/ai/turn-events";
 import { editProjectObject } from "./canvas-actions";
 
 /**
@@ -17,12 +17,16 @@ export function WorkspaceClient({
   projectId,
   projectName,
   initialMessages,
+  initialActivity,
+  activityTruncated,
   canvasObjects,
   canvasRelationships,
 }: Readonly<{
   projectId: string;
   projectName: string;
   initialMessages: Message[];
+  initialActivity: ActivityLine[];
+  activityTruncated: boolean;
   canvasObjects: CanvasObject[];
   canvasRelationships: ProjectRelationship[];
 }>) {
@@ -45,6 +49,8 @@ export function WorkspaceClient({
       projectId={projectId}
       projectName={projectName}
       initialMessages={initialMessages}
+      initialActivity={initialActivity}
+      activityTruncated={activityTruncated}
       canvasObjects={canvasObjects}
       canvasRelationships={canvasRelationships}
       onEditObject={onEditObject}

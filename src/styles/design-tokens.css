@@ -29,7 +29,9 @@
   /* Text */
   --text-primary: #f2f5f3;
   --text-secondary: #b2bbb5;
-  --text-tertiary: #818b84;
+  /* 4.5:1 against the lightest surface it appears on (--surface-elevated),
+     not only against the darkest one. */
+  --text-tertiary: #8a938c;
   --text-disabled: #5e6761;
   --text-inverse: #07100b;
 

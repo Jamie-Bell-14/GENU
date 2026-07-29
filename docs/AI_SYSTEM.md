@@ -170,6 +170,11 @@ The MVP renderer allow-list is:
 - `problem_exploration`
 - `evidence_research`
 
+This is the allow-list for the completed MVP, not a statement about what is
+renderable today. A key is registered in `RENDERER_KEYS` only when its renderer
+exists, so that a validated scene can always be drawn; `evidence_research`
+therefore joins the registry with its renderer in T10.
+
 Connected-change impact is an emphasis state of `problem_exploration`; it is not a third renderer.
 
 The existing zoned canvas is an application-owned structured inspector, accessible alternative and editing view.

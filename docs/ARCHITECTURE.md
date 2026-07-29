@@ -129,22 +129,98 @@ Grows to PROJECT_PLAN §4's full profile by adding `area`/`key` values — no mi
 
 ```ts
 interface DiscoveryEngine {
-  runTurn(input: {
-    projectId: string; userMessage: string;
-    context: ProjectSnapshot;            // structured model summary + recent messages
-  }, emit: (e: TurnEvent) => void): Promise<TurnResult>;
+  readonly directionApplication: "applies_now" | "next_step" | "restart";
+  runTurn(
+    input: { projectId: string; turnId: string; userMessage: string; context?: TurnContext },
+    hooks: TurnHooks,
+    signal?: AbortSignal,
+  ): Promise<TurnResult>;
+}
+
+// What an engine may do to the outside world. Narrow on purpose.
+interface TurnHooks {
+  emit(event: EngineEvent): void;         // EngineEvent excludes app-owned events
+  // Reports an operation *around* the work that performs it: active on entry,
+  // complete on exit. A label can never describe work that already finished.
+  step<T>(name: ActivityStep, work: () => Promise<T>): Promise<T>;
+  recommendScene(candidate: unknown): Promise<void>;  // validated by the app
+  takeDirection(): Promise<string | null>;
 }
 
 type TurnEvent =
+  | { type: "turn_started"; turnId: string }
   | { type: "assistant_delta"; text: string }
-  | { type: "activity"; label: string; kind: ActivityKind }   // app-emitted only
-  | { type: "model_updates_applied"; fields: FieldUpdate[] }
-  | { type: "proposal_created"; proposalId: string }
-  | { type: "research_started"; researchId: string }
-  | { type: "checkpoint_suggested"; summary: CheckpointSummary }
+  | { type: "activity"; activity: ActivityLine }              // app-emitted only
+  | { type: "block"; kind: TurnBlockKind; heading?: string }
+  | { type: "actions"; actions: ContextualAction[] }
+  | { type: "scene_recommended"; scene: CanvasScene }         // app-validated only
+  | { type: "direction_applied"; note: string }               // app-emitted only
   | { type: "turn_failed"; error: SafeError }
-  | { type: "done"; outcome: OutcomeSummary };
+  | { type: "done" };
 ```
+
+`EngineEvent` is `TurnEvent` minus `scene_recommended` and `direction_applied`, so
+the type system — not review — is what stops an engine minting either. A scene
+candidate crosses from untrusted to renderable in exactly one place,
+`createTurnHooks` (`src/lib/ai/turn-hooks.ts`), which validates it against ids
+loaded under RLS; a rejected candidate reaches no surface and is recorded in
+`audit_events` instead. Model-proposed events (`proposal_created`,
+`research_started`, `checkpoint_suggested`, applied model updates) arrive with
+T9–T12.
+
+Activity, audit and steering are persisted in three append-only tables —
+`activity_events`, `audit_events`, `turn_directions` — correlated by the turn
+id the host generates, emits as the first frame of the stream, and passes to
+the engine. Steering crosses two HTTP requests (the SSE stream and the
+direction POST), so the handover is storage rather than process memory.
+
+Those tables have **no write grant for the browser-authenticated role**:
+append-only prevents history being rewritten, not fabricated. Every write goes
+through `src/lib/services/trusted-writer.ts` under an elevated key held only in
+server environment variables, after the calling route has authenticated the
+user and confirmed project ownership through the user-scoped client.
+`activity_events` stores a closed step enum and a lifecycle state rather than
+label text, so the words a user reads are looked up from the application's
+catalogue on read.
+
+Whether a turn is still running is **operational state**, not audit history:
+`turn_runs` records it with checked writes, a turn does not open its stream
+until the running row exists, and exactly one terminal state is written when
+the outcome is known. Audit writes are best-effort by design — a turn must not
+fail because its history could not be written — which is precisely why they
+cannot be the source of a fact that gates steering and recovery.
+
+`turn_runs` carries two further facts. `accepting_direction` is the **steering
+window**, which closes at the engine's final direction boundary — earlier than
+the turn finishing — because after that boundary there is no step left to
+consume a direction. Accepting one is a single locked database operation
+(`accept_turn_direction`), not a status read followed by an insert, and reading
+directions seals the window in the same transaction
+(`take_turn_directions`); so a direction is either inserted before the seal and
+consumed, or refused. `lease_expires_at` bounds a run whose worker died, so it
+does not stay eligible for direction, or recoverable, for ever.
+
+Finalisation runs before stream emission on every path, and emission is
+best-effort: a departed reader must never stop a turn recording its outcome.
+
+The host, not the engine, ends a turn: `finishTurn` stores the result, records
+the outcome, and only then emits `done`. `EngineEvent` excludes `done` for the
+same reason it excludes scene events — an engine finishing its work is not the
+same as the turn having succeeded, and once the interface has been told a turn
+is done, a later storage failure cannot honestly take that back. The assistant
+row is keyed by the turn id, so the message rendered live and the message
+returned by catch-up are the same message.
+
+A dropped SSE connection is recovered rather than reloaded:
+`GET /api/projects/[id]/turns/[turnId]` returns the activity and any assistant
+message recorded for that turn. State and result come from **one database
+statement** (`turn_snapshot`), so `completed` can never be paired with a result
+read that predates the insert; the turn id is also returned as an `X-Turn-Id`
+response header, so a connection that dies before the first SSE frame still has
+something to recover by. Ids are stable — activity lines are keyed by
+turn and step — so replay cannot duplicate what the client already holds. A
+deliberate Stop is not a dropped connection: it discards partial text without
+catch-up, and a truncated answer is never promoted into the transcript.
 
 - Slice implementation `AnthropicDiscoveryEngine`: **one streaming Messages call with tools** `update_project_model`, `propose_connected_change`, `start_research`, `suggest_checkpoint`. Application code validates every tool input (Zod), authorises against the project, applies via services, and emits events. The model never writes anywhere.
 - A deterministic `ScriptedDiscoveryEngine` implements the same interface for Playwright/e2e and UI development — the mock/real seam demanded by the addendum.

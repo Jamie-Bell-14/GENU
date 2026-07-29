@@ -29,9 +29,14 @@ begin
   if not exists (select from pg_roles where rolname = 'anon') then
     create role anon nologin;
   end if;
+  -- Supabase's elevated API role. It bypasses RLS there, so the shadow must
+  -- too, or a test could pass here and fail in production.
+  if not exists (select from pg_roles where rolname = 'service_role') then
+    create role service_role nologin bypassrls;
+  end if;
 end
 $$;
 
 -- Supabase grants these to its API roles; our policies call auth.uid().
-grant usage on schema auth to authenticated, anon;
-grant execute on function auth.uid() to authenticated, anon;
+grant usage on schema auth to authenticated, anon, service_role;
+grant execute on function auth.uid() to authenticated, anon, service_role;

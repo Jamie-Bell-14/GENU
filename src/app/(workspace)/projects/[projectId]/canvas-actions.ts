@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { EditObjectSchema, type EditResult } from "@/lib/canvas/edit";
+import { recordAudit } from "@/lib/services/trusted-writer";
 
 /**
  * Edits the text of a project object.
@@ -62,15 +63,52 @@ export async function editProjectObject(
     .eq("id", objectId)
     .eq("project_id", projectId);
 
+  /*
+    Editing project text is a consequential change, so it belongs in the audit
+    history alongside turn and scene events (SECURITY_STANDARDS §14.2). The
+    record names the actor, the object and the operation — never the wording
+    before or after, which is project content and does not belong in an audit
+    trail.
+  */
+  const operationId = crypto.randomUUID();
+
   if (error) {
+    await recordAudit({
+      projectId,
+      actorId: user.id,
+      actorKind: "user",
+      action: "object_edited",
+      target: objectId,
+      correlationId: operationId,
+      detail: { kind, outcome: "failed" },
+    });
     return {
       ok: false,
       error: "The change could not be saved. Your text is unchanged.",
     };
   }
   if (count === 0) {
+    await recordAudit({
+      projectId,
+      actorId: user.id,
+      actorKind: "user",
+      action: "object_edited",
+      target: objectId,
+      correlationId: operationId,
+      detail: { kind, outcome: "not_found" },
+    });
     return { ok: false, error: "That item is no longer available." };
   }
+
+  await recordAudit({
+    projectId,
+    actorId: user.id,
+    actorKind: "user",
+    action: "object_edited",
+    target: objectId,
+    correlationId: operationId,
+    detail: { kind, outcome: "applied" },
+  });
 
   revalidatePath(`/projects/${projectId}`);
   return { ok: true };

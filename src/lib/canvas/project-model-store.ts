@@ -34,6 +34,18 @@ function shortDate(iso: string): string {
 }
 
 /**
+ * A read that reports whether it worked.
+ *
+ * An empty project and a failed query produce the same array, so callers that
+ * act on completeness — the turn's project-model step, scene validation — need
+ * the two told apart rather than inferred.
+ */
+export interface LoadResult<T> {
+  data: T;
+  failed: boolean;
+}
+
+/**
  * Reads the project model and maps it into canvas objects. All access runs
  * through the caller's user-scoped client, so RLS applies underneath the
  * route's own ownership check (defence in depth).
@@ -41,7 +53,7 @@ function shortDate(iso: string): string {
 export async function loadCanvasObjects(
   supabase: SupabaseClient,
   projectId: string,
-): Promise<CanvasObject[]> {
+): Promise<LoadResult<CanvasObject[]>> {
   const [fields, assumptions] = await Promise.all([
     supabase
       .from("project_fields")
@@ -96,7 +108,10 @@ export async function loadCanvasObjects(
     });
   }
 
-  return objects;
+  return {
+    data: objects,
+    failed: Boolean(fields.error) || Boolean(assumptions.error),
+  };
 }
 
 interface RelationshipRow {
@@ -117,20 +132,23 @@ interface RelationshipRow {
 export async function loadProjectRelationships(
   supabase: SupabaseClient,
   projectId: string,
-): Promise<ProjectRelationship[]> {
-  const { data } = await supabase
+): Promise<LoadResult<ProjectRelationship[]>> {
+  const { data, error } = await supabase
     .from("project_relationships")
     .select("id, from_object_id, to_object_id, relation, origin, support, note")
     .eq("project_id", projectId)
     .limit(200);
 
-  return ((data ?? []) as RelationshipRow[]).map((row) => ({
-    id: row.id,
-    fromObjectId: row.from_object_id,
-    toObjectId: row.to_object_id,
-    relation: row.relation,
-    origin: row.origin,
-    support: row.support,
-    note: row.note ?? undefined,
-  }));
+  return {
+    data: ((data ?? []) as RelationshipRow[]).map((row) => ({
+      id: row.id,
+      fromObjectId: row.from_object_id,
+      toObjectId: row.to_object_id,
+      relation: row.relation,
+      origin: row.origin,
+      support: row.support,
+      note: row.note ?? undefined,
+    })),
+    failed: Boolean(error),
+  };
 }

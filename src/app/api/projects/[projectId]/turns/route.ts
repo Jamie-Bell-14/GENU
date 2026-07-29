@@ -1,15 +1,20 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { finishTurn } from "@/lib/ai/finish-turn";
+import { startLeaseHeartbeat } from "@/lib/ai/lease-heartbeat";
+import { loadProjectContext, type LoadedContext } from "@/lib/ai/load-context";
+import { selectDiscoveryEngine } from "@/lib/ai/select-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
+import type { DiscoveryToolName } from "@/lib/ai/tools/discovery-tools";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
+import { applyModelOperation } from "@/lib/services/model-operations";
 import {
   closeTurnRun,
   openTurnRun,
   recordActivity,
   recordAudit,
+  renewTurnLease,
   takeDirections,
   DIRECTION_CURSOR_START,
   type AuditAction,
@@ -18,6 +23,22 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TurnRequestSchema, TURN_RATE_LIMIT } from "@/lib/validation/turns";
 
 export const runtime = "nodejs";
+
+/**
+ * What the engine sees when the project read failed. Empty rather than absent:
+ * a turn with no context still answers the user's message, and pretending the
+ * project has content that was never read would be worse than saying nothing
+ * about it.
+ */
+function emptyProjectContext(): LoadedContext {
+  return {
+    fields: [],
+    recentMessages: [],
+    objectIds: [],
+    focalObjectId: null,
+    complete: false,
+  };
+}
 
 function errorResponse(error: SafeError, status: number) {
   return NextResponse.json({ error }, { status });
@@ -167,7 +188,19 @@ export async function POST(
     );
   }
 
-  const engine = new ScriptedDiscoveryEngine();
+  const engine = selectDiscoveryEngine({
+    buildContext: () => loadedContext ?? emptyProjectContext(),
+    onDiagnostics: (diagnostics) =>
+      // Structured, correlated, and free of message bodies (§12).
+      console.info("turn", { projectId, ...diagnostics }),
+  });
+  /*
+    Populated inside the stream, before the engine runs. The engine asks for
+    context synchronously through `buildContext`, so the read happens here
+    where it can be reported as an activity step and audited.
+  */
+  let loadedContext: LoadedContext | null = null;
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       /*
@@ -232,10 +265,23 @@ export async function POST(
         // project rather than an engine's guess.
         const turnScope = await reporter.step(
           "reading_project_model",
-          () => loadTurnScope(supabase, projectId),
-          // A partial or failed read is not "project model read": the scope in
+          async () => {
+            const scope = await loadTurnScope(supabase, projectId);
+            // Context for the model is read in the same step, because it is
+            // the same operation from the user's point of view: the project
+            // being read before the turn thinks about it.
+            loadedContext = await loadProjectContext(supabase, projectId, {
+              objectIds: scope.objectIds,
+              focalObjectId: scope.focalObjectId,
+            });
+            return scope;
+          },
+          // A partial or failed read is not "project model read": what is in
           // hand is narrower than the project, so the label says so.
-          (scope) => (scopeIsWhole(scope) ? "succeeded" : "failed"),
+          (scope) =>
+            scopeIsWhole(scope) && loadedContext?.complete
+              ? "succeeded"
+              : "failed",
         );
         if (!scopeIsWhole(turnScope)) {
           // An incomplete scope fails closed, so record why rather than
@@ -259,6 +305,34 @@ export async function POST(
             }),
           onSceneRejected: (rejection) =>
             audit("scene_rejected", { detail: { code: rejection.code } }),
+          /*
+            Where a model-proposed operation is authorised and disposed of.
+            Every outcome is audited — including refusal, which is exactly the
+            kind of event that matters after the fact — and none of it travels
+            back to the engine.
+          */
+          proposeOperation: async (name, candidate) => {
+            const outcome = await applyModelOperation(
+              supabase,
+              projectId,
+              name as DiscoveryToolName,
+              candidate,
+            );
+            if (outcome.applied) {
+              await audit("operation_applied", {
+                target: outcome.kind,
+                detail: { count: outcome.count },
+              });
+              return;
+            }
+            await audit("operation_rejected", {
+              target: outcome.kind,
+              detail:
+                outcome.reason === "rejected"
+                  ? { reason: outcome.reason, issue: outcome.issue }
+                  : { reason: outcome.reason },
+            });
+          },
           takeDirection: async ({ final }) => {
             /*
               Reading and sealing are one locked operation: a direction is
@@ -293,19 +367,44 @@ export async function POST(
           },
         });
 
-        const result = await engine.runTurn(
-          {
-            projectId,
-            turnId,
-            userMessage: parsed.data.message,
-            context: {
-              objectIds: turnScope.objectIds,
-              focalObjectId: turnScope.focalObjectId,
-            },
+        /*
+          A live turn can run for minutes, well past the fixed lease a scripted
+          turn never approached (issue #11). The worker says it is alive while
+          it works; when it can no longer say so, it stops rather than
+          continuing to produce a result that cannot be recorded against a live
+          run — by then recovery may already have told the user the turn did
+          not finish.
+        */
+        const lost = new AbortController();
+        const heartbeat = startLeaseHeartbeat({
+          renew: (seconds) => renewTurnLease({ turnId, seconds }),
+          onLost: (reason) => {
+            void audit("turn_failed", { detail: { code: `lease_${reason}` } });
+            lost.abort();
           },
-          hooks,
-          request.signal,
-        );
+        });
+
+        let result;
+        try {
+          result = await engine.runTurn(
+            {
+              projectId,
+              turnId,
+              userMessage: parsed.data.message,
+              context: {
+                objectIds: turnScope.objectIds,
+                focalObjectId: turnScope.focalObjectId,
+              },
+            },
+            hooks,
+            AbortSignal.any([request.signal, lost.signal]),
+          );
+        } finally {
+          // Stopped on every path — completion, failure and cancellation
+          // alike. A heartbeat outliving its turn would keep a finished run's
+          // lease alive, which is the exact thing the lease exists to prevent.
+          heartbeat.stop();
+        }
         /*
           The host — not the engine — decides the turn is over, and only after
           the result is stored and the outcome recorded (see finish-turn.ts).

@@ -33,6 +33,11 @@ function harness(direction: string | null = null) {
     recommendScene: async (candidate) => {
       candidates.push(candidate);
     },
+    // The scripted engine proposes no structured operations; a call here
+    // would be a change in what it does, so the harness fails on one.
+    proposeOperation: async (name) => {
+      throw new Error(`unexpected operation: ${name}`);
+    },
     takeDirection: async () => {
       const next = remaining;
       remaining = null;

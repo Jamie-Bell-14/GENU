@@ -22,6 +22,12 @@ export interface TurnPorts {
   onSceneAccepted(scene: CanvasScene): Promise<void>;
   onSceneRejected(rejection: SceneRejection): Promise<void>;
   takeDirection(options: { final: boolean }): Promise<string | null>;
+  /**
+   * Disposes of a structured operation the engine proposed. Optional because
+   * the scripted engine proposes none; a live engine that reaches an absent
+   * port is a wiring error and is treated as one rather than as a refusal.
+   */
+  proposeOperation?(name: string, candidate: unknown): Promise<void>;
 }
 
 /**
@@ -65,5 +71,15 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
     },
 
     takeDirection: ports.takeDirection,
+
+    async proposeOperation(name, candidate) {
+      if (!ports.proposeOperation) {
+        // Loud rather than silent: an engine proposing operations into a host
+        // that cannot dispose of them would otherwise look like a boundary
+        // quietly refusing everything.
+        throw new Error(`no operation port for ${name}`);
+      }
+      await ports.proposeOperation(name, candidate);
+    },
   };
 }

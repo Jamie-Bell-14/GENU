@@ -103,12 +103,13 @@ Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, sing
 - **Done when:** a scripted multi-step activity is observable, steerable, stoppable, and honestly recorded.
 
 ### T9 — Discovery engine (real model)
-- **Objective:** `AnthropicDiscoveryEngine` — one streaming tool-use call per turn; tools `update_project_model`, `propose_connected_change` (stub apply), `suggest_checkpoint`; Zod validation with one retry; context assembly (snapshot + recent messages); prompt versioning; token/step caps; `ScriptedDiscoveryEngine` given the same interface for CI.
+- **Objective:** `AnthropicDiscoveryEngine` — one streaming tool-use call per turn; tools `update_project_model`, `record_assumption`, `propose_connected_change` (stub apply), `suggest_checkpoint`, `recommend_canvas_scene`; Zod validation with one retry; context assembly (snapshot + recent messages); prompt versioning; token/step caps; worker lease renewal for long-running turns; `ScriptedDiscoveryEngine` given the same interface for CI.
+  - The tool list above is wider than this line originally carried. `record_assumption` and `recommend_canvas_scene` are both in the canonical operation set (docs/AI_SYSTEM.md §5) and both are required by this task's own completion criterion: Step 3 acceptance is "the assumption appears on the canvas", and the scene hook exists from T8 with no tool able to reach it. They are additions to the task line, not to approved scope.
 - **Dependencies:** T6, T7, T8.
-- **Files:** `src/lib/ai/*`, turn route wiring, engine config.
+- **Files:** `src/lib/ai/*`, `src/lib/services/model-operations.ts`, turn route wiring, engine config, lease-renewal migration.
 - **Functional:** Steps 2–3 of the journey work live: reflection separating fact from inference, sparse canvas updates, one focused question, specific assumption challenge with ≤3 contextual actions.
 - **UI/UX acceptance:** response depth rules (DESIGN.md §8.2); challenge is specific; no generic praise.
-- **Edge cases:** schema-invalid tool input (retry then safe fail), model timeout, oversized responses, tool-step cap hit, concurrent turns blocked.
+- **Edge cases:** schema-invalid tool input (retry then safe fail), model timeout, oversized responses, tool-step cap hit, concurrent turns blocked, safety refusal (reported as its own state, not as an outage), lease renewal failing or arriving after the run has ended.
 - **Tests:** engine unit tests with recorded/stubbed SDK responses (valid, invalid, malicious-fields, over-limit); prompt-injection suite (user message attempts to override system rules / mint permissions / write via prose); e2e stays on scripted engine.
 - **Out of scope:** research tool (T10), real change application (T12).
 - **Security:** ANTHROPIC_API_KEY server-only; minimum-necessary context sent to provider (§11.5); untrusted user content delimited and labelled in prompts; tool inputs validated + authorised independently of model text; per-turn token caps; usage logged without message bodies.

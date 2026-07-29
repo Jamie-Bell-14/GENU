@@ -146,6 +146,45 @@ export async function closeTurnRun(input: {
   return false;
 }
 
+export type LeaseRenewal =
+  | "renewed"
+  /** No such run. */
+  | "unknown"
+  /** The turn already has an outcome; a heartbeat may not revise it. */
+  | "finished"
+  /** The lease lapsed before this arrived; the run is not revived. */
+  | "expired"
+  /** The renewal did not happen; the lease is unchanged. */
+  | "unavailable";
+
+/**
+ * Extends a running turn's lease (issue #11).
+ *
+ * The bound this maintains is "a run whose worker is gone stops being
+ * steerable and recoverable". Renewal is therefore evidence of life, nothing
+ * more: it cannot revive a finished or already-expired run, and the database
+ * enforces that under a row lock rather than trusting callers to check first.
+ */
+export async function renewTurnLease(input: {
+  turnId: string;
+  seconds: number;
+}): Promise<LeaseRenewal> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("turn_lease");
+    return "unavailable";
+  }
+  const { data, error } = await client.rpc("renew_turn_lease", {
+    p_turn_id: input.turnId,
+    p_seconds: input.seconds,
+  });
+  if (error) {
+    console.error("renew_turn_lease failed", { code: error.code });
+    return "unavailable";
+  }
+  return data as LeaseRenewal;
+}
+
 export type DirectionOutcome =
   | "accepted"
   | "unknown"
@@ -252,6 +291,8 @@ export type AuditAction =
   | "direction_rejected"
   | "scene_recommended"
   | "scene_rejected"
+  | "operation_applied"
+  | "operation_rejected"
   | "object_edited"
   | "scope_truncated";
 

@@ -60,6 +60,14 @@ export interface TurnHooks {
   ): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
   /**
+   * A structured operation the engine proposes — a field update, an
+   * assumption, a connected change, a checkpoint. Same posture as
+   * `recommendScene`: the candidate crosses as `unknown`, the application
+   * validates and authorises it against project rows, and the outcome is not
+   * reported back, so an engine cannot learn its way past the boundary.
+   */
+  proposeOperation(name: string, candidate: unknown): Promise<void>;
+  /**
    * Direction the user added since the last check. `final` says this is the
    * engine's last chance to use one — the host seals the steering window on
    * that call, so nothing can be accepted afterwards and promised a step that

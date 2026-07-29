@@ -111,7 +111,7 @@ Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, sing
 - **Edge cases:** schema-invalid tool input (retry then safe fail), model timeout, oversized responses, tool-step cap hit, concurrent turns blocked.
 - **Tests:** engine unit tests with recorded/stubbed SDK responses (valid, invalid, malicious-fields, over-limit); prompt-injection suite (user message attempts to override system rules / mint permissions / write via prose); e2e stays on scripted engine.
 - **Out of scope:** research tool (T10), real change application (T12).
-- **Security:** ANTHROPIC_API_KEY server-only; minimum-necessary context sent to provider (§11.5); untrusted user content delimited and labelled in prompts; tool inputs validated + authorised independently of model text; per-turn token caps; usage logged without message bodies.
+- **Security:** ANTHROPIC_API_KEY server-only; minimum-necessary context sent to provider (§11.5); untrusted user content delimited and labelled in prompts; tool inputs validated + authorised independently of model text; per-turn caps from PROJECT_PLAN §17.1 (30k input, 4k output, 5 tool steps, 1 schema retry) held in engine config rather than at call sites; usage logged without message bodies.
 - **Done when:** live Steps 2–3 pass acceptance and the malicious-output test suite is green.
 
 ### T10 — Research flow (mock provider) + research view + evidence intake

@@ -784,5 +784,53 @@ taken at approval:
 Incident-response owner (SECURITY_STANDARDS §20): **Jamie Bell**
 (jamie.bell@zerodeposit.com), recorded 2026-07-28.
 
-Still open (owner: Jamie): per-turn/monthly AI cost budget numbers
-(SECURITY_STANDARDS §17), needed by task T9.
+## 17.1 AI cost controls (decision, 2026-07-29)
+
+The former open decision P4 ("per-turn/monthly AI cost budget numbers",
+SECURITY_STANDARDS §17) covered three different controls that had been
+discussed as one. They are separated here and resolved separately.
+
+**Already in place — per-user rate limit (T6).** 20 turns and 30 steering
+directions per 60 seconds per user, enforced by the `check_rate_limit`
+sliding-window counter in the route handlers
+(`src/lib/validation/turns.ts`). This bounds burst and parallel-request
+abuse. It is not a spend quota and was never intended as one.
+
+**Resolved — per-turn caps (engineering defaults).** These could not be
+deferred: the provider requires `max_tokens` on every call, so T9 cannot be
+written without numbers. Jamie approved (2026-07-29) that Claude set
+reversible engineering defaults rather than block the task on a product
+decision. Recorded as defaults, not as approved product policy — change them
+without ceremony if measurement says otherwise:
+
+| Cap | Default | Rationale |
+|---|---|---|
+| Max output tokens per turn | 4,000 | §8.2 response-depth rules keep a turn to prose plus one tool call |
+| Max input tokens per turn | 30,000 | Forces real context windowing (§11.5 minimum-necessary) rather than sending the whole project |
+| Max tool steps per turn | 5 | Decision 2 is one streaming tool-use call; 5 allows a retry, not a loop |
+| Schema retries per turn | 1 | Already fixed by the engine contract |
+| Concurrent turns per project | 1 | Already enforced by the turn-run lock |
+
+Worst case is therefore ~34,000 tokens per turn. These belong in engine
+config when T9 starts, not scattered through call sites.
+
+**Deferred with approval — monthly provider budget.** Recorded as a
+SECURITY_STANDARDS §24 exception:
+
+- *Requirement:* §17 "set spend alerts and provider budgets"
+- *Reason:* account-level billing configuration, not application code; no
+  code path depends on it
+- *Scope:* the Anthropic account for the whole product
+- *Risk:* a defect or runaway loop bills without an account ceiling. The
+  per-turn caps bound a single turn but nothing bounds the month
+- *Compensating control:* per-turn caps above, the T6 rate limit, and a
+  single-user private deployment for the slice
+- *Owner:* Jamie Bell · *Approval:* Jamie Bell, 2026-07-29
+- *Review:* before the deployment is reachable by anyone but the owner
+
+**Deferred with approval — per-user fair-use quota.** No monthly per-user
+allowance exists in the plan. This is a pricing and P&L decision, not an
+engineering one: it trades UX headroom against unit economics, and setting a
+number before a plan price is known would bake a guess into the schema.
+Comprehensive billing is already deferred scope (CLAUDE.md §7). Owner:
+Jamie. Needed before public launch, not before the slice.

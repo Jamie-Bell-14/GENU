@@ -1,6 +1,6 @@
 # Architecture
 
-> Status: **approved** (Phase 0 review, 2026-07). Security analysis of this architecture is in docs/SECURITY_REVIEW.md. Numbered references like "02 §U1" point to the Phase 0 review archive in docs/review/. ⚑ marks formerly open decisions — all were approved as recommended (see PROJECT_PLAN.md §17), except cost-budget numbers and the incident-response owner, which remain open.
+> Status: **approved** (Phase 0 review, 2026-07). Security analysis of this architecture is in docs/SECURITY_REVIEW.md. Numbered references like "02 §U1" point to the Phase 0 review archive in docs/review/. ⚑ marks formerly open decisions — all were approved as recommended (see PROJECT_PLAN.md §17). The incident-response owner is recorded (§17); AI cost controls were resolved on 2026-07-29 in §17.1, which sets per-turn caps as engineering defaults and defers the monthly provider budget and per-user fair-use quota with approval.
 
 ## 1. Repository structure
 

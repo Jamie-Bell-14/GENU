@@ -217,3 +217,86 @@ describe("Composer", () => {
     ).toBeInTheDocument();
   });
 });
+
+/*
+  Recovery notices are per-turn, and these tests read the rendered surface
+  rather than state: the defect they guard against is one turn's outcome
+  appearing to belong to another, which is only visible on screen.
+*/
+describe("recovery notices belong to their own turn", () => {
+  const OLDER = "dddddddd-0000-4000-8000-000000000001";
+  const NEWER = "dddddddd-0000-4000-8000-000000000002";
+
+  /*
+    A recovery always follows a message the user sent, so the transcript is
+    never empty when one is on screen. The tests say so explicitly rather than
+    relying on the empty state, which renders nothing else at all.
+  */
+  const asked = {
+    id: "m1",
+    turnId: OLDER,
+    role: "user" as const,
+    content: "A question whose answer was lost",
+    blockKind: "plain" as const,
+    createdAt: "2026-07-29T00:00:00.000Z",
+  };
+
+  it("states an unfinished turn without using the shared error region", () => {
+    render(
+      <ConversationStream
+        state={stateWith({
+          messages: [asked],
+          recoveries: [{ turnId: OLDER, state: "unfinished" }],
+        })}
+        onDismissRecovery={noop}
+      />,
+    );
+    expect(screen.getByText(/that turn did not finish/i)).toBeInTheDocument();
+    // `role="alert"` is the conversation-level error region. A per-turn
+    // outcome must not claim it, or it reads as the active turn failing.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows one notice per unresolved turn, each dismissable on its own", async () => {
+    const onDismissRecovery = vi.fn();
+    render(
+      <ConversationStream
+        state={stateWith({
+          messages: [asked],
+          recoveries: [
+            { turnId: OLDER, state: "unfinished" },
+            { turnId: NEWER, state: "still_running" },
+          ],
+        })}
+        onDismissRecovery={onDismissRecovery}
+      />,
+    );
+    expect(screen.getByText(/did not finish/i)).toBeInTheDocument();
+    expect(screen.getByText(/still being processed/i)).toBeInTheDocument();
+
+    const dismissals = screen.getAllByRole("button", { name: "Dismiss" });
+    expect(dismissals).toHaveLength(2);
+    await userEvent.click(dismissals[0]);
+    expect(onDismissRecovery).toHaveBeenCalledExactlyOnceWith(OLDER);
+  });
+
+  it("offers another look only where the outcome is genuinely unknown", () => {
+    render(
+      <ConversationStream
+        state={stateWith({
+          messages: [asked],
+          recoveries: [
+            { turnId: OLDER, state: "unfinished" },
+            { turnId: NEWER, state: "unavailable" },
+          ],
+        })}
+        onCheckAgain={noop}
+      />,
+    );
+    // A settled "did not finish" has nothing left to check; a lookup that
+    // could not be completed does.
+    expect(screen.getAllByRole("button", { name: "Check again" })).toHaveLength(
+      1,
+    );
+  });
+});

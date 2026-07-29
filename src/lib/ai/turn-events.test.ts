@@ -360,7 +360,7 @@ describe("stopping and losing the connection", () => {
     expect(again.activityLog).toHaveLength(1);
   });
 
-  it("says the turn did not finish when nothing was recorded", () => {
+  it("says the turn did not finish, against the turn it concerns", () => {
     let state = turnReducer(withPartialText(), {
       type: "connection_lost",
       turnId: TURN,
@@ -373,7 +373,119 @@ describe("stopping and losing the connection", () => {
       message: null,
     });
     expect(state.messages).toEqual([userMessage]);
-    expect(state.error?.code).toBe("turn_interrupted");
+    expect(state.recoveries).toEqual([{ turnId: TURN, state: "unfinished" }]);
+    // The verdict belongs to this turn, so it is not written to the one error
+    // field the whole conversation shares.
+    expect(state.error).toBeNull();
+  });
+
+  /*
+    Recovery outcomes and conversation-level errors are different things, and
+    the tests below hold them apart. Each one describes two turns coexisting —
+    which is the only situation in which a single global error field is
+    detectably wrong.
+  */
+  describe("recovery outcomes stay with their own turn", () => {
+    const OTHER = "dddddddd-0000-4000-8000-0000000000ff";
+    const directionError = {
+      code: "engine_unavailable" as const,
+      userMessage: "Your direction could not be recorded.",
+      recoverable: true,
+    };
+
+    /** An older turn awaiting recovery, while a newer turn streams. */
+    function twoTurns() {
+      let state = turnReducer(withPartialText(), {
+        type: "connection_lost",
+        turnId: TURN,
+      });
+      state = turnReducer(state, {
+        type: "user_message_sent",
+        message: { ...userMessage, id: "m2", content: "A later question" },
+      });
+      return turnReducer(state, {
+        type: "event",
+        event: { type: "turn_started", turnId: OTHER },
+      });
+    }
+
+    it("does not clear another turn's error when a recovery resolves", () => {
+      let state = turnReducer(twoTurns(), {
+        type: "direction_failed",
+        error: directionError,
+      });
+      state = turnReducer(state, {
+        type: "recovered",
+        turnId: TURN,
+        outcome: "completed",
+        activityLog: [],
+        message: null,
+      });
+      expect(state.error).toEqual(directionError);
+      expect(state.recoveries).toEqual([]);
+    });
+
+    it("does not present an older turn's failure as the active turn's", () => {
+      const state = turnReducer(twoTurns(), {
+        type: "recovered",
+        turnId: TURN,
+        outcome: "unfinished",
+        activityLog: [],
+        message: null,
+      });
+      expect(state.error).toBeNull();
+      expect(state.recoveries).toEqual([{ turnId: TURN, state: "unfinished" }]);
+      // The newer turn is untouched and still streaming.
+      expect(state.streaming?.turnId).toBe(OTHER);
+    });
+
+    it("dismisses only the recovery it names", () => {
+      let state = turnReducer(twoTurns(), {
+        type: "recovered",
+        turnId: TURN,
+        outcome: "unfinished",
+        activityLog: [],
+        message: null,
+      });
+      state = turnReducer(state, {
+        type: "connection_lost",
+        turnId: OTHER,
+      });
+      state = turnReducer(state, {
+        type: "recovered",
+        turnId: OTHER,
+        outcome: "still_running",
+        activityLog: [],
+        message: null,
+      });
+      expect(state.recoveries).toHaveLength(2);
+
+      const dismissed = turnReducer(state, {
+        type: "dismiss_recovery",
+        turnId: TURN,
+      });
+      expect(dismissed.recoveries).toEqual([
+        { turnId: OTHER, state: "still_running" },
+      ]);
+    });
+
+    it("leaves a direction error standing while a recovery fails", () => {
+      let state = turnReducer(twoTurns(), {
+        type: "direction_failed",
+        error: directionError,
+      });
+      state = turnReducer(state, {
+        type: "recovered",
+        turnId: TURN,
+        outcome: "lookup_failed",
+        activityLog: [],
+        message: null,
+      });
+      expect(state.error).toEqual(directionError);
+      expect(state.recoveries).toEqual([
+        { turnId: TURN, state: "unavailable" },
+      ]);
+    });
   });
 
   it("reports a refused direction without ending the turn", () => {

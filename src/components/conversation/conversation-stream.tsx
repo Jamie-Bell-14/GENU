@@ -173,11 +173,15 @@ export function ConversationStream({
               ? "The connection dropped. Checking what was recorded…"
               : recovery.state === "still_running"
                 ? "The connection dropped, and that turn is still being processed. Your message is saved."
-                : "The connection dropped, and that turn could not be checked just now. Your message is saved."}
+                : recovery.state === "unfinished"
+                  ? "The connection dropped and that turn did not finish. Your message is saved — send another when you are ready."
+                  : "The connection dropped, and that turn could not be checked just now. Your message is saved."}
           </p>
           {recovery.state !== "checking" && (
             <>
-              {onCheckAgain && (
+              {/* Nothing to look up again once the server has said the turn
+                  did not finish: that is a settled outcome, not an unknown. */}
+              {onCheckAgain && recovery.state !== "unfinished" && (
                 <Button
                   variant="outline"
                   size="xs"

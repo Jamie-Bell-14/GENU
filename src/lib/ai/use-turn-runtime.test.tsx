@@ -131,9 +131,14 @@ describe("losing the stream mid-turn", () => {
       await result.current.send();
     });
 
+    // The verdict is recorded against the turn it concerns, not in the single
+    // error field the whole conversation shares.
     await waitFor(() =>
-      expect(result.current.state.error?.code).toBe("turn_interrupted"),
+      expect(result.current.state.recoveries).toEqual([
+        { turnId: TURN, state: "unfinished" },
+      ]),
     );
+    expect(result.current.state.error).toBeNull();
     expect(result.current.state.messages).toHaveLength(1);
   });
 });
@@ -447,8 +452,12 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    expect(result.current.state.recoveries).toEqual([]);
-    expect(result.current.state.error?.code).toBe("turn_interrupted");
+    // An expired lease is a finished turn, not one still being processed — and
+    // it says so against that turn rather than through the shared error field.
+    expect(result.current.state.recoveries).toEqual([
+      { turnId: TURN, state: "unfinished" },
+    ]);
+    expect(result.current.state.error).toBeNull();
   }, 15_000);
 
   it("does not recover a turn whose terminal frame already arrived", async () => {

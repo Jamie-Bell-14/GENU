@@ -270,6 +270,86 @@ describe.skipIf(skip)("audit_events", () => {
   });
 });
 
+describe.skipIf(skip)("turn_runs", () => {
+  const RUN = "66666666-6666-4666-8666-666666666666";
+
+  it("is opened by the trusted writer and readable by the owner", async () => {
+    await asTrustedWriter();
+    await db.query(
+      "insert into turn_runs (turn_id, project_id) values ($1, $2)",
+      [RUN, projectA],
+    );
+
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      "select state, ended_at from turn_runs where turn_id = $1",
+      [RUN],
+    );
+    expect(rows[0]).toEqual({ state: "running", ended_at: null });
+  });
+
+  it("cannot be created or changed from a browser session", async () => {
+    // Steering and recovery read this, so a user forging it would be able to
+    // reopen a finished turn or hide a running one.
+    await impersonate(USER_A);
+    await expect(
+      db.query("insert into turn_runs (turn_id, project_id) values ($1, $2)", [
+        "77777777-7777-4777-8777-777777777777",
+        projectA,
+      ]),
+    ).rejects.toThrow(/permission denied/);
+    await expect(
+      db.query("update turn_runs set state = 'running'"),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("records exactly one terminal state", async () => {
+    await asTrustedWriter();
+    const first = await db.query(
+      `update turn_runs set state = 'completed', ended_at = now()
+       where turn_id = $1 and state = 'running'`,
+      [RUN],
+    );
+    expect(first.rowCount).toBe(1);
+
+    // A second terminal write finds no running row and changes nothing.
+    const second = await db.query(
+      `update turn_runs set state = 'failed', ended_at = now()
+       where turn_id = $1 and state = 'running'`,
+      [RUN],
+    );
+    expect(second.rowCount).toBe(0);
+
+    const { rows } = await db.query(
+      "select state from turn_runs where turn_id = $1",
+      [RUN],
+    );
+    expect(rows[0].state).toBe("completed");
+  });
+
+  it("refuses a terminal state without an end time, and the reverse", async () => {
+    await asTrustedWriter();
+    await expect(
+      db.query(
+        "insert into turn_runs (turn_id, project_id, state) values ($1, $2, 'completed')",
+        ["88888888-8888-4888-8888-888888888888", projectA],
+      ),
+    ).rejects.toThrow(/turn_runs_terminal_has_end/);
+    await expect(
+      db.query(
+        `insert into turn_runs (turn_id, project_id, state, ended_at)
+         values ($1, $2, 'running', now())`,
+        ["99999999-9999-4999-8999-999999999999", projectA],
+      ),
+    ).rejects.toThrow(/turn_runs_terminal_has_end/);
+  });
+
+  it("is invisible to other users", async () => {
+    await impersonate(USER_B);
+    expect((await db.query("select * from turn_runs")).rowCount).toBe(0);
+  });
+});
+
 describe.skipIf(skip)("turn_directions", () => {
   it("records steering with the mode promised to the user", async () => {
     await asTrustedWriter();

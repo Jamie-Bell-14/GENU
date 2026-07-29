@@ -37,6 +37,8 @@ export interface TurnRuntime {
   send: () => Promise<void>;
   stop: () => void;
   addDirection: () => Promise<void>;
+  /** Looks again for a turn whose recovery has not concluded. */
+  checkAgain: () => Promise<void>;
   /** A direction is in flight; the control is disabled until it resolves. */
   directionPending: boolean;
   onAction: (action: ContextualAction) => void;
@@ -157,9 +159,20 @@ export function useTurnRuntime({
             // Try again: a failed read says nothing about the turn.
             continue;
           }
-          // Still finishing — wait rather than declaring it produced nothing.
-          if (payload.status === "running" && attempt < CATCH_UP_ATTEMPTS - 1) {
-            continue;
+          if (payload.status === "running") {
+            /*
+              Still finishing. Wait if there are attempts left; otherwise say
+              it is still being processed — never that it did not finish, which
+              is a conclusion the server has explicitly not reached.
+            */
+            if (attempt < CATCH_UP_ATTEMPTS - 1) continue;
+            dispatch({
+              type: "recovered",
+              outcome: "still_running",
+              activityLog: payload.activity ?? [],
+              message: null,
+            });
+            return;
           }
 
           dispatch({
@@ -184,6 +197,17 @@ export function useTurnRuntime({
     },
     [isDemo, projectId],
   );
+
+  /**
+   * Another look, on request, when recovery ended without a conclusion. The
+   * turn may have finished in the meantime; nothing else can find that out.
+   */
+  const checkAgain = useCallback(async () => {
+    const turnId = state.recovery?.turnId;
+    if (!turnId || state.recovery?.state === "checking") return;
+    dispatch({ type: "connection_lost", turnId });
+    await catchUp(turnId);
+  }, [catchUp, state.recovery?.state, state.recovery?.turnId]);
 
   const send = useCallback(async () => {
     const message = draft.trim();
@@ -211,15 +235,12 @@ export function useTurnRuntime({
     let completed = false;
     /* Without a turn id there is nothing to look up, and saying the turn did
        not finish is the only honest answer. */
-    const recover = async (id: string | null) =>
-      id
-        ? catchUp(id)
-        : dispatch({
-            type: "recovered",
-            outcome: "unfinished",
-            activityLog: [],
-            message: null,
-          });
+    const recover = async (id: string | null) => {
+      // Without a turn id there is nothing to look up, and the stream never
+      // got far enough to have produced anything.
+      if (!id) return;
+      await catchUp(id);
+    };
 
     try {
       const response = await fetch(turnsEndpoint, {
@@ -269,11 +290,11 @@ export function useTurnRuntime({
         // The body ended without the turn resolving: the connection was lost,
         // not the turn finished. Partial text is discarded and the server is
         // asked what it actually recorded.
-        dispatch({ type: "connection_lost" });
+        dispatch({ type: "connection_lost", turnId });
         await recover(turnId);
-        return;
       }
-      dispatch({ type: "event", event: { type: "done" } });
+      // When `done` or `turn_failed` did arrive, the reducer has already
+      // acted on it; there is nothing left to resolve here.
     } catch (error) {
       if ((error as Error).name === "AbortError" && stoppedRef.current) {
         // Deliberate: the partial answer is discarded rather than presented as
@@ -282,8 +303,14 @@ export function useTurnRuntime({
       } else if ((error as Error).name === "AbortError") {
         // Aborted without the Stop control — the component unmounted.
         dispatch({ type: "turn_stopped" });
+      } else if (completed) {
+        /*
+          The terminal frame had already arrived, so this is only the socket
+          closing badly afterwards. The turn is not lost and must not be
+          recovered as though it were.
+        */
       } else {
-        dispatch({ type: "connection_lost" });
+        dispatch({ type: "connection_lost", turnId });
         await recover(turnId);
       }
     } finally {
@@ -353,6 +380,7 @@ export function useTurnRuntime({
     send,
     stop,
     addDirection,
+    checkAgain,
     directionPending,
     onAction,
   };

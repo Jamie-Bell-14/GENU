@@ -79,6 +79,61 @@ export async function recordActivity(input: {
   }
 }
 
+/**
+ * Opens a turn's operational record. Unlike audit and activity this is *not*
+ * best-effort: steering and recovery read it, so a turn that cannot record
+ * that it is running must not open a stream and advertise controls that
+ * cannot work. Returns whether the record exists.
+ */
+export async function openTurnRun(input: {
+  projectId: string;
+  turnId: string;
+}): Promise<boolean> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("turn_run");
+    return false;
+  }
+  const { error } = await client.from("turn_runs").insert({
+    turn_id: input.turnId,
+    project_id: input.projectId,
+    state: "running",
+  });
+  if (error) {
+    console.error("turn_run insert failed", { code: error.code });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Records the turn's outcome, exactly once. The update is constrained to a
+ * still-running row, so a second terminal write cannot overwrite the first.
+ */
+export async function closeTurnRun(input: {
+  turnId: string;
+  state: "completed" | "failed";
+}): Promise<boolean> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("turn_run_close");
+    return false;
+  }
+  const { error, count } = await client
+    .from("turn_runs")
+    .update(
+      { state: input.state, ended_at: new Date().toISOString() },
+      { count: "exact" },
+    )
+    .eq("turn_id", input.turnId)
+    .eq("state", "running");
+  if (error) {
+    console.error("turn_run close failed", { code: error.code });
+    return false;
+  }
+  return count === 1;
+}
+
 export type AuditAction =
   | "turn_started"
   | "turn_completed"

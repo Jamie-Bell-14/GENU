@@ -113,7 +113,7 @@ export async function POST(request: NextRequest) {
       });
 
       try {
-        await engine.runTurn(
+        const result = await engine.runTurn(
           {
             projectId: "demo",
             turnId,
@@ -123,6 +123,9 @@ export async function POST(request: NextRequest) {
           hooks,
           request.signal,
         );
+        // The host owns `done`. Nothing is persisted here, so it follows the
+        // engine returning a result.
+        if (result.assistantText) emit({ type: "done" });
       } finally {
         // The turn is over, so it can no longer take direction. Without this
         // the endpoint would keep accepting steering for a finished turn.

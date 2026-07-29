@@ -59,8 +59,8 @@ export default async function ProjectPage({
       initialMessages={messages}
       initialActivity={activity.lines}
       activityTruncated={activity.truncated}
-      canvasObjects={canvasObjects}
-      canvasRelationships={canvasRelationships}
+      canvasObjects={canvasObjects.data}
+      canvasRelationships={canvasRelationships.data}
     />
   );
 }

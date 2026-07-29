@@ -7,10 +7,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * refused for a turn that can no longer consume it, and catch-up must tell
  * "still finishing" apart from "finished with nothing".
  *
- * The audit trail already records `turn_started` and a terminal
- * `turn_completed`/`turn_failed` against the turn's correlation id, so the
- * state is derived from history rather than from a second source that could
- * disagree with it.
+ * It reads `turn_runs`, the operational record, rather than `audit_events`.
+ * Audit writes are best-effort — a turn must not fail because its history
+ * could not be written — so audit is the wrong source for a fact that gates
+ * behaviour: a missing row would make a running turn look unknown, and a lost
+ * terminal row would leave a finished turn looking permanently live.
  */
 export type TurnStatus =
   /** Started, no terminal event yet. */
@@ -22,8 +23,8 @@ export type TurnStatus =
   /** The lookup itself failed; nothing may be concluded about the turn. */
   | "lookup_failed";
 
-interface AuditRow {
-  action: string;
+interface TurnRunRow {
+  state: "running" | "completed" | "failed";
 }
 
 export async function readTurnStatus(
@@ -32,19 +33,13 @@ export async function readTurnStatus(
   turnId: string,
 ): Promise<TurnStatus> {
   const { data, error } = await supabase
-    .from("audit_events")
-    .select("action")
+    .from("turn_runs")
+    .select("state")
     .eq("project_id", projectId)
-    .eq("correlation_id", turnId)
-    .in("action", ["turn_started", "turn_completed", "turn_failed"])
-    .limit(10);
+    .eq("turn_id", turnId)
+    .maybeSingle();
 
   if (error) return "lookup_failed";
-  const actions = new Set(
-    ((data ?? []) as AuditRow[]).map((row) => row.action),
-  );
-  if (actions.has("turn_completed")) return "completed";
-  if (actions.has("turn_failed")) return "failed";
-  if (actions.has("turn_started")) return "running";
-  return "unknown";
+  const row = data as TurnRunRow | null;
+  return row ? row.state : "unknown";
 }

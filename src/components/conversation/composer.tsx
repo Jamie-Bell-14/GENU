@@ -44,7 +44,8 @@ export function Composer({
     flight, so an enabled Send button would be a control that silently does
     nothing.
   */
-  const busy = state.status !== "idle" || state.recovering;
+  const checking = state.recovery?.state === "checking";
+  const busy = state.status !== "idle" || checking;
   const tooLong = value.length > MAX_MESSAGE_LENGTH;
   const canSend = value.trim().length > 0 && !busy && !tooLong;
   const streaming = state.status === "streaming";
@@ -132,7 +133,7 @@ export function Composer({
           ) : (
             <Button onClick={onSend} disabled={!canSend} aria-busy={busy}>
               <SendIcon data-icon="inline-start" aria-hidden />
-              {state.recovering ? "Recovering…" : "Send"}
+              {checking ? "Recovering…" : "Send"}
             </Button>
           )}
         </div>

@@ -205,6 +205,7 @@ describe("ScriptedDiscoveryEngine", () => {
       type: "turn_failed",
       error: { code: "turn_interrupted", recoverable: true },
     });
-    expect(events.some((event) => event.type === "done")).toBe(false);
+    // `done` is the host's to emit, so the engine never produces one at all.
+    expect(events.map((event) => event.type)).not.toContain("done");
   });
 });

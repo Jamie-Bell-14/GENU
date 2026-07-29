@@ -105,17 +105,17 @@ test("a turn can be steered, and the system states what it will do", async ({
   await page.getByLabel("Message").fill("Focus on smaller letting agencies.");
   await direction.click();
 
-  // The promise is specific about when it applies…
-  await expect(
-    page.getByText(/applied at the next step of this turn/),
-  ).toBeVisible();
-  // …and the turn then reports what actually happened to it. Whether the
-  // direction reached the boundary in time is a real property of the running
-  // turn, so both outcomes are accepted here and neither is silence. The
-  // handoff itself is proved without timing in the route and engine tests.
+  /*
+    One of two honest outcomes, and never silence. If the turn was still
+    running the system states when the direction applies and then whether it
+    was picked up; if it had already finished, it says the direction was not
+    recorded. Which one happens is a real property of the running turn, so the
+    browser cannot assert it — the handoff itself is proved without timing in
+    the route and engine tests.
+  */
   await expect(
     page.getByText(
-      /Your direction was picked up by this turn\.|this turn had already passed its last step/,
+      /applied at the next step of this turn|picked up by this turn|no longer running, so the direction was not recorded/,
     ),
   ).toBeVisible();
 });

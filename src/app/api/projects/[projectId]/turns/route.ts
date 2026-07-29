@@ -1,11 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
+import { finishTurn } from "@/lib/ai/finish-turn";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { readDirectionsSince } from "@/lib/services/directions";
 import {
+  closeTurnRun,
+  openTurnRun,
   recordActivity,
   recordAudit,
   type AuditAction,
@@ -145,6 +148,24 @@ export async function POST(
     );
   }
 
+  /*
+    Operational state before the stream opens. Steering and recovery both read
+    it, so a turn that cannot record that it is running must not open a stream
+    and offer controls that cannot work — it fails here, where a plain error
+    response is still possible.
+  */
+  if (!(await openTurnRun({ projectId, turnId }))) {
+    return errorResponse(
+      {
+        code: "engine_unavailable",
+        userMessage:
+          "The workspace could not start this turn. Your message is saved — try again.",
+        recoverable: true,
+      },
+      503,
+    );
+  }
+
   const engine = new ScriptedDiscoveryEngine();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -254,15 +275,31 @@ export async function POST(
           hooks,
           request.signal,
         );
-        if (result.assistantText) {
-          await supabase.from("messages").insert({
-            project_id: projectId,
-            turn_id: turnId,
-            role: "assistant",
-            content: result.assistantText,
-          });
-        }
-        await audit(result.assistantText ? "turn_completed" : "turn_failed");
+        /*
+          The host — not the engine — decides the turn is over, and only after
+          the result is stored and the outcome recorded (see finish-turn.ts).
+
+          The assistant row is keyed by the turn id, so the message the client
+          rendered live and the message catch-up returns are the same message.
+        */
+        await finishTurn(
+          {
+            persistResult: async (text) => {
+              const { error } = await supabase.from("messages").insert({
+                id: turnId,
+                project_id: projectId,
+                turn_id: turnId,
+                role: "assistant",
+                content: text,
+              });
+              return !error;
+            },
+            closeRun: (state) => closeTurnRun({ turnId, state }),
+            audit: (action, detail) => audit(action, { detail }),
+            emit,
+          },
+          result.assistantText,
+        );
       } catch {
         // Internal detail stays server-side (SECURITY_STANDARDS §8).
         emit({
@@ -274,6 +311,7 @@ export async function POST(
             recoverable: true,
           },
         });
+        await closeTurnRun({ turnId, state: "failed" });
         await audit("turn_failed");
       } finally {
         controller.close();

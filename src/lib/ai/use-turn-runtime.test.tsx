@@ -91,7 +91,7 @@ describe("losing the stream mid-turn", () => {
       await result.current.send();
     });
 
-    await waitFor(() => expect(result.current.state.recovering).toBe(false));
+    await waitFor(() => expect(result.current.state.recovery).toBeNull());
 
     expect(fetchMock).toHaveBeenLastCalledWith(
       `/api/projects/${PROJECT}/turns/${TURN}`,
@@ -173,7 +173,7 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    await waitFor(() => expect(result.current.state.recovering).toBe(false), {
+    await waitFor(() => expect(result.current.state.recovery).toBeNull(), {
       timeout: 5000,
     });
     expect(result.current.state.messages.map((m) => m.content)).toEqual([
@@ -205,16 +205,138 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    await waitFor(() => expect(result.current.state.recovering).toBe(false), {
-      timeout: 5000,
+    await waitFor(
+      () => expect(result.current.state.recovery?.state).toBe("unavailable"),
+      { timeout: 5000 },
+    );
+    // Nothing was established about the turn, so nothing is concluded.
+    expect(result.current.state.error).toBeNull();
+    expect(result.current.state.recovery?.turnId).toBe(TURN);
+  }, 15_000);
+
+  it("never calls a turn the server still reports as running unfinished", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      // Every attempt: still running, no result yet.
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "running", activity: [], message: null }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
     });
-    expect(result.current.state.error?.userMessage).toMatch(
-      /could not be checked/i,
+
+    await waitFor(
+      () => expect(result.current.state.recovery?.state).toBe("still_running"),
+      { timeout: 5000 },
     );
-    // The conclusion the client must not reach.
-    expect(result.current.state.error?.userMessage).not.toMatch(
-      /did not finish/i,
+    // The conclusion the client must never reach from "still running".
+    expect(result.current.state.error).toBeNull();
+    expect(result.current.state.messages).toHaveLength(1);
+    // The bounded polling window is real time, so these two allow for it.
+  }, 15_000);
+
+  it("looks again on request, and takes the result once it exists", async () => {
+    const persisted = {
+      id: TURN,
+      role: "assistant",
+      content: "The recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "running", activity: [], message: null }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+    await waitFor(
+      () => expect(result.current.state.recovery?.state).toBe("still_running"),
+      { timeout: 5000 },
     );
+
+    // The turn finishes in the meantime; only another look can find that out.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "completed",
+        activity: [],
+        message: persisted,
+      }),
+    } as unknown as Response);
+    await act(async () => {
+      await result.current.checkAgain();
+    });
+
+    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.messages.map((m) => m.content)).toEqual([
+      "A problem worth exploring",
+      "The recorded answer.",
+    ]);
+  }, 15_000);
+
+  it("does not recover a turn whose terminal frame already arrived", async () => {
+    /*
+      The socket can close badly *after* `done`. The answer is not lost, and
+      treating it as lost would duplicate it from catch-up.
+    */
+    const encoder = new TextEncoder();
+    const frames = [
+      sse({ type: "turn_started", turnId: TURN }),
+      sse({ type: "assistant_delta", text: "The complete answer." }),
+      sse({ type: "done" }),
+    ];
+    let index = 0;
+    const response = {
+      ok: true,
+      body: {
+        getReader: () => ({
+          async read() {
+            if (index < frames.length) {
+              const value = encoder.encode(frames[index]);
+              index += 1;
+              return { done: false, value };
+            }
+            throw new TypeError("network error");
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response;
+    const fetchMock = vi.fn().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    // Exactly one assistant response, and no catch-up request was made.
+    const responses = result.current.state.messages.filter(
+      (message) => message.role === "assistant",
+    );
+    expect(responses).toHaveLength(1);
+    expect(responses[0].content).toBe("The complete answer.");
+    expect(result.current.state.recovery).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -275,7 +397,7 @@ describe("stopping a turn", () => {
     expect(result.current.state.status).toBe("idle");
     // A deliberate stop is not an error, and it does not trigger catch-up.
     expect(result.current.state.error).toBeNull();
-    expect(result.current.state.recovering).toBe(false);
+    expect(result.current.state.recovery).toBeNull();
   });
 });
 

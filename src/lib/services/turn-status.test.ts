@@ -4,19 +4,20 @@ import { readTurnStatus } from "./turn-status";
 
 /**
  * Steering and catch-up both depend on this answer, and both would misbehave
- * if "I could not find out" were reported as "it finished".
+ * if "I could not find out" were reported as "it finished". It reads the
+ * operational record rather than the best-effort audit trail, so a missing
+ * audit row cannot make a running turn look unknown.
  */
 function clientReturning(
-  actions: string[] | null,
+  state: "running" | "completed" | "failed" | null,
   error?: unknown,
 ): SupabaseClient {
   const builder = {
     select: () => builder,
     eq: () => builder,
-    in: () => builder,
-    limit: () =>
+    maybeSingle: () =>
       Promise.resolve({
-        data: actions?.map((action) => ({ action })) ?? null,
+        data: state ? { state } : null,
         error: error ?? null,
       }),
   };
@@ -29,34 +30,26 @@ const TURN = "dddddddd-0000-4000-8000-000000000001";
 describe("readTurnStatus", () => {
   it("is running once started and not yet terminal", async () => {
     await expect(
-      readTurnStatus(clientReturning(["turn_started"]), PROJECT, TURN),
+      readTurnStatus(clientReturning("running"), PROJECT, TURN),
     ).resolves.toBe("running");
   });
 
   it("is completed once the turn recorded a result", async () => {
     await expect(
-      readTurnStatus(
-        clientReturning(["turn_started", "turn_completed"]),
-        PROJECT,
-        TURN,
-      ),
+      readTurnStatus(clientReturning("completed"), PROJECT, TURN),
     ).resolves.toBe("completed");
   });
 
   it("is failed when the turn recorded a failure", async () => {
     await expect(
-      readTurnStatus(
-        clientReturning(["turn_started", "turn_failed"]),
-        PROJECT,
-        TURN,
-      ),
+      readTurnStatus(clientReturning("failed"), PROJECT, TURN),
     ).resolves.toBe("failed");
   });
 
   it("is unknown for a turn this project never started", async () => {
     // A foreign turn reads the same way, because the query is project-scoped.
     await expect(
-      readTurnStatus(clientReturning([]), PROJECT, TURN),
+      readTurnStatus(clientReturning(null), PROJECT, TURN),
     ).resolves.toBe("unknown");
   });
 

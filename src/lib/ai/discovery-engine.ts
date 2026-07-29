@@ -189,7 +189,8 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
         },
       ],
     });
-    hooks.emit({ type: "done" });
+    // No `done`: the host emits that once the result is stored and the turn's
+    // outcome is recorded.
     return { assistantText: lines.join("\n") };
   }
 

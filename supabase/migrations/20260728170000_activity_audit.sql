@@ -126,6 +126,40 @@ create index audit_events_project_idx
 create index audit_events_correlation_idx
   on public.audit_events (correlation_id);
 
+/*
+  Operational turn state.
+
+  Steering and recovery both need to know whether a turn is still running.
+  That cannot be read from `audit_events`: audit writes are best-effort by
+  design — a turn must not fail because its history could not be written — so a
+  missing audit row would make a running turn look unknown and a lost terminal
+  row would leave a finished turn looking permanently live.
+
+  This table is the operational record instead: its writes are checked, a turn
+  does not open its stream until the running row exists, and exactly one
+  terminal state is written when the outcome is known. `audit_events` remains
+  the append-only history; this is runtime truth.
+
+  It is therefore not append-only: the terminal write updates the row in place,
+  which is what makes "exactly one terminal state" enforceable rather than a
+  convention.
+*/
+create type public.turn_run_state as enum ('running', 'completed', 'failed');
+
+create table public.turn_runs (
+  turn_id uuid primary key,
+  project_id uuid not null references public.projects (id) on delete cascade,
+  state public.turn_run_state not null default 'running',
+  started_at timestamptz not null default now(),
+  ended_at timestamptz,
+  -- A terminal state has an end time and a running one does not; neither can
+  -- drift from the other.
+  constraint turn_runs_terminal_has_end
+    check ((state = 'running') = (ended_at is null))
+);
+
+create index turn_runs_project_idx on public.turn_runs (project_id);
+
 create type public.direction_application as enum (
   'applies_now',
   'next_step',
@@ -146,6 +180,7 @@ create table public.turn_directions (
 create index turn_directions_turn_idx
   on public.turn_directions (turn_id, created_at);
 
+alter table public.turn_runs enable row level security;
 alter table public.activity_events enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.turn_directions enable row level security;
@@ -162,9 +197,13 @@ create policy audit_events_select on public.audit_events
 create policy turn_directions_select on public.turn_directions
   for select to authenticated using (private.is_project_owner(project_id));
 
+create policy turn_runs_select on public.turn_runs
+  for select to authenticated using (private.is_project_owner(project_id));
+
 grant select on public.activity_events to authenticated;
 grant select on public.audit_events to authenticated;
 grant select on public.turn_directions to authenticated;
+grant select on public.turn_runs to authenticated;
 
 /*
   The trusted writer. `service_role` bypasses RLS, so authorisation for these
@@ -177,10 +216,14 @@ grant select on public.turn_directions to authenticated;
 grant select, insert on public.activity_events to service_role;
 grant select, insert on public.audit_events to service_role;
 grant select, insert on public.turn_directions to service_role;
+-- Operational state, not history: the terminal write updates the running row.
+grant select, insert, update on public.turn_runs to service_role;
 
 comment on table public.activity_events is
   'Observable work performed during a turn, as closed step + lifecycle state. Written only by the trusted server writer; readable by the project owner.';
 comment on table public.audit_events is
   'Security and consequence record, including actions that were rejected. Append-only, trusted-writer only.';
+comment on table public.turn_runs is
+  'Operational state of a turn: whether it is still running. Written by the trusted server writer with checked results, because steering and recovery depend on it.';
 comment on table public.turn_directions is
   'Mid-turn steering, with the application mode promised to the user when it was accepted.';

@@ -133,13 +133,20 @@ export type TurnEvent =
   | { type: "done" };
 
 /**
- * The subset an engine may emit. Scene recommendations and direction receipts
- * are application-owned, so the type system — not a code review — is what stops
- * an engine minting them.
+ * The subset an engine may emit.
+ *
+ * Scene recommendations and direction receipts are application-owned. So is
+ * `done`: an engine finishing its work is not the same as the turn having
+ * succeeded, because the host still has to persist the result and record the
+ * outcome — and once the interface has been told a turn is done, a later
+ * storage failure cannot honestly take that back. The engine returns its
+ * result; the host decides the turn is over.
  */
 export type EngineEvent = Exclude<
   TurnEvent,
-  { type: "scene_recommended" } | { type: "direction_applied" }
+  | { type: "scene_recommended" }
+  | { type: "direction_applied" }
+  | { type: "done" }
 >;
 
 export interface Message {
@@ -200,8 +207,16 @@ export interface TurnState {
    * presented as complete.
    */
   stopped: boolean;
-  /** The stream was lost unintentionally and catch-up is in progress. */
-  recovering: boolean;
+  /**
+   * A lost stream being recovered. `checking` is active polling; the other two
+   * are honest dead ends that offer another look rather than a conclusion —
+   * a turn the server still reports as running has *not* failed, and a lookup
+   * that could not be completed says nothing about the turn at all.
+   */
+  recovery: {
+    turnId: string;
+    state: "checking" | "still_running" | "unavailable";
+  } | null;
   status: "idle" | "sending" | "streaming";
 }
 
@@ -215,7 +230,7 @@ export const INITIAL_TURN_STATE: TurnState = {
   direction: null,
   error: null,
   stopped: false,
-  recovering: false,
+  recovery: null,
   status: "idle",
 };
 
@@ -233,12 +248,16 @@ export type TurnAction =
   /** The user pressed Stop. */
   | { type: "turn_stopped" }
   /** The stream ended unintentionally; catch-up begins. */
-  | { type: "connection_lost" }
+  | { type: "connection_lost"; turnId: string | null }
   /** Catch-up finished: what the server actually recorded for this turn. */
   | {
       type: "recovered";
-      /** How the turn really ended, or that the lookup itself failed. */
-      outcome: "completed" | "unfinished" | "lookup_failed";
+      /**
+       * How the turn really ended — or that it has not, or that the lookup
+       * itself failed. `still_running` is not a failure and must never be
+       * reported as one.
+       */
+      outcome: "completed" | "unfinished" | "still_running" | "lookup_failed";
       activityLog: ActivityLine[];
       message: Message | null;
     }
@@ -287,7 +306,7 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         direction: null,
         error: null,
         stopped: false,
-        recovering: false,
+        recovery: null,
         status: "sending",
       };
 
@@ -313,7 +332,9 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         ...state,
         streaming: null,
         activity: NO_ACTIVITY,
-        recovering: true,
+        recovery: action.turnId
+          ? { turnId: action.turnId, state: "checking" }
+          : null,
         status: "idle",
       };
 
@@ -325,21 +346,30 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         would be a conclusion the system has not earned.
       */
       const error: SafeError | null =
-        action.outcome === "completed"
-          ? null
-          : action.outcome === "lookup_failed"
-            ? {
-                code: "engine_unavailable",
-                userMessage:
-                  "The connection dropped and this turn could not be checked. Your message is saved; reload to see what was recorded.",
-                recoverable: true,
-              }
-            : {
-                code: "turn_interrupted",
-                userMessage:
-                  "The connection dropped and this turn did not finish. Your message is saved — send another when you are ready.",
-                recoverable: true,
-              };
+        action.outcome === "unfinished"
+          ? {
+              code: "turn_interrupted",
+              userMessage:
+                "The connection dropped and this turn did not finish. Your message is saved — send another when you are ready.",
+              recoverable: true,
+            }
+          : null;
+      /*
+        Only "unfinished" is a conclusion about the turn. A turn the server
+        still reports as running has not failed, and a lookup that could not
+        be completed has established nothing — both stay in recovery, with a
+        way to look again, rather than becoming a verdict.
+      */
+      const recovery =
+        action.outcome === "still_running" || action.outcome === "lookup_failed"
+          ? {
+              turnId: state.recovery?.turnId ?? "",
+              state:
+                action.outcome === "still_running"
+                  ? ("still_running" as const)
+                  : ("unavailable" as const),
+            }
+          : null;
       return {
         ...state,
         activityLog: action.activityLog.reduce(
@@ -350,7 +380,7 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           action.message && !known.has(action.message.id)
             ? [...state.messages, action.message]
             : state.messages,
-        recovering: false,
+        recovery,
         error,
       };
     }

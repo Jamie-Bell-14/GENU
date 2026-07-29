@@ -75,10 +75,23 @@ export async function loadTurnScope(
       relationshipIds: new Set(relationshipRows.map((row) => row.id)),
     },
     objectIds,
-    focalObjectId: defaultFocalObjectId(canvasObjects, canvasRelationships),
+    focalObjectId: defaultFocalObjectId(
+      canvasObjects.data,
+      canvasRelationships.data,
+    ),
     truncated:
       objectRows.length >= OBJECT_LIMIT ||
       relationshipRows.length >= RELATIONSHIP_LIMIT,
-    failed: Boolean(objects.error) || Boolean(relationships.error),
+    /*
+      Every query that takes part in this read counts. The identity queries
+      define the scope; the field, assumption and relationship reads define
+      what the project is exploring. If any of them failed, the model in hand
+      is not the project's model, whatever the other queries returned.
+    */
+    failed:
+      Boolean(objects.error) ||
+      Boolean(relationships.error) ||
+      canvasObjects.failed ||
+      canvasRelationships.failed,
   };
 }

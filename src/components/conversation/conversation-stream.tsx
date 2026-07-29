@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { Message, TurnState } from "@/lib/ai/turn-events";
 import { TurnBlock } from "./turn-block";
+import { Button } from "@/components/ui/button";
 import { ActivityIndicator } from "@/components/activity/activity-indicator";
 
 /*
@@ -36,7 +37,10 @@ function AssistantTurn({
   );
 }
 
-export function ConversationStream({ state }: Readonly<{ state: TurnState }>) {
+export function ConversationStream({
+  state,
+  onCheckAgain,
+}: Readonly<{ state: TurnState; onCheckAgain?: () => void }>) {
   const endRef = useRef<HTMLDivElement>(null);
   const count = state.messages.length;
 
@@ -95,10 +99,24 @@ export function ConversationStream({ state }: Readonly<{ state: TurnState }>) {
         </p>
       )}
 
-      {state.recovering && (
-        <p className="text-fg-tertiary text-xs">
-          The connection dropped. Checking what was recorded…
-        </p>
+      {/* Recovery states, each saying only what is known. A turn the server
+          still reports as running has not failed, so the interface offers
+          another look rather than a verdict. */}
+      {state.recovery && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-fg-tertiary text-xs">
+            {state.recovery.state === "checking"
+              ? "The connection dropped. Checking what was recorded…"
+              : state.recovery.state === "still_running"
+                ? "The connection dropped, and this turn is still being processed. Your message is saved."
+                : "The connection dropped, and this turn could not be checked just now. Your message is saved."}
+          </p>
+          {state.recovery.state !== "checking" && onCheckAgain && (
+            <Button variant="outline" size="xs" onClick={onCheckAgain}>
+              Check again
+            </Button>
+          )}
+        </div>
       )}
 
       {state.error && (

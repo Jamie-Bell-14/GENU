@@ -183,6 +183,21 @@ user and confirmed project ownership through the user-scoped client.
 label text, so the words a user reads are looked up from the application's
 catalogue on read.
 
+Whether a turn is still running is **operational state**, not audit history:
+`turn_runs` records it with checked writes, a turn does not open its stream
+until the running row exists, and exactly one terminal state is written when
+the outcome is known. Audit writes are best-effort by design — a turn must not
+fail because its history could not be written — which is precisely why they
+cannot be the source of a fact that gates steering and recovery.
+
+The host, not the engine, ends a turn: `finishTurn` stores the result, records
+the outcome, and only then emits `done`. `EngineEvent` excludes `done` for the
+same reason it excludes scene events — an engine finishing its work is not the
+same as the turn having succeeded, and once the interface has been told a turn
+is done, a later storage failure cannot honestly take that back. The assistant
+row is keyed by the turn id, so the message rendered live and the message
+returned by catch-up are the same message.
+
 A dropped SSE connection is recovered rather than reloaded:
 `GET /api/projects/[id]/turns/[turnId]` returns the activity and any assistant
 message recorded for that turn. Ids are stable — activity lines are keyed by

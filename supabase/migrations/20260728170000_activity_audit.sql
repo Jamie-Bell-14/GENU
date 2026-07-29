@@ -248,6 +248,17 @@ comment on table public.audit_events is
   the window (so this refuses), or it waits and then sees the row this
   inserted.
 */
+/*
+  How many directions one turn may accept.
+
+  The sealing read has to be able to return every direction a turn accepted,
+  or an accepted one would be stranded — and the user was promised it would
+  apply. Rather than letting the read cap silently, the bound is enforced when
+  a direction is accepted, so the refusal happens *before* any promise is made.
+*/
+create or replace function private.max_directions_per_turn()
+returns integer language sql immutable set search_path = '' as $$ select 20 $$;
+
 create or replace function public.accept_turn_direction(
   p_project_id uuid,
   p_turn_id uuid,
@@ -261,6 +272,7 @@ set search_path = ''
 as $$
 declare
   run public.turn_runs%rowtype;
+  existing integer;
 begin
   select * into run
   from public.turn_runs
@@ -280,6 +292,14 @@ begin
     return 'closed';
   end if;
 
+  select count(*) into existing
+  from public.turn_directions
+  where turn_id = p_turn_id and project_id = p_project_id;
+  if existing >= private.max_directions_per_turn() then
+    -- Refused before a promise is made, rather than accepted and stranded.
+    return 'too_many';
+  end if;
+
   insert into public.turn_directions (project_id, turn_id, note, application)
   values (p_project_id, p_turn_id, p_note, p_application);
   return 'accepted';
@@ -294,10 +314,11 @@ $$;
 create or replace function public.take_turn_directions(
   p_project_id uuid,
   p_turn_id uuid,
-  p_after timestamptz,
+  p_after_created_at timestamptz,
+  p_after_id uuid,
   p_seal boolean
 )
-returns table (note text, created_at timestamptz)
+returns table (id uuid, note text, created_at timestamptz)
 language plpgsql
 security definer
 set search_path = ''
@@ -315,13 +336,17 @@ begin
   end if;
 
   return query
-    select d.note, d.created_at
+    select d.id, d.note, d.created_at
     from public.turn_directions d
     where d.turn_id = p_turn_id
       and d.project_id = p_project_id
-      and d.created_at > p_after
-    order by d.created_at
-    limit 10;
+      -- (created_at, id) is a stable cursor; a timestamp alone can skip rows
+      -- that share the last returned one.
+      and (d.created_at, d.id) > (p_after_created_at, p_after_id)
+    order by d.created_at, d.id
+    -- Never below what acceptance allows, so a sealing read cannot strand a
+    -- direction the user was promised.
+    limit private.max_directions_per_turn();
 end;
 $$;
 
@@ -371,13 +396,13 @@ as $$
 $$;
 
 revoke all on function public.accept_turn_direction(uuid, uuid, text, public.direction_application) from public;
-revoke all on function public.take_turn_directions(uuid, uuid, timestamptz, boolean) from public;
+revoke all on function public.take_turn_directions(uuid, uuid, timestamptz, uuid, boolean) from public;
 revoke all on function public.turn_snapshot(uuid, uuid) from public;
 
 -- Steering is written only by the trusted server writer; the snapshot is read
 -- by the owner, and checks ownership itself because it is security definer.
 grant execute on function public.accept_turn_direction(uuid, uuid, text, public.direction_application) to service_role;
-grant execute on function public.take_turn_directions(uuid, uuid, timestamptz, boolean) to service_role;
+grant execute on function public.take_turn_directions(uuid, uuid, timestamptz, uuid, boolean) to service_role;
 grant execute on function public.turn_snapshot(uuid, uuid) to authenticated;
 
 comment on table public.turn_runs is

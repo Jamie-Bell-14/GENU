@@ -188,6 +188,21 @@ describe("ScriptedDiscoveryEngine", () => {
     expect(result.assistantText).not.toContain("You added");
   });
 
+  it("propagates a failed final direction boundary rather than finishing", async () => {
+    /*
+      If the seal did not happen, the steering window may still be open with no
+      step left to consume anything. The engine must not carry on to a normal
+      completion — the host's failure path closes the run, which seals it.
+    */
+    const { hooks } = harness();
+    hooks.takeDirection = async () => {
+      throw new Error("direction_seal_failed");
+    };
+    await expect(
+      new ScriptedDiscoveryEngine().runTurn(input, hooks),
+    ).rejects.toThrow("direction_seal_failed");
+  });
+
   it("stops mid-turn and keeps nothing partial", async () => {
     const controller = new AbortController();
     const { events, hooks } = harness();

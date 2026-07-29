@@ -17,6 +17,7 @@ const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
 const TURN = "33333333-3333-4333-8333-333333333333";
 const OPERATION = "44444444-4444-4444-8444-444444444444";
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 const skip = process.env.RLS_TESTS === "skip";
 const adminUrl = process.env.DATABASE_URL;
@@ -373,8 +374,8 @@ describe.skipIf(skip)("the steering window", () => {
 
     // Sealing at the final boundary returns exactly what was inserted first.
     const taken = await db.query(
-      "select note from public.take_turn_directions($1, $2, $3, true)",
-      [projectA, OPEN, new Date(0).toISOString()],
+      "select note from public.take_turn_directions($1, $2, $3, $4, true)",
+      [projectA, OPEN, new Date(0).toISOString(), NIL_UUID],
     );
     expect(taken.rows.map((row) => row.note)).toEqual(["Before the seal."]);
   });
@@ -383,8 +384,8 @@ describe.skipIf(skip)("the steering window", () => {
     await asTrustedWriter();
     // The final boundary passes with nothing pending.
     await db.query(
-      "select * from public.take_turn_directions($1, $2, $3, true)",
-      [projectA, SEALED, new Date(0).toISOString()],
+      "select * from public.take_turn_directions($1, $2, $3, $4, true)",
+      [projectA, SEALED, new Date(0).toISOString(), NIL_UUID],
     );
 
     const refused = await db.query(
@@ -479,6 +480,153 @@ describe.skipIf(skip)("the steering window", () => {
       state: "completed",
       message_content: "The answer.",
     });
+  });
+
+  it("returns every accepted direction at the sealing read", async () => {
+    /*
+      More directions can be accepted than an arbitrary read cap would return.
+      Anything left behind would be a direction the user was explicitly
+      promised would apply, silently stranded.
+    */
+    await asTrustedWriter();
+    const turnId = "aaaaaaaa-0000-4000-8000-000000000011";
+    await db.query(
+      "insert into turn_runs (turn_id, project_id) values ($1, $2)",
+      [turnId, projectA],
+    );
+
+    for (let index = 0; index < 15; index += 1) {
+      const { rows } = await db.query(
+        "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+        [projectA, turnId, `Direction ${index}`],
+      );
+      expect(rows[0].outcome).toBe("accepted");
+    }
+
+    /*
+      `created_at::text` keeps the timestamp's microseconds through the driver.
+      A cursor that loses precision re-delivers a row rather than skipping one,
+      which is the safe direction, but the test should exercise the exact
+      round-trip the application makes.
+    */
+    const taken = await db.query(
+      "select id, note, created_at::text as created_at from public.take_turn_directions($1, $2, $3, $4, true)",
+      [projectA, turnId, new Date(0).toISOString(), NIL_UUID],
+    );
+    expect(taken.rows).toHaveLength(15);
+
+    // Consumed exactly once: resuming from the last row it returned yields
+    // nothing more.
+    const last = taken.rows[taken.rows.length - 1];
+    const again = await db.query(
+      "select note from public.take_turn_directions($1, $2, $3, $4, false)",
+      [projectA, turnId, last.created_at, last.id],
+    );
+    expect(again.rows).toEqual([]);
+  });
+
+  it("refuses a direction beyond the per-turn bound, before promising anything", async () => {
+    await asTrustedWriter();
+    const turnId = "aaaaaaaa-0000-4000-8000-000000000012";
+    await db.query(
+      "insert into turn_runs (turn_id, project_id) values ($1, $2)",
+      [turnId, projectA],
+    );
+
+    /*
+      The bound is application-owned, so the test reads it rather than
+      hard-coding a number that could drift from the migration. Read with the
+      superuser role: `private` is not granted to the API roles, which is
+      itself the point of putting it there.
+    */
+    await db.query("reset role");
+    const bound = (
+      await db.query("select private.max_directions_per_turn() as bound")
+    ).rows[0].bound as number;
+    await asTrustedWriter();
+    for (let index = 0; index < bound; index += 1) {
+      await db.query(
+        "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+        [projectA, turnId, `Direction ${index}`],
+      );
+    }
+
+    const refused = await db.query(
+      "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+      [projectA, turnId, "One too many"],
+    );
+    expect(refused.rows[0].outcome).toBe("too_many");
+    // Refused before the row exists, so nothing was accepted and stranded.
+    expect(
+      (
+        await db.query(
+          "select count(*)::int as total from turn_directions where turn_id = $1",
+          [turnId],
+        )
+      ).rows[0].total,
+    ).toBe(bound);
+  });
+
+  it("leaves the window open when no sealing read happened", async () => {
+    /*
+      The reason a failed read must not be treated as "sealed": nothing has
+      changed, so the endpoint would still accept a direction the turn can no
+      longer consume.
+    */
+    await asTrustedWriter();
+    const turnId = "aaaaaaaa-0000-4000-8000-000000000013";
+    await db.query(
+      "insert into turn_runs (turn_id, project_id) values ($1, $2)",
+      [turnId, projectA],
+    );
+    const { rows } = await db.query(
+      "select accepting_direction from turn_runs where turn_id = $1",
+      [turnId],
+    );
+    expect(rows[0].accepting_direction).toBe(true);
+    expect(
+      (
+        await db.query(
+          "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+          [projectA, turnId, "Still open"],
+        )
+      ).rows[0].outcome,
+    ).toBe("accepted");
+  });
+
+  it("uses a stable cursor so rows sharing a timestamp are not skipped", async () => {
+    await asTrustedWriter();
+    const turnId = "aaaaaaaa-0000-4000-8000-000000000014";
+    await db.query(
+      "insert into turn_runs (turn_id, project_id) values ($1, $2)",
+      [turnId, projectA],
+    );
+    // Three rows with an identical timestamp: a timestamp-only cursor would
+    // skip the ones sharing the last returned value.
+    const stamp = new Date().toISOString();
+    await db.query(
+      `insert into turn_directions (project_id, turn_id, note, application, created_at)
+       values ($1, $2, 'one', 'next_step', $3),
+              ($1, $2, 'two', 'next_step', $3),
+              ($1, $2, 'three', 'next_step', $3)`,
+      [projectA, turnId, stamp],
+    );
+
+    const first = await db.query(
+      "select id, note, created_at::text as created_at from public.take_turn_directions($1, $2, $3, $4, false)",
+      [projectA, turnId, new Date(0).toISOString(), NIL_UUID],
+    );
+    expect(first.rows).toHaveLength(3);
+
+    // Resuming after the first row returns exactly the remaining two — a
+    // timestamp-only cursor would have skipped both, since all three share it.
+    const rest = await db.query(
+      "select note from public.take_turn_directions($1, $2, $3, $4, false)",
+      [projectA, turnId, first.rows[0].created_at, first.rows[0].id],
+    );
+    expect(rest.rows.map((row) => row.note)).toEqual(
+      first.rows.slice(1).map((row) => row.note),
+    );
   });
 
   it("does not show another user's turn through the snapshot", async () => {

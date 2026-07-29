@@ -91,7 +91,7 @@ describe("losing the stream mid-turn", () => {
       await result.current.send();
     });
 
-    await waitFor(() => expect(result.current.state.recovery).toBeNull());
+    await waitFor(() => expect(result.current.state.recoveries).toEqual([]));
 
     expect(fetchMock).toHaveBeenLastCalledWith(
       `/api/projects/${PROJECT}/turns/${TURN}`,
@@ -173,7 +173,7 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    await waitFor(() => expect(result.current.state.recovery).toBeNull(), {
+    await waitFor(() => expect(result.current.state.recoveries).toEqual([]), {
       timeout: 5000,
     });
     expect(result.current.state.messages.map((m) => m.content)).toEqual([
@@ -206,12 +206,13 @@ describe("catch-up that races the server", () => {
     });
 
     await waitFor(
-      () => expect(result.current.state.recovery?.state).toBe("unavailable"),
+      () =>
+        expect(result.current.state.recoveries[0]?.state).toBe("unavailable"),
       { timeout: 5000 },
     );
     // Nothing was established about the turn, so nothing is concluded.
     expect(result.current.state.error).toBeNull();
-    expect(result.current.state.recovery?.turnId).toBe(TURN);
+    expect(result.current.state.recoveries[0]?.turnId).toBe(TURN);
   }, 15_000);
 
   it("never calls a turn the server still reports as running unfinished", async () => {
@@ -234,7 +235,8 @@ describe("catch-up that races the server", () => {
     });
 
     await waitFor(
-      () => expect(result.current.state.recovery?.state).toBe("still_running"),
+      () =>
+        expect(result.current.state.recoveries[0]?.state).toBe("still_running"),
       { timeout: 5000 },
     );
     // The conclusion the client must never reach from "still running".
@@ -268,7 +270,8 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
     await waitFor(
-      () => expect(result.current.state.recovery?.state).toBe("still_running"),
+      () =>
+        expect(result.current.state.recoveries[0]?.state).toBe("still_running"),
       { timeout: 5000 },
     );
 
@@ -282,10 +285,10 @@ describe("catch-up that races the server", () => {
       }),
     } as unknown as Response);
     await act(async () => {
-      await result.current.checkAgain();
+      await result.current.checkAgain(TURN);
     });
 
-    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.recoveries).toEqual([]);
     expect(result.current.state.messages.map((m) => m.content)).toEqual([
       "A problem worth exploring",
       "The recorded answer.",
@@ -334,7 +337,7 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    await waitFor(() => expect(result.current.state.recovery).toBeNull(), {
+    await waitFor(() => expect(result.current.state.recoveries).toEqual([]), {
       timeout: 10_000,
     });
     expect(result.current.state.messages.map((m) => m.content)).toEqual([
@@ -376,8 +379,48 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.recoveries).toEqual([]);
     expect(result.current.state.messages).toHaveLength(2);
+    expect(result.current.state.error).toBeNull();
+  }, 15_000);
+
+  it("recovers the answer even when the activity history could not be read", async () => {
+    // Activity is narration. A transient failure reading it must not withhold
+    // the result the snapshot returned.
+    const persisted = {
+      id: TURN,
+      role: "assistant",
+      content: "The recorded answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          activity: [],
+          activityUnavailable: true,
+          message: persisted,
+        }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(result.current.state.recoveries).toEqual([]);
+    expect(result.current.state.messages.map((m) => m.content)).toEqual([
+      "A problem worth exploring",
+      "The recorded answer.",
+    ]);
     expect(result.current.state.error).toBeNull();
   }, 15_000);
 
@@ -399,7 +442,7 @@ describe("catch-up that races the server", () => {
       await result.current.send();
     });
 
-    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.recoveries).toEqual([]);
     expect(result.current.state.error?.code).toBe("turn_interrupted");
   }, 15_000);
 
@@ -446,7 +489,7 @@ describe("catch-up that races the server", () => {
     );
     expect(responses).toHaveLength(1);
     expect(responses[0].content).toBe("The complete answer.");
-    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.recoveries).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
@@ -508,7 +551,7 @@ describe("stopping a turn", () => {
     expect(result.current.state.status).toBe("idle");
     // A deliberate stop is not an error, and it does not trigger catch-up.
     expect(result.current.state.error).toBeNull();
-    expect(result.current.state.recovery).toBeNull();
+    expect(result.current.state.recoveries).toEqual([]);
   });
 });
 
@@ -592,6 +635,204 @@ describe("losing the stream before it identifies itself", () => {
     expect(result.current.state.messages).toHaveLength(1);
     expect(result.current.state.status).toBe("idle");
   }, 15_000);
+});
+
+describe("recoveries belong to their own turn", () => {
+  /** A turn that starts and then stays open until the test closes it. */
+  function openStream(turnId: string) {
+    const encoder = new TextEncoder();
+    let sentStart = false;
+    let close: (() => void) | null = null;
+    const response = {
+      ok: true,
+      headers: new Headers({ "x-turn-id": turnId }),
+      body: {
+        getReader: () => ({
+          async read() {
+            if (!sentStart) {
+              sentStart = true;
+              return {
+                done: false,
+                value: encoder.encode(sse({ type: "turn_started", turnId })),
+              };
+            }
+            await new Promise<void>((resolve) => {
+              close = resolve;
+            });
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response;
+    return { response, close: () => close?.() };
+  }
+
+  it("checking an older turn leaves a newer streaming turn alone", async () => {
+    const TURN_B = "eeeeeeee-0000-4000-8000-000000000002";
+    const streamB = openStream(TURN_B);
+    const fetchMock = vi
+      .fn()
+      // Turn A: ends without resolving, so it becomes an unresolved recovery.
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "running", activity: [], message: null }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("The first problem"));
+    await act(async () => {
+      await result.current.send();
+    });
+    await waitFor(
+      () =>
+        expect(result.current.state.recoveries[0]?.state).toBe("still_running"),
+      { timeout: 10_000 },
+    );
+
+    // Turn B starts and is streaming.
+    fetchMock.mockResolvedValueOnce(streamB.response);
+    act(() => result.current.setDraft("The second problem"));
+    let sentB: Promise<void>;
+    act(() => {
+      sentB = result.current.send();
+    });
+    await waitFor(() => expect(result.current.state.status).toBe("streaming"));
+
+    // Checking A while B streams must not touch B.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "running", activity: [], message: null }),
+    } as unknown as Response);
+    await act(async () => {
+      await result.current.checkAgain(TURN);
+    });
+
+    expect(result.current.state.status).toBe("streaming");
+    expect(result.current.state.streaming?.turnId).toBe(TURN_B);
+    // A is still unresolved, and B is untouched.
+    expect(
+      result.current.state.recoveries.map((entry) => entry.turnId),
+    ).toEqual([TURN]);
+
+    streamB.close();
+    await act(async () => {
+      await sentB!;
+    });
+  }, 20_000);
+
+  it("keeps both when a second turn also loses its stream", async () => {
+    const TURN_B = "eeeeeeee-0000-4000-8000-000000000002";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "running", activity: [], message: null }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("The first problem"));
+    await act(async () => {
+      await result.current.send();
+    });
+    await waitFor(
+      () =>
+        expect(result.current.state.recoveries[0]?.state).toBe("still_running"),
+      { timeout: 10_000 },
+    );
+
+    fetchMock.mockResolvedValueOnce(
+      streamingResponse([sse({ type: "turn_started", turnId: TURN_B })]),
+    );
+    act(() => result.current.setDraft("The second problem"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    await waitFor(
+      () => expect(result.current.state.recoveries).toHaveLength(2),
+      { timeout: 10_000 },
+    );
+    // The first is not silently discarded by the second.
+    expect(
+      result.current.state.recoveries.map((entry) => entry.turnId).sort(),
+    ).toEqual([TURN, TURN_B].sort());
+  }, 25_000);
+
+  it("resolving one recovery appends only its own result", async () => {
+    const TURN_B = "eeeeeeee-0000-4000-8000-000000000002";
+    const answerA = {
+      id: TURN,
+      role: "assistant",
+      content: "The first answer.",
+      blockKind: "plain",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const streamB = openStream(TURN_B);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        streamingResponse([sse({ type: "turn_started", turnId: TURN })]),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "running", activity: [], message: null }),
+      } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("The first problem"));
+    await act(async () => {
+      await result.current.send();
+    });
+    await waitFor(
+      () =>
+        expect(result.current.state.recoveries[0]?.state).toBe("still_running"),
+      { timeout: 10_000 },
+    );
+
+    fetchMock.mockResolvedValueOnce(streamB.response);
+    act(() => result.current.setDraft("The second problem"));
+    let sentB: Promise<void>;
+    act(() => {
+      sentB = result.current.send();
+    });
+    await waitFor(() => expect(result.current.state.status).toBe("streaming"));
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "completed",
+        activity: [],
+        message: answerA,
+      }),
+    } as unknown as Response);
+    await act(async () => {
+      await result.current.checkAgain(TURN);
+    });
+
+    expect(result.current.state.recoveries).toEqual([]);
+    expect(result.current.state.messages.map((m) => m.content)).toEqual([
+      "The first problem",
+      "The second problem",
+      "The first answer.",
+    ]);
+    // B is still streaming and unaffected.
+    expect(result.current.state.streaming?.turnId).toBe(TURN_B);
+
+    streamB.close();
+    await act(async () => {
+      await sentB!;
+    });
+  }, 25_000);
 });
 
 describe("adding direction", () => {

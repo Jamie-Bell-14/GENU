@@ -38,9 +38,9 @@ export interface TurnRuntime {
   stop: () => void;
   addDirection: () => Promise<void>;
   /** Looks again for a turn whose recovery has not concluded. */
-  checkAgain: () => Promise<void>;
+  checkAgain: (turnId: string) => Promise<void>;
   /** Drops an unresolved recovery the user has finished with. */
-  dismissRecovery: () => void;
+  dismissRecovery: (turnId: string) => void;
   /** A direction is in flight; the control is disabled until it resolves. */
   directionPending: boolean;
   onAction: (action: ContextualAction) => void;
@@ -57,6 +57,11 @@ const CATCH_UP_DELAY_MS = 400;
 interface CatchUpResponse {
   status: TurnStatus;
   activity?: ActivityLine[];
+  /**
+   * The activity history could not be read. It says nothing about the turn, so
+   * it never affects the outcome — only how complete the history looks.
+   */
+  activityUnavailable?: boolean;
   message?: Message | null;
 }
 
@@ -136,6 +141,7 @@ export function useTurnRuntime({
           // and the state says so rather than implying a lost result exists.
           dispatch({
             type: "recovered",
+            turnId,
             outcome: "unfinished",
             activityLog: [],
             message: null,
@@ -176,6 +182,7 @@ export function useTurnRuntime({
           if (message) {
             dispatch({
               type: "recovered",
+              turnId,
               outcome: "completed",
               activityLog,
               message,
@@ -198,6 +205,7 @@ export function useTurnRuntime({
             if (last) {
               dispatch({
                 type: "recovered",
+                turnId,
                 outcome: "still_running",
                 activityLog,
                 message: null,
@@ -210,6 +218,7 @@ export function useTurnRuntime({
           // failed, expired or unknown: the turn is over and produced nothing.
           dispatch({
             type: "recovered",
+            turnId,
             outcome: "unfinished",
             activityLog,
             message: null,
@@ -220,6 +229,7 @@ export function useTurnRuntime({
         // Every attempt failed to reach a usable answer.
         dispatch({
           type: "recovered",
+          turnId,
           outcome: "lookup_failed",
           activityLog: [],
           message: null,
@@ -235,15 +245,21 @@ export function useTurnRuntime({
    * Another look, on request, when recovery ended without a conclusion. The
    * turn may have finished in the meantime; nothing else can find that out.
    */
-  const checkAgain = useCallback(async () => {
-    const turnId = state.recovery?.turnId;
-    if (!turnId || state.recovery?.state === "checking") return;
-    dispatch({ type: "connection_lost", turnId });
-    await catchUp(turnId);
-  }, [catchUp, state.recovery?.state, state.recovery?.turnId]);
+  const checkAgain = useCallback(
+    async (turnId: string) => {
+      /*
+        Deliberately not `connection_lost`: that action belongs to the turn
+        that lost its stream and would clear whatever is streaming now. Looking
+        again at an older turn must leave the current one alone.
+      */
+      dispatch({ type: "recovery_checking", turnId });
+      await catchUp(turnId);
+    },
+    [catchUp],
+  );
 
   const dismissRecovery = useCallback(
-    () => dispatch({ type: "dismiss_recovery" }),
+    (turnId: string) => dispatch({ type: "dismiss_recovery", turnId }),
     [],
   );
 

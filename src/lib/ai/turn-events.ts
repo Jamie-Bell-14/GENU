@@ -169,6 +169,11 @@ export interface ActivityBySurface {
   canvas: ActivityLine | null;
 }
 
+export interface PendingRecovery {
+  turnId: string;
+  state: "checking" | "still_running" | "unavailable";
+}
+
 export const NO_ACTIVITY: ActivityBySurface = {
   conversation: null,
   canvas: null,
@@ -208,15 +213,19 @@ export interface TurnState {
    */
   stopped: boolean;
   /**
-   * A lost stream being recovered. `checking` is active polling; the other two
-   * are honest dead ends that offer another look rather than a conclusion —
-   * a turn the server still reports as running has *not* failed, and a lookup
-   * that could not be completed says nothing about the turn at all.
+   * Lost streams being recovered, keyed by their own turn.
+   *
+   * A list rather than a slot: an unresolved turn outlives the one that is
+   * streaming now, so a single slot would either be destroyed by the next turn
+   * or destroy it. Every action here names the turn it concerns, so checking
+   * or resolving an older turn cannot touch a newer one.
+   *
+   * `checking` is active polling; the other two are honest dead ends that
+   * offer another look rather than a conclusion — a turn the server still
+   * reports as running has *not* failed, and a lookup that could not be
+   * completed says nothing about the turn at all.
    */
-  recovery: {
-    turnId: string;
-    state: "checking" | "still_running" | "unavailable";
-  } | null;
+  recoveries: PendingRecovery[];
   status: "idle" | "sending" | "streaming";
 }
 
@@ -230,7 +239,7 @@ export const INITIAL_TURN_STATE: TurnState = {
   direction: null,
   error: null,
   stopped: false,
-  recovery: null,
+  recoveries: [],
   status: "idle",
 };
 
@@ -247,13 +256,17 @@ export type TurnAction =
   | { type: "direction_failed"; error: SafeError }
   /** The user pressed Stop. */
   | { type: "turn_stopped" }
-  /** The stream ended unintentionally; catch-up begins. */
+  /** The stream ended unintentionally; catch-up begins for that turn. */
   | { type: "connection_lost"; turnId: string | null }
+  /** Another look at an already-recorded recovery, for that turn only. */
+  | { type: "recovery_checking"; turnId: string }
   /** The user has finished with an unresolved recovery. */
-  | { type: "dismiss_recovery" }
+  | { type: "dismiss_recovery"; turnId: string }
   /** Catch-up finished: what the server actually recorded for this turn. */
   | {
       type: "recovered";
+      /** Which turn this concerns; never anything else's state. */
+      turnId: string;
       /**
        * How the turn really ended — or that it has not, or that the lookup
        * itself failed. `still_running` is not a failure and must never be
@@ -265,6 +278,17 @@ export type TurnAction =
     }
   | { type: "reset_error" }
   | { type: "hydrate"; messages: Message[]; activityLog?: ActivityLine[] };
+
+function upsertRecovery(
+  recoveries: PendingRecovery[],
+  entry: PendingRecovery,
+): PendingRecovery[] {
+  const index = recoveries.findIndex((item) => item.turnId === entry.turnId);
+  if (index === -1) return [...recoveries, entry];
+  const next = [...recoveries];
+  next[index] = entry;
+  return next;
+}
 
 const MAX_ACTIVITY_LOG = 200;
 
@@ -309,10 +333,10 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         error: null,
         stopped: false,
         /*
-          `recovery` is deliberately not cleared. An unresolved turn — one the
-          server may still be finishing — stays recoverable while the user gets
-          on with the next message; sending is not a decision to abandon it.
-          Only resolving or dismissing it clears the record.
+          `recoveries` is deliberately not cleared. An unresolved turn — one
+          the server may still be finishing — stays recoverable while the user
+          gets on with the next message; sending is not a decision to abandon
+          it. Only resolving or dismissing it clears its entry.
         */
         status: "sending",
       };
@@ -332,17 +356,40 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         status: "idle",
       };
 
-    case "connection_lost":
-      // Same discard rule: nothing partial is promoted. What the server
-      // actually recorded is fetched instead.
+    case "connection_lost": {
+      /*
+        Same discard rule: nothing partial is promoted. What the server
+        actually recorded is fetched instead. Only the turn that was streaming
+        loses its stream — a different turn's loss must not clear this one.
+      */
+      const losingActive =
+        action.turnId !== null && state.streaming?.turnId === action.turnId;
       return {
         ...state,
-        streaming: null,
-        activity: NO_ACTIVITY,
-        recovery: action.turnId
-          ? { turnId: action.turnId, state: "checking" }
-          : null,
-        status: "idle",
+        streaming: losingActive ? null : state.streaming,
+        activity: losingActive ? NO_ACTIVITY : state.activity,
+        recoveries: action.turnId
+          ? upsertRecovery(state.recoveries, {
+              turnId: action.turnId,
+              state: "checking",
+            })
+          : state.recoveries,
+        status: losingActive ? "idle" : state.status,
+      };
+    }
+
+    /*
+      Looking again at an older turn. Deliberately not `connection_lost`: that
+      would clear whatever is streaming now, so checking one turn would destroy
+      another.
+    */
+    case "recovery_checking":
+      return {
+        ...state,
+        recoveries: upsertRecovery(state.recoveries, {
+          turnId: action.turnId,
+          state: "checking",
+        }),
       };
 
     case "recovered": {
@@ -366,17 +413,19 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         still reports as running has not failed, and a lookup that could not
         be completed has established nothing — both stay in recovery, with a
         way to look again, rather than becoming a verdict.
+
+        Scoped to this turn: resolving one recovery leaves every other alone.
       */
-      const recovery =
+      const recoveries =
         action.outcome === "still_running" || action.outcome === "lookup_failed"
-          ? {
-              turnId: state.recovery?.turnId ?? "",
+          ? upsertRecovery(state.recoveries, {
+              turnId: action.turnId,
               state:
                 action.outcome === "still_running"
-                  ? ("still_running" as const)
-                  : ("unavailable" as const),
-            }
-          : null;
+                  ? "still_running"
+                  : "unavailable",
+            })
+          : state.recoveries.filter((entry) => entry.turnId !== action.turnId);
       return {
         ...state,
         activityLog: action.activityLog.reduce(
@@ -387,7 +436,7 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           action.message && !known.has(action.message.id)
             ? [...state.messages, action.message]
             : state.messages,
-        recovery,
+        recoveries,
         error,
       };
     }
@@ -411,7 +460,12 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
       return { ...state, error: action.error };
 
     case "dismiss_recovery":
-      return { ...state, recovery: null };
+      return {
+        ...state,
+        recoveries: state.recoveries.filter(
+          (entry) => entry.turnId !== action.turnId,
+        ),
+      };
 
     case "reset_error":
       return { ...state, error: null };

@@ -44,7 +44,7 @@ export function Composer({
     flight, so an enabled Send button would be a control that silently does
     nothing.
   */
-  const checking = state.recovery?.state === "checking";
+  const checking = state.recoveries.some((entry) => entry.state === "checking");
   const busy = state.status !== "idle" || checking;
   const tooLong = value.length > MAX_MESSAGE_LENGTH;
   const canSend = value.trim().length > 0 && !busy && !tooLong;

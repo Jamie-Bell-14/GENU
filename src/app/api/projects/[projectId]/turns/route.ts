@@ -11,6 +11,7 @@ import {
   recordActivity,
   recordAudit,
   takeDirections,
+  DIRECTION_CURSOR_START,
   type AuditAction,
 } from "@/lib/services/trusted-writer";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -221,7 +222,7 @@ export async function POST(
         newer than a cursor it advances itself. The table stays append-only:
         "already applied" is state of this run, not an edit to history.
       */
-      let directionCursor = new Date().toISOString();
+      let directionCursor = DIRECTION_CURSOR_START;
 
       try {
         await audit("turn_started");
@@ -265,14 +266,27 @@ export async function POST(
               wins and the endpoint refuses it. A read followed by a separate
               seal would leave a window where neither happens.
             */
-            const directions = await takeDirections({
+            const result = await takeDirections({
               projectId,
               turnId,
               after: directionCursor,
               seal: final,
             });
+            if (!result.ok) {
+              /*
+                The read failed, so the seal did not happen either. At a final
+                boundary that leaves the window open with no step left to
+                consume anything, so the turn fails rather than continuing —
+                closing it in the catch below seals the window as a side
+                effect. A non-final boundary can simply try again later; the
+                cursor has not advanced.
+              */
+              if (final) throw new Error("direction_seal_failed");
+              return null;
+            }
+            const directions = result.directions;
             if (directions.length === 0) return null;
-            directionCursor = directions[directions.length - 1].createdAt;
+            directionCursor = directions[directions.length - 1].cursor;
             const note = directions.map((entry) => entry.note).join("\n");
             emit({ type: "direction_applied", note });
             return note;

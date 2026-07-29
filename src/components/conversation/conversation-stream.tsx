@@ -43,8 +43,8 @@ export function ConversationStream({
   onDismissRecovery,
 }: Readonly<{
   state: TurnState;
-  onCheckAgain?: () => void;
-  onDismissRecovery?: () => void;
+  onCheckAgain?: (turnId: string) => void;
+  onDismissRecovery?: (turnId: string) => void;
 }>) {
   const endRef = useRef<HTMLDivElement>(null);
   const count = state.messages.length;
@@ -104,34 +104,46 @@ export function ConversationStream({
         </p>
       )}
 
-      {/* Recovery states, each saying only what is known. A turn the server
-          still reports as running has not failed, so the interface offers
-          another look rather than a verdict. */}
-      {state.recovery && (
-        <div className="flex flex-wrap items-center gap-2">
+      {/* Recovery states, each saying only what is known, and each belonging
+          to its own turn — checking one never disturbs another. A turn the
+          server still reports as running has not failed, so the interface
+          offers another look rather than a verdict. */}
+      {state.recoveries.map((recovery) => (
+        <div
+          key={recovery.turnId}
+          className="flex flex-wrap items-center gap-2"
+        >
           <p className="text-fg-tertiary text-xs">
-            {state.recovery.state === "checking"
+            {recovery.state === "checking"
               ? "The connection dropped. Checking what was recorded…"
-              : state.recovery.state === "still_running"
-                ? "The connection dropped, and this turn is still being processed. Your message is saved."
-                : "The connection dropped, and this turn could not be checked just now. Your message is saved."}
+              : recovery.state === "still_running"
+                ? "The connection dropped, and that turn is still being processed. Your message is saved."
+                : "The connection dropped, and that turn could not be checked just now. Your message is saved."}
           </p>
-          {state.recovery.state !== "checking" && (
+          {recovery.state !== "checking" && (
             <>
               {onCheckAgain && (
-                <Button variant="outline" size="xs" onClick={onCheckAgain}>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => onCheckAgain(recovery.turnId)}
+                >
                   Check again
                 </Button>
               )}
               {onDismissRecovery && (
-                <Button variant="ghost" size="xs" onClick={onDismissRecovery}>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => onDismissRecovery(recovery.turnId)}
+                >
                   Dismiss
                 </Button>
               )}
             </>
           )}
         </div>
-      )}
+      ))}
 
       {state.error && (
         <p

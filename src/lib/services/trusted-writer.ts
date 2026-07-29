@@ -146,6 +146,15 @@ export async function closeTurnRun(input: {
   return false;
 }
 
+export type DirectionOutcome =
+  | "accepted"
+  | "unknown"
+  | "finished"
+  | "expired"
+  | "closed"
+  | "too_many"
+  | "unavailable";
+
 /**
  * Accepts a direction only if the turn's steering window is still open, as one
  * locked operation. A status read followed by an insert leaves a window in
@@ -156,9 +165,7 @@ export async function acceptDirection(input: {
   turnId: string;
   note: string;
   application: DirectionApplication;
-}): Promise<
-  "accepted" | "unknown" | "finished" | "expired" | "closed" | "unavailable"
-> {
+}): Promise<DirectionOutcome> {
   const client = trustedClient();
   if (!client) {
     reportUnavailable("direction");
@@ -174,41 +181,67 @@ export async function acceptDirection(input: {
     console.error("accept_turn_direction failed", { code: error.code });
     return "unavailable";
   }
-  return data as "accepted" | "unknown" | "finished" | "expired" | "closed";
+  return data as DirectionOutcome;
 }
 
+export interface DirectionCursor {
+  createdAt: string;
+  id: string;
+}
+
+/** The cursor a turn starts from: before everything. */
+export const DIRECTION_CURSOR_START: DirectionCursor = {
+  createdAt: new Date(0).toISOString(),
+  id: "00000000-0000-0000-0000-000000000000",
+};
+
+export type TakeDirectionsResult =
+  | { ok: true; directions: { note: string; cursor: DirectionCursor }[] }
+  /** The read — and therefore the seal — did not happen. */
+  | { ok: false };
+
 /**
- * Reads directions added since `after` and, at the final boundary, seals the
- * window in the same transaction — so a direction is either inserted before
- * sealing and consumed here, or refused.
+ * Reads directions after `after` and, at the final boundary, seals the window
+ * in the same transaction — so a direction is either inserted before sealing
+ * and consumed here, or refused.
+ *
+ * The result is discriminated rather than "an empty array". At a final
+ * boundary those two are not the same thing: no rows means the window is
+ * sealed and nothing was pending, while a failure means the window may still
+ * be open and a later direction could still be accepted into a turn with no
+ * boundary left to use it.
  */
 export async function takeDirections(input: {
   projectId: string;
   turnId: string;
-  after: string;
+  after: DirectionCursor;
   seal: boolean;
-}): Promise<{ note: string; createdAt: string }[]> {
+}): Promise<TakeDirectionsResult> {
   const client = trustedClient();
   if (!client) {
     reportUnavailable("take_directions");
-    return [];
+    return { ok: false };
   }
   const { data, error } = await client.rpc("take_turn_directions", {
     p_project_id: input.projectId,
     p_turn_id: input.turnId,
-    p_after: input.after,
+    p_after_created_at: input.after.createdAt,
+    p_after_id: input.after.id,
     p_seal: input.seal,
   });
   if (error) {
     console.error("take_turn_directions failed", { code: error.code });
-    return [];
+    return { ok: false };
   }
-  return ((data ?? []) as { note: string; created_at: string }[]).map(
-    (row) => ({
+  return {
+    ok: true,
+    directions: (
+      (data ?? []) as { id: string; note: string; created_at: string }[]
+    ).map((row) => ({
       note: row.note,
-      createdAt: row.created_at,
-    }),
-  );
+      cursor: { createdAt: row.created_at, id: row.id },
+    })),
+  };
 }
 
 export type AuditAction =

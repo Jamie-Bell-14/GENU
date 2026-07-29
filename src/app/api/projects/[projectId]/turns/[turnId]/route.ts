@@ -49,21 +49,29 @@ export async function GET(
   ]);
 
   /*
-    A read that failed is reported as a failure, not as an empty result. The
-    client can then say "recovery failed" instead of telling the user their
-    turn produced nothing.
+    Only the authoritative snapshot can make this unresolved. A read that
+    failed is reported as a failure rather than as an empty result, so the
+    client can say "recovery failed" instead of telling the user their turn
+    produced nothing.
   */
-  if (snapshot.status === "lookup_failed" || activity.failed) {
+  if (snapshot.status === "lookup_failed") {
     return NextResponse.json(
       { status: "lookup_failed" },
       { status: 503, headers: { "cache-control": "no-store" } },
     );
   }
 
+  /*
+    Activity is narration. Its read failing must not withhold a result that the
+    snapshot returned successfully — that would make best-effort history a
+    precondition for recovering the user's actual answer. The failure is
+    reported alongside instead.
+  */
   return NextResponse.json(
     {
       status: snapshot.status,
       activity: activity.lines,
+      activityUnavailable: activity.failed,
       message: snapshot.message,
     },
     { headers: { "cache-control": "no-store" } },

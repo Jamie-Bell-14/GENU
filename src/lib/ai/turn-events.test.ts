@@ -303,7 +303,7 @@ describe("stopping and losing the connection", () => {
     expect(state.stopped).toBe(true);
     // Stopping is a decision, not a failure.
     expect(state.error).toBeNull();
-    expect(state.recovery).toBeNull();
+    expect(state.recoveries).toEqual([]);
   });
 
   it("discards partial text when the connection drops too", () => {
@@ -312,7 +312,7 @@ describe("stopping and losing the connection", () => {
       turnId: TURN,
     });
     expect(state.messages).toEqual([userMessage]);
-    expect(state.recovery).toEqual({ turnId: TURN, state: "checking" });
+    expect(state.recoveries).toEqual([{ turnId: TURN, state: "checking" }]);
     expect(state.status).toBe("idle");
   });
 
@@ -330,6 +330,7 @@ describe("stopping and losing the connection", () => {
     });
     state = turnReducer(state, {
       type: "recovered",
+      turnId: TURN,
       outcome: "completed",
       activityLog: [
         activityLineFor(TURN, "reading_project_model", "succeeded"),
@@ -341,12 +342,13 @@ describe("stopping and losing the connection", () => {
       userMessage.content,
       "The complete recorded answer.",
     ]);
-    expect(state.recovery).toBeNull();
+    expect(state.recoveries).toEqual([]);
     expect(state.error).toBeNull();
 
     // Catching up twice must not append the same message again.
     const again = turnReducer(state, {
       type: "recovered",
+      turnId: TURN,
       outcome: "completed",
       activityLog: [
         activityLineFor(TURN, "reading_project_model", "succeeded"),
@@ -364,6 +366,7 @@ describe("stopping and losing the connection", () => {
     });
     state = turnReducer(state, {
       type: "recovered",
+      turnId: TURN,
       outcome: "unfinished",
       activityLog: [],
       message: null,
@@ -397,6 +400,7 @@ describe("an unresolved recovery", () => {
     });
     return turnReducer(state, {
       type: "recovered",
+      turnId: TURN,
       outcome: "still_running",
       activityLog: [],
       message: null,
@@ -407,19 +411,27 @@ describe("an unresolved recovery", () => {
     // Getting on with the next message is not a decision to abandon a turn
     // the server may still be finishing.
     const before = unresolved();
-    expect(before.recovery).toEqual({ turnId: TURN, state: "still_running" });
+    expect(before.recoveries).toEqual([
+      { turnId: TURN, state: "still_running" },
+    ]);
 
     const after = send(before);
-    expect(after.recovery).toEqual({ turnId: TURN, state: "still_running" });
+    expect(after.recoveries).toEqual([
+      { turnId: TURN, state: "still_running" },
+    ]);
     expect(after.status).toBe("sending");
   });
 
   it("is cleared only when resolved or dismissed", () => {
-    const dismissed = turnReducer(unresolved(), { type: "dismiss_recovery" });
-    expect(dismissed.recovery).toBeNull();
+    const dismissed = turnReducer(unresolved(), {
+      type: "dismiss_recovery",
+      turnId: TURN,
+    });
+    expect(dismissed.recoveries).toEqual([]);
 
     const resolved = turnReducer(unresolved(), {
       type: "recovered",
+      turnId: TURN,
       outcome: "completed",
       activityLog: [],
       message: {
@@ -430,7 +442,7 @@ describe("an unresolved recovery", () => {
         createdAt: "2026-07-29T00:00:00.000Z",
       },
     });
-    expect(resolved.recovery).toBeNull();
+    expect(resolved.recoveries).toEqual([]);
     expect(resolved.messages).toHaveLength(2);
   });
 });

@@ -146,7 +146,9 @@ export async function POST(
         userMessage:
           outcome === "unavailable"
             ? "Your direction could not be recorded. Your text is unchanged — try again."
-            : "That turn is no longer taking direction, so it was not recorded. Your text is unchanged.",
+            : outcome === "too_many"
+              ? "This turn has as much direction as it can take. Your text is unchanged — send it as a new message instead."
+              : "That turn is no longer taking direction, so it was not recorded. Your text is unchanged.",
         recoverable: outcome === "unavailable",
       },
       outcome === "unavailable" ? 503 : 409,

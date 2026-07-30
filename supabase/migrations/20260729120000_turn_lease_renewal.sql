@@ -33,6 +33,17 @@ returns integer language sql immutable set search_path = '' as $$ select 900 $$;
 
   The extension is capped so a caller cannot lease a run indefinitely in one
   call — the bound has to survive a bad argument, not just a well-behaved one.
+
+  The third condition has to be checked against `clock_timestamp()`, not
+  `now()`. `now()` is `transaction_timestamp()` — fixed once at the start of the
+  transaction and unchanged by anything that happens afterwards, including
+  time spent blocked on the `for update` lock above. A caller whose transaction
+  began a moment before the lease expired, then waited on that lock until after
+  it did, would still carry a pre-expiry `now()` and could renew — or, in
+  `complete_turn` below, complete — a lease that had already lapsed by the time
+  it actually acquired the row. `clock_timestamp()` is captured once the lock is
+  held, so the comparison is against the moment this call actually got to act,
+  not the moment it started waiting.
 */
 create or replace function public.renew_turn_lease(
   p_turn_id uuid,
@@ -46,6 +57,7 @@ as $$
 declare
   run public.turn_runs%rowtype;
   extension integer;
+  checked_at timestamptz;
 begin
   extension := least(
     greatest(coalesce(p_seconds, 0), 1),
@@ -57,6 +69,10 @@ begin
   where turn_id = p_turn_id
   for update;
 
+  -- Captured only now: after the lock is held, so a wait crossing the expiry
+  -- boundary is reflected rather than masked by a stale transaction start time.
+  checked_at := clock_timestamp();
+
   if not found then
     return 'unknown';
   end if;
@@ -65,22 +81,22 @@ begin
     return 'finished';
   end if;
 
-  if now() >= run.lease_expires_at then
+  if checked_at >= run.lease_expires_at then
     return 'expired';
   end if;
 
   /*
-    Extend, never replace. `now() + extension` alone is a *reduction* whenever
-    the requested TTL is shorter than what the lease already has: a 60-second
-    heartbeat against a fresh 15-minute lease would cut it to 60 seconds, so
-    the mechanism meant to keep long turns alive would be the thing killing
-    them. `greatest` makes renewal monotonic — a lease can only ever move
-    later, so no renewal, however small, can bring a run's death forward.
+    Extend, never replace. `checked_at + extension` alone is a *reduction*
+    whenever the requested TTL is shorter than what the lease already has: a
+    60-second heartbeat against a fresh 15-minute lease would cut it to 60
+    seconds, so the mechanism meant to keep long turns alive would be the thing
+    killing them. `greatest` makes renewal monotonic — a lease can only ever
+    move later, so no renewal, however small, can bring a run's death forward.
   */
   update public.turn_runs
   set lease_expires_at = greatest(
     run.lease_expires_at,
-    now() + make_interval(secs => extension)
+    checked_at + make_interval(secs => extension)
   )
   where turn_id = p_turn_id;
 

@@ -128,6 +128,7 @@ as $$
 declare
   live_runs integer;
   violated text;
+  checked_at timestamptz;
 begin
   perform private.assert_project_actor(p_project_id, p_actor_id);
 
@@ -151,13 +152,23 @@ begin
   where project_id = p_project_id and state = 'running'
   for update;
 
+  /*
+    Captured only now, after both locks above are held. `now()` is fixed at
+    this transaction's start and would not reflect time spent waiting on
+    either lock, so comparing it against `lease_expires_at` could judge a
+    lease by how old it was when this call *began* rather than how old it is
+    now that the call can actually act on it — the same reasoning as
+    `complete_turn` and `renew_turn_lease` below.
+  */
+  checked_at := clock_timestamp();
+
   update public.turn_runs
   set state = 'failed',
       accepting_direction = false,
-      ended_at = now()
+      ended_at = checked_at
   where project_id = p_project_id
     and state = 'running'
-    and now() >= lease_expires_at;
+    and checked_at >= lease_expires_at;
 
   select count(*) into live_runs
   from public.turn_runs
@@ -260,6 +271,8 @@ declare
   slot text;
   written jsonb := '{}'::jsonb;
   refused jsonb := '{}'::jsonb;
+  run record;
+  checked_at timestamptz;
 begin
   perform private.assert_project_actor(p_project_id, p_actor_id);
 
@@ -274,16 +287,27 @@ begin
     that the write depends on, is what stops a late finish from overwriting a
     verdict the person has seen — a check made after the lock is released
     would leave exactly the race this exists to close.
+
+    The expiry comparison has to use `clock_timestamp()`, captured *after* the
+    lock is acquired, not `now()`. `now()` is fixed at the start of this
+    transaction and does not advance while it waits on the `for update` below —
+    so a caller whose transaction began a moment before the lease expired, then
+    blocked on this exact lock until after it did, would still carry a
+    pre-expiry `now()` and could complete a lease that had already lapsed by
+    the time it actually got the row. Filtering by expiry in the locking query
+    itself has the same flaw for the same reason, so the lock is taken first,
+    unfiltered by time, and the comparison is made afterwards against the
+    moment this call actually got to act.
   */
-  perform 1
+  select state, lease_expires_at into run
   from public.turn_runs
-  where turn_id = p_turn_id
-    and project_id = p_project_id
-    and state = 'running'
-    and now() < lease_expires_at
+  where turn_id = p_turn_id and project_id = p_project_id
   for update;
 
-  if not found then
+  checked_at := clock_timestamp();
+
+  if not found or run.state <> 'running' or checked_at >= run.lease_expires_at
+  then
     return jsonb_build_object('outcome', 'not_running');
   end if;
 

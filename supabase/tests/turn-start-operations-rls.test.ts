@@ -741,3 +741,138 @@ describe.skipIf(skip)("complete_turn", () => {
     ).rejects.toThrow(/permission denied/);
   });
 });
+
+/*
+  The wall-clock boundary, not the transaction-start snapshot.
+
+  `now()` in PostgreSQL is `transaction_timestamp()` — fixed once when a
+  transaction begins and unchanged by anything that happens inside it,
+  including time spent blocked on the very `for update` lock these functions
+  take to make their checks safe. A caller whose transaction began a moment
+  before a lease expired, then waited on that lock until after it did, would
+  still carry a pre-expiry `now()` when it finally got to check — and could
+  renew, accept a direction into, or complete a lease that had, by actual
+  wall-clock time, already lapsed.
+
+  Each test below forces exactly that ordering: a lock is taken and held on
+  another connection, the lease is given just long enough to expire while the
+  lock is held, and only then is the lock released — so whichever function is
+  under test genuinely started before expiry and only got to act after it.
+*/
+describe("expiry is checked against the moment of acting, not the moment of starting", () => {
+  /** A lease short enough to expire well within the time a held lock buys. */
+  const SHORT_LEASE_MS = 700;
+  /** Comfortably longer than the lease, so expiry happens while blocked. */
+  const HOLD_MS = SHORT_LEASE_MS + 600;
+
+  async function openTurnWithShortLease() {
+    const turnId = await openTurn();
+    await asOwner();
+    await db.query(
+      `update public.turn_runs
+          set lease_expires_at = clock_timestamp() + ($2 || ' milliseconds')::interval
+        where turn_id = $1`,
+      [turnId, SHORT_LEASE_MS],
+    );
+    return turnId;
+  }
+
+  /**
+   * Holds a row lock on `turnId` for `HOLD_MS`, across which the caller
+   * dispatches (but does not await) `blocked` — proving it was genuinely
+   * waiting on this lock, not merely running after the fact.
+   */
+  async function raceLockAcrossExpiry<T>(
+    turnId: string,
+    blocked: () => Promise<T>,
+  ): Promise<T> {
+    await asTrustedWriter(other);
+    await other.query("begin");
+    await other.query(
+      "select 1 from public.turn_runs where turn_id = $1 for update",
+      [turnId],
+    );
+
+    const pending = blocked();
+    await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
+    await other.query("commit");
+    return pending;
+  }
+
+  it("refuses to complete a lease that lapsed while the call was blocked", async () => {
+    const turnId = await openTurnWithShortLease();
+    const result = await raceLockAcrossExpiry(turnId, () =>
+      completeTurn(turnId, { fields: [field()], assumptions: [assumption()] }),
+    );
+
+    expect(result.outcome).toBe("not_running");
+    expect(await countRows("project_fields")).toBe(0);
+    expect(await countRows("assumptions")).toBe(0);
+    expect(
+      await countRows(
+        "messages",
+        "turn_id = $1 and role = 'assistant'",
+        turnId,
+      ),
+    ).toBe(0);
+  });
+
+  it("refuses to renew a lease that lapsed while the call was blocked", async () => {
+    const turnId = await openTurnWithShortLease();
+    await asOwner();
+    const before = (
+      await db.query(
+        "select lease_expires_at from public.turn_runs where turn_id = $1",
+        [turnId],
+      )
+    ).rows[0].lease_expires_at as Date;
+
+    await asTrustedWriter();
+    const renewal = await raceLockAcrossExpiry(turnId, () =>
+      db.query("select public.renew_turn_lease($1, 900) as outcome", [turnId]),
+    );
+
+    expect(renewal.rows[0].outcome).toBe("expired");
+    await asOwner();
+    const after = (
+      await db.query(
+        "select lease_expires_at from public.turn_runs where turn_id = $1",
+        [turnId],
+      )
+    ).rows[0].lease_expires_at as Date;
+    // Not extended: an expired lease stays exactly as expired as it was.
+    expect(after.getTime()).toBe(before.getTime());
+  });
+
+  it("refuses a direction accepted into a window whose lease lapsed while blocked", async () => {
+    const turnId = await openTurnWithShortLease();
+    await asTrustedWriter();
+    const accepted = await raceLockAcrossExpiry(turnId, () =>
+      db.query(
+        "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
+        [projectA, turnId, "Too late — the lease already lapsed."],
+      ),
+    );
+
+    expect(accepted.rows[0].outcome).toBe("expired");
+    expect(await countRows("turn_directions", "turn_id = $1", turnId)).toBe(0);
+  });
+
+  it("reconciles the expired predecessor rather than treating it as live", async () => {
+    const dead = await openTurnWithShortLease();
+    const fresh = nextTurnId();
+    const outcome = await raceLockAcrossExpiry(dead, () => startTurn(fresh));
+
+    expect(outcome).toBe("started");
+    await asOwner();
+    const rows = await db.query(
+      "select turn_id, state from public.turn_runs where turn_id = any($1)",
+      [[dead, fresh]],
+    );
+    const byId = Object.fromEntries(
+      rows.rows.map((row) => [row.turn_id, row.state]),
+    );
+    expect(byId[dead]).toBe("failed");
+    expect(byId[fresh]).toBe("running");
+  });
+});

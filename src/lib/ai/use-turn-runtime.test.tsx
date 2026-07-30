@@ -1054,3 +1054,84 @@ describe("adding direction", () => {
     );
   });
 });
+
+describe("a refused send", () => {
+  /*
+    The duplicate-message defect, from the client's end. The server used to save
+    the message before deciding whether the turn could start, so a refusal left
+    it stored; the client restored the draft as well, and the retry wrote a second
+    copy. The server now writes nothing unless the turn opens, so the client must
+    withdraw the message it optimistically showed.
+  */
+  it("leaves the text in the composer and nothing in the stream", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      headers: { get: () => null },
+      json: async () => ({
+        error: {
+          code: "engine_unavailable",
+          userMessage:
+            "This project already has a response in progress — probably in another tab. Wait for it to finish, then send again; your text is unchanged.",
+          recoverable: true,
+        },
+      }),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    // Exactly one copy of what the user typed, and it is the editable one.
+    expect(result.current.state.messages).toEqual([]);
+    expect(result.current.draft).toBe("A problem worth exploring");
+    expect(result.current.state.error?.recoverable).toBe(true);
+    expect(result.current.state.status).toBe("idle");
+    // Nothing to recover: no turn was ever started.
+    expect(result.current.state.recoveries).toEqual([]);
+  });
+
+  it("re-sends exactly one message when the user tries again", async () => {
+    const refusal = {
+      ok: false,
+      status: 409,
+      headers: { get: () => null },
+      json: async () => ({
+        error: {
+          code: "engine_unavailable",
+          userMessage: "Already running.",
+          recoverable: true,
+        },
+      }),
+    } as unknown as Response;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(refusal)
+      .mockResolvedValueOnce(
+        streamingResponse([
+          sse({ type: "turn_started", turnId: TURN }),
+          sse({ type: "assistant_delta", text: "The answer." }),
+          sse({ type: "done" }),
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("A problem worth exploring"));
+    await act(async () => {
+      await result.current.send();
+    });
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(
+      result.current.state.messages.filter(
+        (message) => message.content === "A problem worth exploring",
+      ),
+    ).toHaveLength(1);
+  });
+});

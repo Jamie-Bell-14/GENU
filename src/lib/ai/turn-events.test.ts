@@ -26,6 +26,19 @@ function send(state: TurnState = INITIAL_TURN_STATE): TurnState {
   });
 }
 
+function scene(): CanvasScene {
+  return {
+    renderer: "problem_exploration",
+    purpose: "explore_problem",
+    focalObjectId: "aaaaaaaa-0000-4000-8000-000000000001",
+    visibleObjectIds: ["aaaaaaaa-0000-4000-8000-000000000001"],
+    visibleRelationshipIds: [],
+    emphasis: "none",
+    reason: "Showing the problem in focus.",
+    transition: "replace",
+  };
+}
+
 function streamStarted(state: TurnState): TurnState {
   return turnReducer(state, {
     type: "event",
@@ -131,6 +144,62 @@ describe("turnReducer", () => {
     expect(state.streaming).toBeNull();
     expect(state.status).toBe("idle");
     expect(state.error?.code).toBe("engine_unavailable");
+  });
+
+  it("takes back the buttons and the proposed view when a turn fails", () => {
+    /*
+      Actions and scene recommendations are emitted as the turn goes, so a turn
+      that then fails would otherwise leave next-step buttons and a proposed
+      canvas view belonging to work the user never received.
+    */
+    let state = streamStarted(send());
+    state = turnReducer(state, {
+      type: "event",
+      event: {
+        type: "actions",
+        actions: [{ id: "a1", label: "Challenge this" }],
+      },
+    });
+    state = turnReducer(state, {
+      type: "event",
+      event: { type: "scene_recommended", scene: scene() },
+    });
+    expect(state.actions).toHaveLength(1);
+    expect(state.recommendedScene).not.toBeNull();
+
+    state = turnReducer(state, {
+      type: "event",
+      event: {
+        type: "turn_failed",
+        error: {
+          code: "engine_unavailable",
+          userMessage: "The response could not be completed.",
+          recoverable: true,
+        },
+      },
+    });
+    expect(state.actions).toEqual([]);
+    expect(state.recommendedScene).toBeNull();
+  });
+
+  it("withdraws the message when the server refused to start the turn", () => {
+    /*
+      A refused send stored nothing. Leaving the message in the stream while the
+      composer also holds the text again showed the same sentence twice — and the
+      retry then wrote a second copy of a message the server had already saved.
+    */
+    const refused = turnReducer(send(), {
+      type: "send_refused",
+      messageId: userMessage.id,
+      error: {
+        code: "engine_unavailable",
+        userMessage: "This project already has a response in progress.",
+        recoverable: true,
+      },
+    });
+    expect(refused.messages).toEqual([]);
+    expect(refused.status).toBe("idle");
+    expect(refused.error?.recoverable).toBe(true);
   });
 
   it("ignores stray events that arrive outside a turn", () => {

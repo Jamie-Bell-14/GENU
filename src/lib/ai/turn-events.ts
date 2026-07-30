@@ -291,6 +291,16 @@ export const INITIAL_TURN_STATE: TurnState = {
 
 export type TurnAction =
   | { type: "user_message_sent"; message: Message }
+  /**
+   * The server refused the send and saved nothing, so the optimistic message is
+   * withdrawn.
+   *
+   * Distinct from `turn_failed`, which describes a turn that really started: a
+   * refusal leaves the text in the composer for a retry, and a message that
+   * stayed in the stream as well would be the same sentence twice — then twice
+   * again in the database once the retry succeeded.
+   */
+  | { type: "send_refused"; messageId: string; error: SafeError }
   | { type: "event"; event: TurnEvent }
   /** The direction endpoint accepted the note and stated what it will do. */
   | {
@@ -387,6 +397,18 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           it. Only resolving or dismissing it clears its entry.
         */
         status: "sending",
+      };
+
+    case "send_refused":
+      return {
+        ...state,
+        messages: state.messages.filter(
+          (message) => message.id !== action.messageId,
+        ),
+        error: action.error,
+        streaming: null,
+        activity: NO_ACTIVITY,
+        status: "idle",
       };
 
     /*
@@ -611,6 +633,14 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             // truncated answer; the user's own message stays in the stream.
             streaming: null,
             activity: NO_ACTIVITY,
+            /*
+              Actions and scene recommendations are emitted as the turn goes, so
+              a turn that then fails would otherwise leave buttons and a
+              proposed view belonging to work that was abandoned — offering the
+              user next steps for an answer they never received.
+            */
+            actions: [],
+            recommendedScene: null,
             status: "idle",
           };
 

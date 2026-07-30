@@ -333,16 +333,20 @@ export function useTurnRuntime({
 
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => null);
+        /*
+          A refused send stored nothing, so the optimistic message is withdrawn
+          rather than left in the stream. Keeping it there while also restoring
+          the draft showed the same sentence twice, and the retry then wrote a
+          second copy of a message the server had already saved.
+        */
         dispatch({
-          type: "event",
-          event: {
-            type: "turn_failed",
-            error: payload?.error ?? {
-              code: "engine_unavailable",
-              userMessage:
-                "The message could not be sent. Your text is restored below — try again.",
-              recoverable: true,
-            },
+          type: "send_refused",
+          messageId,
+          error: payload?.error ?? {
+            code: "engine_unavailable",
+            userMessage:
+              "The message could not be sent. Your text is restored below — try again.",
+            recoverable: true,
           },
         });
         // Failure preserves the user's input for a retry.

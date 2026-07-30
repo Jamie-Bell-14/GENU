@@ -14,7 +14,7 @@ import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { commitModelOperations } from "@/lib/services/model-operations";
 import {
   closeTurnRun,
-  openTurnRun,
+  startTurn,
   recordActivity,
   recordAudit,
   renewTurnLease,
@@ -156,54 +156,42 @@ export async function POST(
   }
 
   const turnId = crypto.randomUUID();
-  const { error: insertError } = await supabase.from("messages").insert({
-    project_id: projectId,
-    turn_id: turnId,
-    role: "user",
-    content: parsed.data.message,
-  });
-  if (insertError) {
-    return errorResponse(
-      {
-        code: "engine_unavailable",
-        userMessage:
-          "Your message could not be saved, so nothing was sent. Your text is unchanged — try again.",
-        recoverable: true,
-      },
-      503,
-    );
-  }
 
   /*
-    Operational state before the stream opens. Steering and recovery both read
-    it, so a turn that cannot record that it is running must not open a stream
-    and offer controls that cannot work — it fails here, where a plain error
-    response is still possible.
+    The message and the turn's operational record are written together, before
+    the stream opens. Together, because a message saved for a turn that was then
+    refused is an orphan the client re-sends as a duplicate; before, because
+    steering and recovery both read the run, so a turn that cannot record that
+    it is running must not open a stream and offer controls that cannot work —
+    it fails here, where a plain error response is still possible.
   */
-  const opened = await openTurnRun({ projectId, turnId });
-  if (opened === "already_running") {
+  const started = await startTurn({
+    projectId,
+    turnId,
+    content: parsed.data.message,
+  });
+  if (started === "already_running") {
     /*
-      One turn per project at a time (T9 edge case). The user's message is
-      already saved, so nothing they typed is lost — it will be there when the
-      running turn finishes, which is why this says so rather than asking them
-      to retype anything.
+      One turn per project at a time (T9 edge case). Nothing was saved, so the
+      client keeps the draft and this says to send it again — the earlier
+      version claimed the message was saved, which was true then and is not now.
     */
     return errorResponse(
       {
         code: "engine_unavailable",
         userMessage:
-          "This project already has a response in progress — probably in another tab. Your message is saved; wait for that turn to finish, then send again.",
+          "This project already has a response in progress — probably in another tab. Wait for it to finish, then send again; your text is unchanged.",
         recoverable: true,
       },
       409,
     );
   }
-  if (opened !== "opened") {
+  if (started !== "started") {
     return errorResponse(
       {
         code: "engine_unavailable",
         userMessage:
-          "The workspace could not start this turn. Your message is saved — try again.",
+          "The workspace could not start this turn. Nothing was sent — your text is unchanged, so try again.",
         recoverable: true,
       },
       503,
@@ -342,58 +330,6 @@ export async function POST(
           onSceneRejected: (rejection) =>
             audit("scene_rejected", { detail: { code: rejection.code } }),
           /*
-            Where the operations a successful turn produced are authorised and
-            disposed of — once, at the end, as one unit. Every outcome is
-            audited including refusal, which is exactly the kind of event that
-            matters after the fact, and none of it travels back to the engine.
-
-            Because this only runs for a turn that reached a result, an audit
-            row here describes something that actually happened rather than an
-            operation later abandoned with a failing turn.
-          */
-          commitOperations: async (operations) => {
-            const { outcomes } = await commitModelOperations(
-              supabase,
-              { projectId, userMessage: parsed.data.message },
-              operations,
-            );
-            let applied = 0;
-            for (const outcome of outcomes) {
-              if (outcome.applied) {
-                applied += 1;
-                await audit("operation_applied", {
-                  target: outcome.kind,
-                  detail: { count: outcome.count },
-                });
-                continue;
-              }
-              await audit("operation_rejected", {
-                target: outcome.kind,
-                detail:
-                  outcome.reason === "rejected"
-                    ? { reason: outcome.reason, issue: outcome.issue }
-                    : { reason: outcome.reason },
-              });
-            }
-
-            /*
-              Something changed, so the canvas is told what the project now
-              holds — re-read from the application's own tables, never from
-              anything the model described.
-            */
-            if (applied > 0) {
-              const [objects, relationships] = await Promise.all([
-                loadCanvasObjects(supabase, projectId),
-                loadProjectRelationships(supabase, projectId),
-              ]);
-              emit({
-                type: "project_model_updated",
-                objects: objects.data,
-                relationships: relationships.data,
-              });
-            }
-          },
-          /*
             Emitted only once the model has actually been given the direction.
             Announcing it when the note merely existed was the defect: the
             interface said "applied" for a direction no request ever carried.
@@ -473,8 +409,10 @@ export async function POST(
           heartbeat.stop();
         }
         /*
-          The host — not the engine — decides the turn is over, and only after
-          the result is stored and the outcome recorded (see finish-turn.ts).
+          The host — not the engine — decides the turn is over, and everything
+          the turn changes happens here in one ordered sequence: answer stored,
+          project truth applied as one unit, outcome recorded, canvas told
+          (see finish-turn.ts).
 
           The assistant row is keyed by the turn id, so the message the client
           rendered live and the message catch-up returns are the same message.
@@ -490,6 +428,63 @@ export async function POST(
                 content: text,
               });
               return !error;
+            },
+            /*
+              Where the operations a successful turn produced are authorised and
+              disposed of — once, as one transaction. Every outcome is audited
+              including refusal, which is exactly the kind of event that matters
+              after the fact, and none of it travels back to the engine.
+
+              Because this only runs for a turn that stored an answer, an audit
+              row here describes something that actually happened rather than an
+              operation later abandoned with a failing turn.
+            */
+            applyOperations: async () => {
+              if (result.operations.length === 0) return false;
+              const { outcomes, changed } = await commitModelOperations(
+                supabase,
+                {
+                  projectId,
+                  turnId,
+                  // The message as the server received it, so provenance is
+                  // checked against text the provider cannot have rewritten.
+                  userMessage: parsed.data.message,
+                },
+                result.operations,
+              );
+              for (const outcome of outcomes) {
+                if (outcome.applied) {
+                  await audit("operation_applied", {
+                    target: outcome.kind,
+                    detail: { count: outcome.count },
+                  });
+                  continue;
+                }
+                await audit("operation_rejected", {
+                  target: outcome.kind,
+                  detail:
+                    outcome.reason === "rejected"
+                      ? { reason: outcome.reason, issue: outcome.issue }
+                      : { reason: outcome.reason },
+                });
+              }
+              return changed;
+            },
+            /*
+              What the canvas is told the project now holds — re-read from the
+              application's own tables after the write landed, never from
+              anything the model described.
+            */
+            publishProjectModel: async () => {
+              const [objects, relationships] = await Promise.all([
+                loadCanvasObjects(supabase, projectId),
+                loadProjectRelationships(supabase, projectId),
+              ]);
+              emit({
+                type: "project_model_updated",
+                objects: objects.data,
+                relationships: relationships.data,
+              });
             },
             closeRun: (state) => closeTurnRun({ turnId, state }),
             audit: (action, detail) => audit(action, { detail }),

@@ -1,13 +1,19 @@
 import type { TurnEvent } from "./turn-events";
 
 /**
- * Ending a turn.
+ * Ending a turn — the application's one durable boundary.
  *
- * The host owns this, not the engine, and the order matters: the result is
- * stored, the turn's operational outcome is recorded, and only then is the
- * interface told the turn is done. Doing it the other way round can leave an
- * answer on screen that a reload destroys — the user saw a completed response,
- * the message was never persisted, and the record says it completed.
+ * The host owns this, not the engine, and the order matters. Everything a
+ * successful turn changes moves here, in one sequence: the answer is stored,
+ * the project-truth operations are applied, the turn's outcome is recorded, and
+ * only then is the interface told what changed and that the turn is done.
+ *
+ * The order is the point. An engine that committed project truth as it went
+ * changed the project for a turn that could still fail seconds later, and the
+ * canvas was told about it first — so a user could watch the project change and
+ * then be told the turn did not finish. Doing it the other way round can also
+ * leave an answer on screen that a reload destroys: the user saw a completed
+ * response, the message was never persisted, and the record says it completed.
  *
  * It lives apart from the route so the rule can be tested directly rather than
  * inferred from a streaming integration test.
@@ -15,6 +21,23 @@ import type { TurnEvent } from "./turn-events";
 export interface FinishTurnPorts {
   /** Stores the assistant result. Returns false when it was not stored. */
   persistResult(text: string): Promise<boolean>;
+  /**
+   * Applies the turn's project-truth operations as one unit, returning whether
+   * the project actually changed.
+   *
+   * Called only for a turn that produced and stored an answer: an abandoned
+   * turn must leave no trace in the project model. Individual operations may
+   * still be refused — that is recorded per operation and does not fail the
+   * turn, because a refused write is not a broken answer.
+   */
+  applyOperations(): Promise<boolean>;
+  /**
+   * Re-reads project truth and tells the canvas. Separate from
+   * `applyOperations` so the emission cannot precede the commit: what the
+   * canvas shows comes from the application's own tables after the write
+   * landed, never from what the model said it would do.
+   */
+  publishProjectModel(): Promise<void>;
   /** Records the turn's outcome exactly once. Returns false if it did not. */
   closeRun(state: "completed" | "failed"): Promise<boolean>;
   audit(
@@ -57,7 +80,24 @@ export async function finishTurn(
     );
   }
 
-  if (!(await ports.closeRun("completed"))) {
+  /*
+    The answer is stored, so this turn has a result worth keeping and its
+    operations may be applied. All of them, or none — `applyOperations` is one
+    transaction, so there is no half-changed project to reconcile here.
+  */
+  const changed = await ports.applyOperations();
+
+  const closed = await ports.closeRun("completed");
+
+  /*
+    Published after the commit and after the close attempt, and only if the
+    project really changed. Note it is published even when the close failed:
+    the write is committed and durable, so the canvas showing it is accurate —
+    what is uncertain is the turn's bookkeeping, which the failure below says.
+  */
+  if (changed) await ports.publishProjectModel();
+
+  if (!closed) {
     /*
       The result is stored but the turn's state is not, so steering and
       recovery would keep treating it as live until the lease expires. Saying

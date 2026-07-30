@@ -61,16 +61,47 @@ The application must validate and authorise every model-proposed operation indep
 For each user turn:
 
 1. validate project ownership
-2. validate and persist the user message
+2. validate the user message, then persist it and open the turn's operational
+   record in one transaction
 3. assemble the minimum necessary project snapshot and recent context
 4. invoke the discovery engine
 5. stream assistant text and application-owned activity events
-6. validate every structured tool proposal
-7. apply only permitted low-risk operations
-8. persist the assistant result and user-facing rationale
-9. emit a completion or safe failure event
+6. validate every structured tool proposal and stage the permitted ones
+7. persist the assistant result and user-facing rationale
+8. apply the staged low-risk operations, all or none
+9. record the turn's terminal outcome
+10. tell the canvas what the project now holds, re-read from the database
+11. emit a completion or safe failure event
 
 A failed turn must not corrupt project state or lose the user's message.
+
+### 4.1 One durable boundary
+
+Steps 7–11 are the application's single durable boundary and run in that order,
+outside the engine.
+
+The order carries the guarantee. An engine that applied operations as it
+produced them changed project truth for a turn that could still fail seconds
+later, and the canvas was told first — so a user could watch the project change
+and then be told the turn did not finish. Staging the operations and applying
+them after the answer is stored means a turn that produces no keepable answer
+leaves no trace in the project model.
+
+Two of these steps are transactional because their guarantees are otherwise
+unenforceable:
+
+- **Opening a turn** (step 2) writes the message and the run together, and
+  reconciles a run whose lease has lapsed. Saving the message first left an
+  orphan behind every refused start, which the client re-sent as a duplicate; and
+  a dead worker's `running` row otherwise held the project's only turn slot
+  indefinitely.
+- **Applying operations** (step 8) writes every accepted field and assumption in
+  one transaction, under each row's own lock. A loop in application code cannot
+  promise all-or-none, and a check followed by a write cannot promise the checked
+  state still holds when a concurrent user edit lands in between.
+
+Individual operations may still be refused inside step 8; a refused write is
+recorded per operation and does not fail the turn.
 
 ## 5. Structured project-model operations
 
@@ -227,6 +258,18 @@ Scene state has no write path to project fields, assumptions, evidence, decision
 ## 10. Prompt-injection and tool safety
 
 Treat user messages, research content and imported project content as untrusted data.
+
+This includes the project's own stored content: field values, object labels and
+earlier messages are all things a person typed and can edit, so a project's
+history is a place to leave an instruction for a later turn. Everything of that
+kind is sent inside an explicitly named data region, and characters that could
+close one are rewritten rather than rejected — a person is entitled to type angle
+brackets into their own project.
+
+A claim that the user stated something is derived by the application, never
+accepted from the model: the stored words must themselves be a verified quotation
+from the message being answered. A genuine phrase attached to an invented value is
+an inference, and is recorded as one.
 
 The system must test attempts to:
 

@@ -12,31 +12,25 @@ import {
  * Where a model-proposed operation is authorised and disposed of
  * (docs/AI_SYSTEM.md §5, §6, §10).
  *
- * The engine derives operations; this module decides what happens to them. Four
- * things make that a real boundary rather than a naming convention:
+ * The engine derives operations; this module decides what happens to them.
  *
  * - Every candidate is re-parsed here. The engine already checked the shape to
  *   decide whether to retry, but that check is on the other side of the seam
- *   and cannot be relied on for safety. This parse is the one that gates a
- *   write.
- * - Writes go through the **user-scoped** client, not the trusted writer. RLS
- *   therefore evaluates every row against the signed-in owner, so a proposal
- *   naming another project's row fails at the database even if every check
- *   above it were wrong.
- * - **Provenance is derived, never accepted.** The model cannot say a field is
- *   `user_stated`; it can only offer an excerpt it claims came from the message,
- *   which is verified against the message the server actually received. An
- *   unverifiable excerpt does not fail the operation — it just means the field
- *   is recorded as inference, which is what it is.
- * - **User-owned meaning is protected.** An automatic AI update may create a
- *   row or revise one the AI already owns. Changing the value of a field the
- *   person stated themselves is a consequential change and is refused here; it
- *   needs the approval path, not a turn.
+ *   and cannot be relied on for safety.
+ * - **The accepted set is applied in one database transaction**, through
+ *   `apply_turn_operations`. Looping and writing one at a time is not what
+ *   "one unit" means: field A could land and assumption B fail, leaving the
+ *   project half-changed by a turn reported as failed.
+ * - **Provenance is derived, never accepted, and it must be about the stored
+ *   words.** See `verifiedQuotation` — it is not enough for a turn to attach
+ *   *some* genuine phrase from the message to an invented value.
+ * - **User-owned rows are protected under their own lock**, inside the same
+ *   transaction, so a concurrent edit cannot race a pre-read.
  *
- * Applying is split by risk, exactly as §6 requires. Field and assumption
- * writes are low-risk, reversible, origin-labelled additions that canonical
- * documents call for during a turn (VERTICAL_SLICE_SPEC Steps 2–3). Connected
- * changes and checkpoints are consequential and are *not* applied here at all.
+ * Applying is split by risk, as §6 requires. Field and assumption writes are
+ * low-risk, reversible, origin-labelled additions that canonical documents call
+ * for during a turn (VERTICAL_SLICE_SPEC Steps 2–3). Connected changes and
+ * checkpoints are consequential and are not applied here at all.
  */
 
 export type OperationOutcome =
@@ -51,29 +45,90 @@ export type OperationOutcome =
       issue: string;
     };
 
-/** What the turn produced, and what became of each part of it. */
 export interface CommitResult {
+  /** One outcome per staged operation, in the order they were staged. */
   outcomes: OperationOutcome[];
+  /** True when project truth changed, so the canvas needs re-reading. */
+  changed: boolean;
 }
 
 export interface OperationContext {
   projectId: string;
+  turnId: string;
   /**
    * The message this turn is answering, exactly as the server received it.
    *
-   * Provenance is checked against this rather than against anything the model
-   * echoed back, which is the only version of the text that cannot have been
-   * rewritten in transit through the provider.
+   * Provenance is checked against this rather than anything the model echoed
+   * back — the only version of the text that cannot have been rewritten in
+   * transit through the provider.
    */
   userMessage: string;
 }
 
+function normalise(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 /**
- * Applies everything a successful turn staged.
+ * Decides whether stored content is genuinely the person's own words.
  *
- * Sequential rather than parallel, so an earlier refusal is visible in the
- * record before a later write happens, and every outcome is returned for the
- * caller to audit — including the refusals, which are the ones worth having.
+ * The earlier version checked only that the excerpt appeared *somewhere* in the
+ * message, which let a turn attach a real phrase to an invented value and have
+ * the whole invented record marked `user_stated`. A quotation next to a claim is
+ * not evidence for the claim.
+ *
+ * So two things must hold: the excerpt must really be in the message, **and**
+ * the content being stored must be that excerpt — the same words, allowing only
+ * for whitespace, case and trailing punctuation. Anything looser is an
+ * interpretation, and an interpretation is `ai_inferred` however well sourced.
+ *
+ * Returns the verified excerpt, so the caller persists exactly what was checked
+ * rather than whatever was submitted.
+ */
+export function verifiedQuotation(
+  content: string,
+  excerpt: string | undefined,
+  userMessage: string,
+): string | null {
+  if (!excerpt) return null;
+  const needle = normalise(excerpt);
+  if (needle.length < 8) return null;
+  if (!normalise(userMessage).includes(needle)) return null;
+
+  // The stored words must be the quotation, not merely accompanied by it.
+  const stored = normalise(content).replace(/[.,;:!?]+$/, "");
+  if (stored !== needle.replace(/[.,;:!?]+$/, "")) return null;
+
+  return excerpt.trim();
+}
+
+interface FieldRow {
+  area: string;
+  key: string;
+  label: string;
+  value: string;
+  origin: "user_stated" | "ai_inferred";
+  support: string;
+  source_excerpt: string | null;
+}
+
+interface AssumptionRow {
+  statement: string;
+  why_it_matters: string;
+  alternatives: string[];
+  importance: string;
+  origin: "user_stated" | "ai_inferred";
+  source_excerpt: string | null;
+}
+
+/**
+ * Validates every staged operation, then applies the accepted project-truth
+ * writes in one transaction.
+ *
+ * Validation refuses individually — a malformed checkpoint should not stop a
+ * valid field write — but the *writes* are all-or-none: if the transaction
+ * raises, no field and no assumption is written, and every write outcome is
+ * reported as refused rather than left ambiguous.
  */
 export async function commitModelOperations(
   supabase: SupabaseClient,
@@ -81,169 +136,131 @@ export async function commitModelOperations(
   operations: readonly StagedOperation[],
 ): Promise<CommitResult> {
   const outcomes: OperationOutcome[] = [];
+  const fields: FieldRow[] = [];
+  const assumptions: AssumptionRow[] = [];
+  /** Which outcome slots the transaction decides, so it can rewrite them. */
+  const writeSlots: number[] = [];
+
   for (const operation of operations) {
-    outcomes.push(
-      await applyModelOperation(
-        supabase,
-        context,
-        operation.name as DiscoveryToolName,
-        operation.candidate,
-      ),
-    );
-  }
-  return { outcomes };
-}
-
-/**
- * Decides whether an excerpt the model attributed to the person is really
- * theirs.
- *
- * Comparison is whitespace-normalised and case-insensitive, because the model
- * reproducing a sentence with different line breaks is still a quotation, while
- * a paraphrase is not. Anything that is not literally present in the message
- * fails — which is the point: this is the check that turns an untrusted claim
- * into application-derived provenance.
- */
-export function quoteIsFromMessage(
-  excerpt: string | undefined,
-  userMessage: string,
-): boolean {
-  if (!excerpt) return false;
-  const normalise = (value: string) =>
-    value.replace(/\s+/g, " ").trim().toLowerCase();
-  const needle = normalise(excerpt);
-  if (needle.length < 8) return false;
-  return normalise(userMessage).includes(needle);
-}
-
-export async function applyModelOperation(
-  supabase: SupabaseClient,
-  context: OperationContext,
-  tool: DiscoveryToolName,
-  candidate: unknown,
-): Promise<OperationOutcome> {
-  switch (tool) {
-    case "update_project_model": {
-      const parsed = UpdateProjectModelSchema.safeParse(candidate);
-      if (!parsed.success) {
-        return reject(tool, parsed.error.issues[0].message);
-      }
-
-      /*
-        Read what is already there before writing over it. An upsert that
-        supplies `value`, `origin` and `support` unconditionally will happily
-        replace a field the person wrote and marked as their own — losing both
-        their wording and its provenance, with no approval and no record of
-        what it displaced.
-      */
-      const keys = parsed.data.updates.map((update) => update.key);
-      const { data: existingRows, error: readError } = await supabase
-        .from("project_fields")
-        .select("area, key, origin, value")
-        .eq("project_id", context.projectId)
-        .in("key", keys);
-      if (readError) return reject(tool, readError.code ?? "read_failed");
-
-      const existing = new Map(
-        (
-          (existingRows ?? []) as {
-            area: string;
-            key: string;
-            origin: string;
-            value: string;
-          }[]
-        ).map((row) => [`${row.area}/${row.key}`, row]),
-      );
-
-      const rows: Record<string, unknown>[] = [];
-      for (const update of parsed.data.updates) {
-        const current = existing.get(`${update.area}/${update.key}`);
-        if (
-          current &&
-          current.origin === "user_stated" &&
-          current.value !== update.value
-        ) {
-          return reject(
-            tool,
-            `${update.area}/${update.key} is the person's own wording and cannot be replaced automatically.`,
-          );
+    const tool = operation.name as DiscoveryToolName;
+    switch (tool) {
+      case "update_project_model": {
+        const parsed = UpdateProjectModelSchema.safeParse(operation.candidate);
+        if (!parsed.success) {
+          outcomes.push(reject(tool, parsed.error.issues[0].message));
+          break;
         }
-        rows.push({
-          project_id: context.projectId,
-          area: update.area,
-          key: update.key,
-          label: update.label,
-          value: update.value,
-          // Derived here, from a verified excerpt — never taken from the enum
-          // the model supplied.
-          origin: quoteIsFromMessage(
+        for (const update of parsed.data.updates) {
+          const excerpt = verifiedQuotation(
+            update.value,
             update.quotedFromMessage,
             context.userMessage,
-          )
-            ? "user_stated"
-            : "ai_inferred",
-          support: update.support,
+          );
+          fields.push({
+            area: update.area,
+            key: update.key,
+            label: update.label,
+            value: update.value,
+            origin: excerpt ? "user_stated" : "ai_inferred",
+            support: update.support,
+            source_excerpt: excerpt,
+          });
+        }
+        writeSlots.push(outcomes.length);
+        outcomes.push({
+          applied: true,
+          kind: tool,
+          count: parsed.data.updates.length,
         });
+        break;
       }
 
-      const { error } = await supabase
-        .from("project_fields")
-        .upsert(rows, { onConflict: "project_id,area,key" });
-      if (error) return reject(tool, error.code ?? "write_failed");
-      return { applied: true, kind: tool, count: rows.length };
-    }
-
-    case "record_assumption": {
-      const parsed = RecordAssumptionSchema.safeParse(candidate);
-      if (!parsed.success) {
-        return reject(tool, parsed.error.issues[0].message);
-      }
-      const { error } = await supabase.from("assumptions").insert({
-        project_id: context.projectId,
-        statement: parsed.data.statement,
-        why_it_matters: parsed.data.whyItMatters,
-        alternatives: parsed.data.alternatives,
-        importance: parsed.data.importance,
-        origin: quoteIsFromMessage(
+      case "record_assumption": {
+        const parsed = RecordAssumptionSchema.safeParse(operation.candidate);
+        if (!parsed.success) {
+          outcomes.push(reject(tool, parsed.error.issues[0].message));
+          break;
+        }
+        const excerpt = verifiedQuotation(
+          parsed.data.statement,
           parsed.data.quotedFromMessage,
           context.userMessage,
-        )
-          ? "user_stated"
-          : "ai_inferred",
-      });
-      if (error) return reject(tool, error.code ?? "write_failed");
-      return { applied: true, kind: tool, count: 1 };
-    }
-
-    case "propose_connected_change": {
-      // Validated so a malformed proposal is still refused rather than
-      // silently ignored, then deferred: applying a connected change requires
-      // the approval state machine and transactional apply that land in T11.
-      const parsed = ProposeConnectedChangeSchema.safeParse(candidate);
-      if (!parsed.success) {
-        return reject(tool, parsed.error.issues[0].message);
+        );
+        assumptions.push({
+          statement: parsed.data.statement,
+          why_it_matters: parsed.data.whyItMatters,
+          alternatives: parsed.data.alternatives,
+          importance: parsed.data.importance,
+          origin: excerpt ? "user_stated" : "ai_inferred",
+          source_excerpt: excerpt,
+        });
+        writeSlots.push(outcomes.length);
+        outcomes.push({ applied: true, kind: tool, count: 1 });
+        break;
       }
-      return { applied: false, kind: tool, reason: "deferred" };
-    }
 
-    case "suggest_checkpoint": {
-      const parsed = SuggestCheckpointSchema.safeParse(candidate);
-      if (!parsed.success) {
-        return reject(tool, parsed.error.issues[0].message);
+      case "propose_connected_change": {
+        const parsed = ProposeConnectedChangeSchema.safeParse(
+          operation.candidate,
+        );
+        outcomes.push(
+          parsed.success
+            ? { applied: false, kind: tool, reason: "deferred" }
+            : reject(tool, parsed.error.issues[0].message),
+        );
+        break;
       }
-      return { applied: false, kind: tool, reason: "deferred" };
-    }
 
-    case "suggest_actions":
-    case "recommend_canvas_scene":
-      /*
-        Neither reaches here. Scenes cross at `validateScene` and have no write
-        path to project truth (docs/AI_SYSTEM.md §9.3); actions resolve to an
-        application-owned catalogue and write nothing at all. Reaching this
-        branch would mean those boundaries had been wired into this one.
-      */
-      return reject(tool, "wrong_boundary");
+      case "suggest_checkpoint": {
+        const parsed = SuggestCheckpointSchema.safeParse(operation.candidate);
+        outcomes.push(
+          parsed.success
+            ? { applied: false, kind: tool, reason: "deferred" }
+            : reject(tool, parsed.error.issues[0].message),
+        );
+        break;
+      }
+
+      case "suggest_actions":
+      case "recommend_canvas_scene":
+        /*
+          Neither reaches here. Scenes cross at `validateScene` and have no
+          write path to project truth (§9.3); actions resolve to an
+          application-owned catalogue and write nothing. Reaching this branch
+          would mean those boundaries had been wired into this one.
+        */
+        outcomes.push(reject(tool, "wrong_boundary"));
+        break;
+    }
   }
+
+  if (fields.length === 0 && assumptions.length === 0) {
+    return { outcomes, changed: false };
+  }
+
+  const { error } = await supabase.rpc("apply_turn_operations", {
+    p_project_id: context.projectId,
+    p_turn_id: context.turnId,
+    p_fields: fields,
+    p_assumptions: assumptions,
+  });
+
+  if (error) {
+    /*
+      All-or-none: the transaction raised, so nothing was written. Every write
+      outcome is rewritten as refused, because reporting one of them as applied
+      would put a claim in the audit trail that the database does not support.
+    */
+    const issue = error.message?.includes("user_owned_field")
+      ? "A field the person stated themselves cannot be replaced automatically."
+      : (error.code ?? "write_failed");
+    for (const slot of writeSlots) {
+      outcomes[slot] = reject(outcomes[slot].kind, issue);
+    }
+    return { outcomes, changed: false };
+  }
+
+  return { outcomes, changed: true };
 }
 
 function reject(kind: DiscoveryToolName, issue: string): OperationOutcome {

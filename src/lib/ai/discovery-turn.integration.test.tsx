@@ -8,6 +8,7 @@ import type { CanvasObject } from "@/lib/canvas/model";
 import { validateScene, type ProjectScope } from "@/lib/canvas/scene";
 import { AnthropicDiscoveryEngine } from "./anthropic-engine";
 import { createActivityReporter } from "./activity-reporter";
+import { finishTurn } from "./finish-turn";
 import { createTurnHooks } from "./turn-hooks";
 import {
   INITIAL_TURN_STATE,
@@ -180,7 +181,9 @@ function scriptedProvider() {
 describe("a live-shaped Step 2–3 turn reaches the screen", () => {
   it("records a field and an assumption, refreshes the canvas, shows the scene and the actions", async () => {
     const events: TurnEvent[] = [];
-    const committed: { name: string; candidate: unknown }[] = [];
+    /** What the host applied, and in what order relative to the answer. */
+    const applied: { name: string; candidate: unknown }[] = [];
+    const order: string[] = [];
 
     const emit = (event: TurnEvent) => events.push(event);
     const reporter = createActivityReporter({
@@ -198,19 +201,6 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       },
       takeDirection: async () => null,
       onDirectionApplied: () => {},
-      /*
-        Stands in for the route's commit: it applies the writes, then emits the
-        re-read model exactly as the route does. The point is that the *engine*
-        does not describe what the canvas shows — the application does.
-      */
-      commitOperations: async (operations) => {
-        committed.push(...operations);
-        emit({
-          type: "project_model_updated",
-          objects: objectsAfter,
-          relationships: [],
-        });
-      },
     });
 
     const provider = scriptedProvider();
@@ -229,18 +219,54 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       undefined,
     );
 
+    /*
+      The host's durable boundary, exactly as the route orders it: the answer is
+      stored, the staged operations are applied as one unit, the turn is closed
+      and only then is the canvas told what the project now holds. The engine
+      never describes what the canvas shows — the application re-reads it.
+    */
+    await finishTurn(
+      {
+        persistResult: async () => {
+          order.push("persist");
+          return true;
+        },
+        applyOperations: async () => {
+          order.push("apply");
+          applied.push(...result.operations);
+          return result.operations.length > 0;
+        },
+        publishProjectModel: async () => {
+          order.push("publish");
+          emit({
+            type: "project_model_updated",
+            objects: objectsAfter,
+            relationships: [],
+          });
+        },
+        closeRun: async () => {
+          order.push("close");
+          return true;
+        },
+        audit: async () => {},
+        emit,
+      },
+      result.assistantText,
+    );
+
     // 1. The model was given the ids it needs to name an existing object.
     const firstRequest = provider.requests[0] as {
       messages: { content: string }[];
     };
     expect(firstRequest.messages.at(-1)?.content).toContain(CONCEPT);
 
-    // 2. Both project-truth operations were committed, once, after the turn
-    //    reached a result — and neither before.
-    expect(committed.map((operation) => operation.name)).toEqual([
+    // 2. Both project-truth operations were applied, once, after the answer was
+    //    stored — and neither during the turn.
+    expect(applied.map((operation) => operation.name)).toEqual([
       "update_project_model",
       "record_assumption",
     ]);
+    expect(order).toEqual(["persist", "apply", "close", "publish"]);
 
     // 3. The scene survived validation against the project's real ids.
     const scene = events.find((event) => event.type === "scene_recommended");
@@ -266,10 +292,11 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       type: "event",
       event: { type: "turn_started", turnId: TURN },
     });
+    // Including everything the host emitted at its durable boundary: the
+    // refreshed model and `done` are on the same stream the client reads.
     for (const event of events) {
       state = turnReducer(state, { type: "event", event });
     }
-    state = turnReducer(state, { type: "event", event: { type: "done" } });
 
     expect(result.assistantText).toContain("Which side raises it first?");
 

@@ -32,6 +32,14 @@ export interface TurnInput {
 export interface TurnResult {
   /** Assistant text to persist; empty when the turn failed. */
   assistantText: string;
+  /**
+   * Project-truth operations the turn produced, for the host to commit.
+   *
+   * Returned rather than committed by the engine: project truth, the assistant
+   * row and the turn's terminal state have to move together, and only the host
+   * can order those. A failed turn returns none.
+   */
+  operations: StagedOperation[];
 }
 
 /**
@@ -71,20 +79,6 @@ export interface TurnHooks {
     outcome?: (result: T) => "succeeded" | "failed",
   ): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
-  /**
-   * Commits every operation a successful turn produced, as one unit.
-   *
-   * Deliberately not one call per operation as they arrive. A turn that writes
-   * as it goes and then fails leaves the project half-changed while telling the
-   * user nothing changed — so operations are staged by the engine and handed
-   * over only once the turn has actually reached a result. A turn that fails
-   * for any reason never calls this, and nothing it staged is written.
-   *
-   * Same posture as `recommendScene` otherwise: candidates cross as `unknown`,
-   * the application validates and authorises each against project rows, and no
-   * outcome is reported back.
-   */
-  commitOperations(operations: readonly StagedOperation[]): Promise<void>;
   /**
    * Announces that the model has actually consumed a direction.
    *
@@ -157,7 +151,7 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
           recoverable: true,
         },
       });
-      return { assistantText: "" };
+      return { assistantText: "", operations: [] };
     };
 
     if (signal?.aborted) return interrupted();
@@ -242,7 +236,8 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     });
     // No `done`: the host emits that once the result is stored and the turn's
     // outcome is recorded.
-    return { assistantText: lines.join("\n") };
+    // The scripted engine proposes no project-truth operations.
+    return { assistantText: lines.join("\n"), operations: [] };
   }
 
   /** Streams text, returning false if the turn was stopped part-way. */

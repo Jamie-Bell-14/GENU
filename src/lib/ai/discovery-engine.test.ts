@@ -34,11 +34,6 @@ function harness(direction: string | null = null) {
     recommendScene: async (candidate) => {
       candidates.push(candidate);
     },
-    // The scripted engine produces no structured operations; a commit here
-    // would be a change in what it does, so the harness fails on one.
-    commitOperations: async () => {
-      throw new Error("unexpected staged operations");
-    },
     directionApplied: (note) => appliedDirections.push(note),
     takeDirection: async () => {
       const next = remaining;
@@ -108,6 +103,9 @@ describe("ScriptedDiscoveryEngine", () => {
     const { hooks } = harness();
     const result = await new ScriptedDiscoveryEngine().runTurn(input, hooks);
     expect(result.assistantText).toContain("not connected yet");
+    // And it proposes nothing: a scripted engine that changed project truth
+    // would make the message above a lie.
+    expect(result.operations).toEqual([]);
   });
 
   it("names the focal object the application chose, not the first id it was given", async () => {

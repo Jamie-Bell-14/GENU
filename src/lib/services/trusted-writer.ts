@@ -80,43 +80,46 @@ export async function recordActivity(input: {
 }
 
 /**
- * Opens a turn's operational record. Unlike audit and activity this is *not*
- * best-effort: steering and recovery read it, so a turn that cannot record
- * that it is running must not open a stream and advertise controls that
- * cannot work. Returns whether the record exists.
+ * Opens a turn: saves the user's message and the operational record together.
+ *
+ * Unlike audit and activity this is *not* best-effort — steering and recovery
+ * read the run, so a turn that cannot record that it is running must not open a
+ * stream and advertise controls that cannot work.
+ *
+ * Both writes go through one function so they are one transaction. Saving the
+ * message first and opening the run afterwards left an orphan message behind
+ * every refused start, which the client then re-sent as a duplicate. The
+ * function also reconciles a run whose lease has lapsed, so a dead worker
+ * cannot hold the project's only slot for ever (issue #11).
  */
-export type OpenTurnOutcome =
-  | "opened"
-  /** Another turn is already running for this project (T9: concurrency). */
+export type StartTurnOutcome =
+  | "started"
+  /** Another turn is genuinely still running for this project (concurrency). */
   | "already_running"
-  /** The record could not be written; the turn must not start. */
+  /** Nothing was written; the turn must not start. */
   | "unavailable";
 
-export async function openTurnRun(input: {
+export async function startTurn(input: {
   projectId: string;
   turnId: string;
-}): Promise<OpenTurnOutcome> {
+  content: string;
+}): Promise<StartTurnOutcome> {
   const client = trustedClient();
   if (!client) {
     reportUnavailable("turn_run");
     return "unavailable";
   }
-  const { error } = await client.from("turn_runs").insert({
-    turn_id: input.turnId,
-    project_id: input.projectId,
-    state: "running",
+  const { data, error } = await client.rpc("start_turn", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_content: input.content,
   });
-  if (!error) return "opened";
-  /*
-    A unique violation here is the one-running-turn-per-project index, not a
-    fault: a second tab or a duplicate request tried to start a turn while one
-    was already going. Distinguished from a genuine failure so the route can
-    answer "already running" rather than "could not start", which are different
-    things to a user with two tabs open.
-  */
-  if (error.code === "23505") return "already_running";
-  console.error("turn_run insert failed", { code: error.code });
-  return "unavailable";
+  if (error) {
+    // No content in the log (SECURITY_STANDARDS §14.1).
+    console.error("start_turn failed", { code: error.code });
+    return "unavailable";
+  }
+  return data === "started" ? "started" : "already_running";
 }
 
 /**

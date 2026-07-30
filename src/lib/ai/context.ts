@@ -81,13 +81,26 @@ export function approximateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
+/**
+ * Neutralises anything that could close a delimiter or open a new one.
+ *
+ * Stored field values and object labels are user-editable, so they are exactly
+ * as untrusted as a chat message — and a value containing `</project_context>`
+ * would otherwise end the data region early and leave the rest of the project
+ * reading as instruction. Rewritten rather than rejected: a person is allowed
+ * to type angle brackets into their own project.
+ */
+function neutralise(value: string): string {
+  return value.replaceAll("<", "‹").replaceAll(">", "›");
+}
+
 /** Renders one field as a compact line the model can read and cite. */
 function renderField(field: ContextField): string {
-  return `- [${field.area}/${field.key}] ${field.label}: ${field.value} (origin: ${field.origin}; support: ${field.support})`;
+  return `- [${field.area}/${field.key}] ${neutralise(field.label)}: ${neutralise(field.value)} (origin: ${field.origin}; support: ${field.support})`;
 }
 
 function renderObject(object: ContextObject, focal: boolean): string {
-  return `- ${object.id} — ${object.kind}: ${object.label}${focal ? " (currently focal)" : ""}`;
+  return `- ${object.id} — ${object.kind}: ${neutralise(object.label)}${focal ? " (currently focal)" : ""}`;
 }
 
 export interface AssembledContext {
@@ -123,6 +136,30 @@ export function assembleContext(
   let spent = 0;
   const sections: string[] = [];
 
+  /*
+    Reserve the fixed cost of each section's headings and instructions before
+    admitting any content. Charging it afterwards can push the total past the
+    budget by whatever the surrounding text costs — the check has to happen
+    before the spend, not after.
+  */
+  const relationshipsText = context.relationshipIds
+    .slice(0, MAX_INVENTORY_RELATIONSHIPS)
+    .join(", ");
+  // Reserved only for sections that will actually be sent, and including the
+  // "N further fields not shown" note, which is also part of the payload.
+  const reserved =
+    (context.objects.length
+      ? approximateTokens(
+          "Objects in this project that a canvas view may name:\nName only ids from these lists. Do not invent an id.\nThis project has no relationships a view may name.",
+        ) + approximateTokens(relationshipsText)
+      : 0) +
+    (context.fields.length
+      ? approximateTokens(
+          "Current project model:\n(000 further fields not shown.)",
+        )
+      : 0);
+  spent += Math.min(reserved, budgetTokens);
+
   // 1. Scene inventory. The focal object leads, so it can never be the object
   // trimmed away — a scene whose focal id is missing is rejected outright.
   const focalFirst = context.focalObjectId
@@ -155,16 +192,16 @@ export function assembleContext(
       0,
       MAX_INVENTORY_RELATIONSHIPS,
     );
-    sections.push(
-      [
-        "Objects in this project that a canvas view may name:",
-        ...objectLines,
-        relationships.length
-          ? `Relationship ids a view may name: ${relationships.join(", ")}`
-          : "This project has no relationships a view may name.",
-        "Name only ids from these lists. Do not invent an id.",
-      ].join("\n"),
-    );
+    const section = [
+      "Objects in this project that a canvas view may name:",
+      ...objectLines,
+      relationships.length
+        ? `Relationship ids a view may name: ${relationships.join(", ")}`
+        : "This project has no relationships a view may name.",
+      "Name only ids from these lists. Do not invent an id.",
+    ].join("\n");
+    // Its frame was reserved up front; the lines were charged as admitted.
+    sections.push(section);
   }
 
   // 2. Recent conversation, newest kept when the budget runs out.
@@ -192,17 +229,16 @@ export function assembleContext(
     fieldLines.push(line);
   }
   if (fieldLines.length) {
-    sections.push(
-      [
-        "Current project model:",
-        ...fieldLines,
-        droppedFields > 0
-          ? `(${droppedFields} further field${droppedFields === 1 ? "" : "s"} not shown.)`
-          : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    );
+    const section = [
+      "Current project model:",
+      ...fieldLines,
+      droppedFields > 0
+        ? `(${droppedFields} further field${droppedFields === 1 ? "" : "s"} not shown.)`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    sections.push(section);
   }
 
   return {

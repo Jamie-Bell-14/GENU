@@ -31,11 +31,30 @@ export const MAX_REQUEST_OUTPUT_TOKENS = 8_000;
 /**
  * Output the whole turn may generate, across every request it makes.
  *
- * The engine tracks what it has spent and passes only the remainder to each
- * request, so the advertised bound is the real one. Without this, "8,000 tokens
- * per turn" would mean "8,000 tokens per request, six times over".
+ * Deliberately equal to the per-request ceiling, which is the *stricter*
+ * reading of the only figure on record. PROJECT_PLAN §17.1 records a per-turn
+ * output cap, and multiplying it by the number of rounds a turn may make would
+ * be choosing a new number — a cost decision that belongs to Jamie, not an
+ * implementation detail. Until that decision exists, a turn may spend the
+ * recorded figure in total, however many rounds it takes.
+ *
+ * The consequence is honest and worth stating: a tool-heavy turn can exhaust
+ * this and fail with nothing written, rather than quietly costing three times
+ * what was approved.
  */
-export const TURN_OUTPUT_ALLOWANCE = 24_000;
+export const TURN_OUTPUT_ALLOWANCE = MAX_REQUEST_OUTPUT_TOKENS;
+
+/**
+ * Input the whole turn may send, across every request.
+ *
+ * Separate from `MAX_CONTEXT_TOKENS`, which bounds one assembly. A turn's
+ * transcript grows with each round — assistant content, tool results, a
+ * direction — and every round re-sends all of it, so the per-assembly budget
+ * says nothing about what a turn costs. This is checked *before* each request
+ * rather than accumulated from responses afterwards, because a bound you
+ * discover after paying is a report, not a bound.
+ */
+export const TURN_INPUT_ALLOWANCE = 120_000;
 
 /**
  * Input budget for assembled context. Not a provider parameter — the

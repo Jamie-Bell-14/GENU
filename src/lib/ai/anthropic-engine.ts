@@ -20,6 +20,7 @@ import {
   MAX_REQUEST_OUTPUT_TOKENS,
   MAX_SCHEMA_RETRIES,
   MAX_TOOL_CALLS,
+  TURN_INPUT_ALLOWANCE,
   TURN_OUTPUT_ALLOWANCE,
   TURN_TIMEOUT_MS,
 } from "./engine-config";
@@ -121,6 +122,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     let toolCalls = 0;
     let providerRounds = 0;
     let schemaRetries = 0;
+    /** What the engine has committed to sending, checked before each request. */
+    let plannedInputTokens = 0;
     let inputTokens = 0;
     let outputTokens = 0;
 
@@ -145,7 +148,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     const fail = (error: SafeError): TurnResult => {
       hooks.emit({ type: "turn_failed", error });
       report("failed", error.code);
-      return { assistantText: "" };
+      // No operations: staged work is discarded with the turn.
+      return { assistantText: "", operations: [] };
     };
 
     const interrupted = () =>
@@ -201,12 +205,31 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       backwards, and one that can place two same-role messages side by side.
     */
     const messages: Anthropic.MessageParam[] = assembled.messages.map(
-      (message) => ({ role: message.role, content: message.content }),
+      (message) => ({
+        role: message.role,
+        /*
+          A stored user message can carry injection text just as a live one can,
+          so history crosses inside a data region too. Assistant turns are the
+          model's own words and are replayed as they were.
+        */
+        content:
+          message.role === "user"
+            ? asUntrusted("user_message", message.content)
+            : message.content,
+      }),
     );
+    /*
+      Both regions are delimited, and for the same reason: stored field values
+      and object labels are user-editable, so a project's own snapshot is no
+      more trustworthy than a chat message. Leaving it undelimited put
+      user-authored text outside the regions the system prompt declares as data.
+    */
     messages.push({
       role: "user",
       content: [
-        assembled.snapshot,
+        assembled.snapshot
+          ? asUntrusted("project_context", assembled.snapshot)
+          : "",
         asUntrusted("user_message", input.userMessage),
       ]
         .filter(Boolean)
@@ -215,7 +238,18 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
 
     let assistantText = "";
     let blockOpened = false;
-    let directionConsumed = false;
+    /*
+      Steering is sealed *before* the last round the engine could spend on it,
+      not after the model finishes.
+
+      The previous shape accepted a direction at the final boundary and then, if
+      no round remained, reported it as recorded-but-not-applied. That is honest
+      after the fact but still breaks the promise made when it was accepted —
+      "applied at the next step of this turn". Sealing early means a direction
+      arriving too late is *refused* by the database before any promise is made,
+      and every accepted direction has a round waiting for it.
+    */
+    let directionsSealed = false;
 
     /*
       Project-truth operations are *staged*, not applied as they arrive.
@@ -240,17 +274,43 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       assistantText += text;
     };
 
-    /** Commits staged writes, then reports the turn as completed. */
-    const complete = async (): Promise<TurnResult> => {
-      if (staged.length) await hooks.commitOperations(staged);
+    /**
+     * Reports the turn as completed and hands its staged writes back.
+     *
+     * The engine does not commit them. Project truth, the assistant row and the
+     * turn's terminal state have to move together, and only the host can order
+     * those — see `finishTurn`, which is the single documented durable boundary.
+     */
+    const complete = (): TurnResult => {
       report("completed");
-      return { assistantText };
+      return { assistantText, operations: staged };
     };
 
     for (let round = 0; round < MAX_PROVIDER_ROUNDS; round += 1) {
       providerRounds += 1;
       if (combined.aborted) {
         return signal?.aborted ? interrupted() : fail(TIMED_OUT);
+      }
+
+      /*
+        One round is reserved for steering. On the last round the engine could
+        possibly spend, the window closes first — so nothing can be accepted
+        that this turn has no capacity to use. A note taken here is fed into
+        this very request.
+      */
+      if (!directionsSealed && round === MAX_PROVIDER_ROUNDS - 1) {
+        directionsSealed = true;
+        const late = await hooks.takeDirection({ final: true });
+        if (late) {
+          await hooks.step("considering_direction", async () => {
+            messages.push({
+              role: "user",
+              content: asUntrusted("user_message", late),
+            });
+            hooks.directionApplied(late);
+            return true;
+          });
+        }
       }
 
       /*
@@ -261,6 +321,21 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       */
       const remaining = TURN_OUTPUT_ALLOWANCE - outputTokens;
       if (remaining <= 0) return fail(OUTPUT_EXHAUSTED);
+
+      /*
+        Input is bounded *before* the request, not accumulated from responses
+        afterwards. The transcript grows every round — assistant content, tool
+        results, a direction — and all of it is re-sent, so a per-assembly
+        budget says nothing about what a turn costs. Measuring the payload the
+        engine is about to send is the only version of this check that can stop
+        anything.
+      */
+      const payloadTokens =
+        overhead + approximateTokens(JSON.stringify(messages));
+      if (plannedInputTokens + payloadTokens > TURN_INPUT_ALLOWANCE) {
+        return fail(INPUT_EXHAUSTED);
+      }
+      plannedInputTokens += payloadTokens;
 
       let final: Anthropic.Message;
       try {
@@ -336,54 +411,27 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
 
       if (final.stop_reason !== "tool_use" || toolUses.length === 0) {
         /*
-          The model has finished answering. This is the final direction
-          boundary, so the host seals the steering window here; a failure to
-          seal is not swallowed, because the window would stay open with no
-          step left to consume anything.
+          The model has finished answering. If the window is still open there is
+          a reserved round available by construction, so anything taken here can
+          actually be used — there is no path on which an accepted direction
+          ends unapplied.
         */
+        if (directionsSealed) return complete();
+
+        directionsSealed = true;
         const direction = await hooks.takeDirection({ final: true });
         if (!direction) return complete();
 
-        /*
-          A direction that arrives here has not been used yet, and saying
-          otherwise was the defect: the host used to announce
-          `direction_applied` the moment a note existed, while the engine only
-          promised the *next* turn would consider it — a promise nothing in the
-          system kept. So the turn spends one more round actually giving it to
-          the model, and only then is it applied.
-        */
-        const roundsLeft = MAX_PROVIDER_ROUNDS - (round + 1);
-        const budgetLeft = TURN_OUTPUT_ALLOWANCE - outputTokens > 0;
-        if (roundsLeft > 0 && budgetLeft) {
-          await hooks.step("considering_direction", async () => {
-            messages.push({ role: "assistant", content: final.content });
-            messages.push({
-              role: "user",
-              content: asUntrusted("user_message", direction),
-            });
-            hooks.directionApplied(direction);
-            directionConsumed = true;
-            return true;
+        await hooks.step("considering_direction", async () => {
+          messages.push({ role: "assistant", content: final.content });
+          messages.push({
+            role: "user",
+            content: asUntrusted("user_message", direction),
           });
-          continue;
-        }
-
-        /*
-          No room left to use it. The honest outcome is to say so — recorded,
-          not applied — and to leave `direction_applied` unemitted, because it
-          was not.
-        */
-        await hooks.step(
-          "considering_direction",
-          async () => {
-            emitText(
-              `\n\nYou added: “${truncate(direction)}”. This turn had no step left to use it, so it has been recorded against the turn but not applied. Send it again to act on it.`,
-            );
-            return false;
-          },
-          () => "failed",
-        );
-        return complete();
+          hooks.directionApplied(direction);
+          return true;
+        });
+        continue;
       }
 
       /*
@@ -491,7 +539,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         boundary: the turn continues, so the window stays open — and the model
         really does receive it on the next request.
       */
-      if (!directionConsumed) {
+      if (!directionsSealed) {
         const direction = await hooks.takeDirection({ final: false });
         if (direction) {
           await hooks.step("considering_direction", async () => {
@@ -500,7 +548,6 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
               content: asUntrusted("user_message", direction),
             });
             hooks.directionApplied(direction);
-            directionConsumed = true;
             return true;
           });
         }
@@ -519,6 +566,13 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     });
   }
 }
+
+const INPUT_EXHAUSTED: SafeError = {
+  code: "model_output_invalid",
+  userMessage:
+    "This turn grew too large to continue, so nothing has been kept. Your message is saved — try asking for one thing at a time.",
+  recoverable: true,
+};
 
 const OUTPUT_EXHAUSTED: SafeError = {
   code: "model_output_invalid",
@@ -585,9 +639,4 @@ function emptyContext(input: TurnInput): ProjectContext {
     relationshipIds: [],
     focalObjectId: input.context?.focalObjectId ?? null,
   };
-}
-
-function truncate(value: string, max = 120): string {
-  const trimmed = value.trim();
-  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
 }

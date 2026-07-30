@@ -4,19 +4,33 @@ import {
   isActivityStep,
   type ActivityStep,
 } from "./activity-steps";
-import { ScriptedDiscoveryEngine, type TurnHooks } from "./discovery-engine";
+import {
+  ScriptedDiscoveryEngine,
+  type AddEvidenceOutcome,
+  type ResearchOutcome,
+  type TurnHooks,
+} from "./discovery-engine";
 import type { EngineEvent } from "./turn-events";
+import type { ResearchTask } from "@/lib/research/types";
 
 const TURN_ID = "dddddddd-0000-4000-8000-000000000001";
 const OBJECT_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER_OBJECT = "aaaaaaaa-0000-4000-8000-000000000002";
 const THIRD_OBJECT = "aaaaaaaa-0000-4000-8000-000000000003";
 
-function harness(direction: string | null = null) {
+function harness(
+  direction: string | null = null,
+  options: {
+    researchOutcome?: ResearchOutcome;
+    addEvidenceOutcome?: AddEvidenceOutcome;
+  } = {},
+) {
   const events: EngineEvent[] = [];
   const steps: string[] = [];
   const candidates: unknown[] = [];
   const appliedDirections: string[] = [];
+  const researchCalls: ResearchTask[] = [];
+  const addEvidenceCalls: { consequenceSummary: string }[] = [];
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
@@ -40,8 +54,26 @@ function harness(direction: string | null = null) {
       remaining = null;
       return next;
     },
+    runResearch: async (task) => {
+      researchCalls.push(task);
+      return (
+        options.researchOutcome ?? { ok: true, findingTitle: "Test finding" }
+      );
+    },
+    addEvidence: async (evidenceInput) => {
+      addEvidenceCalls.push(evidenceInput);
+      return options.addEvidenceOutcome ?? { ok: true, linked: true };
+    },
   };
-  return { events, steps, candidates, appliedDirections, hooks };
+  return {
+    events,
+    steps,
+    candidates,
+    appliedDirections,
+    researchCalls,
+    addEvidenceCalls,
+    hooks,
+  };
 }
 
 const input = {
@@ -231,5 +263,90 @@ describe("ScriptedDiscoveryEngine", () => {
     });
     // `done` is the host's to emit, so the engine never produces one at all.
     expect(events.map((event) => event.type)).not.toContain("done");
+  });
+
+  describe("research (T10)", () => {
+    it("runs research and recommends the evidence view on 'Research this'", async () => {
+      const { candidates, researchCalls, events, hooks } = harness();
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Research this" },
+        hooks,
+      );
+      expect(researchCalls).toHaveLength(1);
+      expect(researchCalls[0].focalObjectId).toBe(OBJECT_A);
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId: OBJECT_A,
+      });
+      expect(result.assistantText).toContain("Test finding");
+      const actionIds = events
+        .filter((event) => event.type === "actions")
+        .flatMap((event) => event.actions.map((action) => action.id));
+      expect(actionIds).toContain("add_as_evidence");
+    });
+
+    it("reports a stopped research pass honestly rather than a finding", async () => {
+      const { hooks } = harness(null, {
+        researchOutcome: { ok: false, reason: "stopped" },
+      });
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Research this" },
+        hooks,
+      );
+      expect(result.assistantText).toMatch(/stopped/i);
+    });
+
+    it("does not recommend a scene when research has no focal object", async () => {
+      const { candidates, hooks } = harness();
+      await new ScriptedDiscoveryEngine().runTurn(
+        {
+          ...input,
+          userMessage: "Research this",
+          context: { objectIds: [], focalObjectId: null },
+        },
+        hooks,
+      );
+      expect(candidates).toHaveLength(0);
+    });
+  });
+
+  describe("add as evidence (T10)", () => {
+    it("calls addEvidence on 'Add as evidence' and reports success honestly", async () => {
+      const { addEvidenceCalls, hooks } = harness(null, {
+        addEvidenceOutcome: { ok: true, linked: true },
+      });
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Add as evidence" },
+        hooks,
+      );
+      expect(addEvidenceCalls).toHaveLength(1);
+      expect(result.assistantText).toMatch(/added/i);
+      expect(result.assistantText).toMatch(/does not/i);
+    });
+
+    it("says a repeat is already linked rather than claiming a new add", async () => {
+      const { hooks } = harness(null, {
+        addEvidenceOutcome: { ok: true, linked: false },
+      });
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Add as evidence" },
+        hooks,
+      );
+      expect(result.assistantText).toMatch(/already linked/i);
+    });
+
+    it("never claims evidence was added when there is nothing to link", async () => {
+      const { hooks } = harness(null, {
+        addEvidenceOutcome: { ok: false, reason: "no_active_research" },
+      });
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Add as evidence" },
+        hooks,
+      );
+      expect(result.assistantText).not.toMatch(/^i added/i);
+      expect(result.assistantText).toMatch(/no research finding/i);
+    });
   });
 });

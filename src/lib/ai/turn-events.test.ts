@@ -133,6 +133,7 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "turn_failed",
+        turnId: TURN,
         error: {
           code: "engine_unavailable",
           userMessage: "The response could not be completed.",
@@ -162,7 +163,7 @@ describe("turnReducer", () => {
     });
     state = turnReducer(state, {
       type: "event",
-      event: { type: "scene_recommended", scene: scene() },
+      event: { type: "scene_recommended", scene: scene(), turnId: TURN },
     });
     expect(state.actions).toHaveLength(1);
     expect(state.recommendedScene).not.toBeNull();
@@ -171,6 +172,7 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "turn_failed",
+        turnId: TURN,
         error: {
           code: "engine_unavailable",
           userMessage: "The response could not be completed.",
@@ -180,6 +182,31 @@ describe("turnReducer", () => {
     });
     expect(state.actions).toEqual([]);
     expect(state.recommendedScene).toBeNull();
+  });
+
+  it("issue #13: does not clear a different turn's queued recommendation", () => {
+    let state = streamStarted(send());
+    state = turnReducer(state, {
+      type: "event",
+      event: { type: "scene_recommended", scene: scene(), turnId: TURN },
+    });
+    expect(state.recommendedScene?.turnId).toBe(TURN);
+
+    // A failure attributed to a *different* turn must not touch it.
+    state = turnReducer(state, {
+      type: "event",
+      event: {
+        type: "turn_failed",
+        turnId: "some-other-turn",
+        error: {
+          code: "engine_unavailable",
+          userMessage: "The response could not be completed.",
+          recoverable: true,
+        },
+      },
+    });
+    expect(state.recommendedScene).not.toBeNull();
+    expect(state.recommendedScene?.turnId).toBe(TURN);
   });
 
   it("withdraws the message when the server refused to start the turn", () => {
@@ -230,6 +257,7 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "turn_failed",
+        turnId: TURN,
         error: {
           code: "rate_limited",
           userMessage: "Wait a moment.",
@@ -307,10 +335,10 @@ describe("activity history, scenes and steering", () => {
     };
     const state = turnReducer(streamStarted(send()), {
       type: "event",
-      event: { type: "scene_recommended", scene },
+      event: { type: "scene_recommended", scene, turnId: TURN },
     });
 
-    expect(state.recommendedScene).toEqual(scene);
+    expect(state.recommendedScene).toEqual({ scene, turnId: TURN });
     // Nothing about project truth lives in turn state, so there is nothing a
     // scene could have changed.
     expect(state.messages).toEqual([userMessage]);
@@ -627,5 +655,52 @@ describe("an unresolved recovery", () => {
     });
     expect(resolved.recoveries).toEqual([]);
     expect(resolved.messages).toHaveLength(2);
+  });
+});
+
+describe("research (T10)", () => {
+  const testFinding = {
+    id: "tenancy-deposit-disputes-2024",
+    title: "Deposit disputes are common",
+    keyFinding: "Roughly 1 in 6.",
+    whyItMatters: "It matters.",
+    visualisation: { kind: "bar" as const, unit: "%", series: [] },
+    sources: [],
+    methodology: "Method.",
+    limitations: "Limits.",
+    retrievedAt: "2026-07-30T00:00:00.000Z",
+    isDemo: true as const,
+    conflicting: false,
+  };
+
+  it("holds the finding a research pass produced", () => {
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "research_finding", finding: testFinding },
+    });
+    expect(state.activeResearch).toEqual(testFinding);
+  });
+
+  it("accumulates unavailable sources rather than discarding them", () => {
+    const unavailable = {
+      id: "demo-regional-authority-bulletin",
+      name: "Demonstration Regional Housing Authority — Illustrative Bulletin",
+      url: null,
+      retrievedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: {
+        type: "research_failed_source",
+        source: unavailable,
+        reason: "This source could not be retrieved in the demonstration run.",
+      },
+    });
+    expect(state.unavailableSources).toEqual([
+      {
+        source: unavailable,
+        reason: "This source could not be retrieved in the demonstration run.",
+      },
+    ]);
   });
 });

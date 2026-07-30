@@ -15,8 +15,13 @@ export interface SceneState {
    * A scene recommendation that arrived while the user was reading. It is
    * queued rather than applied so content never moves under the cursor
    * (docs/ADAPTIVE_CANVAS_MVP.md §7).
+   *
+   * Tagged with the turn that produced it (issue #13, T10 exit gate): the
+   * only way `invalidate_queued` can tell "this queued item's own turn just
+   * failed" apart from "some other turn failed", so a stale recommendation
+   * disappears without ever being able to clear a different turn's live one.
    */
-  queued: CanvasScene | null;
+  queued: { scene: CanvasScene; turnId: string } | null;
   lastRejection: SceneRejection | null;
 }
 
@@ -45,9 +50,17 @@ export type SceneAction =
   /** A validated scene the user asked for: applied immediately. */
   | { type: "user_scene"; scene: CanvasScene }
   /** A validated recommendation: queued, never applied under the cursor. */
-  | { type: "recommend_scene"; scene: CanvasScene }
+  | { type: "recommend_scene"; scene: CanvasScene; turnId: string }
   | { type: "accept_queued" }
   | { type: "dismiss_queued" }
+  /**
+   * The turn that produced the currently queued recommendation has failed
+   * (issue #13). Clears `queued` only when its own `turnId` still matches —
+   * the user may already have accepted or dismissed it, or a newer turn's
+   * recommendation may already have replaced it, and neither of those is this
+   * action's to undo.
+   */
+  | { type: "invalidate_queued"; turnId: string }
   | { type: "return_to_previous" }
   | { type: "set_view"; view: ViewMode }
   | { type: "scene_rejected"; rejection: SceneRejection };
@@ -86,13 +99,17 @@ export function sceneReducer(
       if (action.scene.transition === "preserve" && state.current) {
         return state;
       }
-      return { ...state, queued: action.scene, lastRejection: null };
+      return {
+        ...state,
+        queued: { scene: action.scene, turnId: action.turnId },
+        lastRejection: null,
+      };
 
     case "accept_queued":
       if (!state.queued) return state;
       return {
         ...state,
-        current: state.queued,
+        current: state.queued.scene,
         history: state.current
           ? push(state.history, state.current)
           : state.history,
@@ -100,6 +117,10 @@ export function sceneReducer(
       };
 
     case "dismiss_queued":
+      return { ...state, queued: null };
+
+    case "invalidate_queued":
+      if (state.queued?.turnId !== action.turnId) return state;
       return { ...state, queued: null };
 
     case "return_to_previous": {

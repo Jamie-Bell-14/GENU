@@ -146,7 +146,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       });
 
     const fail = (error: SafeError): TurnResult => {
-      hooks.emit({ type: "turn_failed", error });
+      hooks.emit({ type: "turn_failed", turnId: input.turnId, error });
       report("failed", error.code);
       // No operations: staged work is discarded with the turn.
       return { assistantText: "", operations: [] };
@@ -529,6 +529,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       for (const { use, validation } of validations) {
         if (!validation.ok) continue;
         toolCalls += 1;
+        let content: string = STAGED;
         if (validation.tool === "recommend_canvas_scene") {
           /*
             Scenes are exempt from staging because they mutate nothing: a scene
@@ -546,13 +547,44 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
               (validation.value as { actionIds: string[] }).actionIds,
             ),
           });
+        } else if (validation.tool === "start_research") {
+          /*
+            Runs to completion inside this tool round, like a scene: research
+            activity has to stream while the model is still working, not after
+            the turn ends, so it cannot be staged (docs/ARCHITECTURE.md §14).
+          */
+          const outcome = await hooks.runResearch(
+            {
+              topic: (validation.value as { topic: string }).topic,
+              focalObjectId: input.context?.focalObjectId ?? null,
+            },
+            signal,
+          );
+          content = outcome.ok
+            ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. The full finding is already on the canvas; do not restate its detail, only react to it and offer to add it as evidence if that follows.`
+            : outcome.reason === "stopped"
+              ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
+              : "Research could not run. Tell the person plainly; nothing was added.";
+        } else if (validation.tool === "add_evidence") {
+          const outcome = await hooks.addEvidence(
+            validation.value as { consequenceSummary: string },
+          );
+          content = outcome.ok
+            ? outcome.linked
+              ? "Evidence linked."
+              : "Already linked earlier from the same finding; not duplicated. Tell the person it is already there rather than that you just added it."
+            : outcome.reason === "no_active_research"
+              ? "Nothing was linked: there is no research finding from this turn to add. Say so; do not claim it was added."
+              : outcome.reason === "no_focal_object"
+                ? "Nothing was linked: there is no object currently in focus. Say so; do not claim it was added."
+                : "Nothing was linked: the write failed. Say so; do not claim it was added.";
         } else {
           staged.push({ name: validation.tool, candidate: use.input });
         }
         results.push({
           type: "tool_result",
           tool_use_id: use.id,
-          content: STAGED,
+          content,
         });
       }
 

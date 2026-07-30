@@ -244,6 +244,15 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       },
       takeDirection: async () => null,
       onDirectionApplied: () => {},
+      turnId: TURN,
+      researchProvider: {
+        start: () => ({ id: "unused" }),
+        steer: () => "requires_restart",
+        stop: () => {},
+      },
+      focalObjectId: null,
+      activeFindingId: null,
+      writeEvidence: async () => "failed",
     });
 
     const provider = scriptedProvider();
@@ -270,6 +279,7 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
     */
     await finishTurn(
       {
+        turnId: TURN,
         completeTurn: (assistantText) => {
           order.push("commit");
           return commitTurn(

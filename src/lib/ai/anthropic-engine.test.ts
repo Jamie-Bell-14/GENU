@@ -105,6 +105,8 @@ function harness(overrides: Partial<TurnHooks> = {}) {
     },
     takeDirection: async () => null,
     directionApplied: (note) => applied.push(note),
+    runResearch: async () => ({ ok: true, findingTitle: "Test finding" }),
+    addEvidence: async () => ({ ok: true, linked: true }),
     ...overrides,
   };
   return { events, steps, scenes, applied, hooks };
@@ -1018,10 +1020,19 @@ describe("a direction is applied only when the model receives it", () => {
 
     it("does not announce one when the input allowance is spent first", async () => {
       /*
-        The transcript is re-sent every round, so a turn carrying a large project
-        snapshot exhausts its cumulative input allowance after a few rounds. The
-        direction here is handed over at the boundary of a round whose successor
-        never gets to make its request.
+        The transcript is re-sent every round and grows every round — each
+        round's tool call is added to it and never removed — so a turn whose
+        rounds each carry a sizeable payload exhausts its cumulative input
+        allowance after a few of them. The direction here is handed over at
+        the boundary of a round whose successor never gets to make its
+        request.
+
+        The growth is driven by each round's own tool-call content (repeated,
+        accumulating every round) rather than by the one-off project
+        snapshot, which is capped at `MAX_CONTEXT_TOKENS` and so cannot by
+        itself be tuned past that ceiling — a per-round, cumulative cost is
+        what keeps this calibration comfortably clear of small shifts in the
+        system prompt or tool-definition overhead.
       */
       let taken = false;
       let boundaries = 0;
@@ -1036,14 +1047,45 @@ describe("a direction is applied only when the model receives it", () => {
           if (final || taken) return null;
           boundaries += 1;
           // Late enough that the following round is the one that overruns.
-          if (boundaries < 3) return null;
+          if (boundaries < 4) return null;
           taken = true;
           return "Focus on smaller agencies.";
         },
+        runResearch: async () => ({ ok: true, findingTitle: "Test finding" }),
+        addEvidence: async () => ({ ok: true, linked: true }),
       };
+      /*
+        Schema-valid but large: `propose_connected_change` allows up to 12
+        items with a 2,000-character `before` and `after` each — around
+        48,000 characters, repeated and accumulating every round. One tool
+        call per round keeps this well clear of the separate tool-call-count
+        bound, so the budget check is the only one this can trip.
+      */
+      const bigProposal = {
+        title: "A large proposal",
+        rationale: "z".repeat(500),
+        items: Array.from({ length: 12 }, (_, i) => ({
+          area: "problem",
+          key: `field_${i}`,
+          before: "z".repeat(2_000),
+          after: "z".repeat(2_000),
+        })),
+        remainingUncertainty: "z".repeat(500),
+      };
+      const bigToolRound = (id: string): StubTurn => ({
+        blocks: [
+          {
+            type: "tool_use",
+            id,
+            name: "propose_connected_change",
+            input: bigProposal,
+          },
+        ],
+        stopReason: "tool_use",
+      });
       const stub = stubClient(
         Array.from({ length: MAX_PROVIDER_ROUNDS }, (_, index) =>
-          toolRound(`t${index}`),
+          bigToolRound(`t${index}`),
         ),
       );
       const engine = new AnthropicDiscoveryEngine({
@@ -1053,12 +1095,7 @@ describe("a direction is applied only when the model receives it", () => {
           objects: [],
           relationshipIds: [],
           focalObjectId: null,
-          // Filled to the context budget, so every round re-sends a large
-          // payload and the cumulative input bound is what stops the turn.
-          recentMessages: Array.from({ length: 12 }, (_, index) => ({
-            role: "user" as const,
-            content: `${"z".repeat(20_000)}${index}`,
-          })),
+          recentMessages: [],
         }),
       });
       const turn = await engine.runTurn(input, hooks);

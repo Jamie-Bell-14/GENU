@@ -219,6 +219,8 @@ export function WorkspaceShell({
                   objects={liveObjects}
                   relationships={liveRelationships}
                   recommendedScene={runtime.state.recommendedScene}
+                  activeResearch={runtime.state.activeResearch}
+                  unavailableSources={runtime.state.unavailableSources}
                   activity={runtime.state.activity.canvas}
                   onEdit={onEditObject}
                 />
@@ -231,6 +233,8 @@ export function WorkspaceShell({
               objects={liveObjects}
               relationships={liveRelationships}
               recommendedScene={runtime.state.recommendedScene}
+              activeResearch={runtime.state.activeResearch}
+              unavailableSources={runtime.state.unavailableSources}
               activity={runtime.state.activity.canvas}
               onEdit={onEditObject}
             />

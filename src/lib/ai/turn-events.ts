@@ -1,6 +1,7 @@
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { CanvasScene } from "@/lib/canvas/scene";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import {
   activityLabel,
   ACTIVITY_STEPS,
@@ -109,7 +110,8 @@ export interface SafeError {
     | "session_expired"
     | "message_too_long"
     | "turn_interrupted"
-    | "engine_unavailable";
+    | "engine_unavailable"
+    | "research_source_unavailable";
   /** What happened, what remains usable, what to do next (DESIGN.md §16). */
   userMessage: string;
   recoverable: boolean;
@@ -127,8 +129,22 @@ export type TurnEvent =
    * §9.1). It is not in `EngineEvent`, so an engine cannot emit one: only
    * application code that has run `validateScene` against the project's own
    * ids can put a scene on this stream.
+   *
+   * Carries the turn's own id (issue #13, T10 exit gate): a recommendation
+   * queued on the client has to be traceable to the turn that produced it, so
+   * a *different* turn's later failure can never invalidate it.
    */
-  | { type: "scene_recommended"; scene: CanvasScene }
+  | { type: "scene_recommended"; scene: CanvasScene; turnId: string }
+  /**
+   * Research activity for the running turn (docs/ARCHITECTURE.md §9, T10).
+   * Sources and the failed one stream as they are found; the finding replaces
+   * them once research completes. None of this is project truth — it is
+   * ephemeral, pre-evidence content, kept out of `CanvasScene` on purpose
+   * (docs/AI_SYSTEM.md §9: a scene may only name existing project objects).
+   */
+  | { type: "research_source"; source: ResearchSource }
+  | { type: "research_failed_source"; source: ResearchSource; reason: string }
+  | { type: "research_finding"; finding: ResearchFinding }
   /**
    * The project model after a turn's accepted writes, re-read by the
    * application from its own tables.
@@ -147,7 +163,12 @@ export type TurnEvent =
     }
   /** Emitted when the running turn actually picked the direction up. */
   | { type: "direction_applied"; note: string }
-  | { type: "turn_failed"; error: SafeError }
+  /**
+   * Carries the failing turn's own id (issue #13, T10 exit gate) so the
+   * reducer can clear only *that* turn's queued scene recommendation — never
+   * a different turn's, whether older or newer.
+   */
+  | { type: "turn_failed"; turnId: string; error: SafeError }
   | { type: "done" };
 
 /**
@@ -165,6 +186,15 @@ export type EngineEvent = Exclude<
   | { type: "scene_recommended" }
   | { type: "direction_applied" }
   | { type: "done" }
+  /*
+   * Research events are emitted by the host's `runResearch` orchestration
+   * (turn-hooks.ts), which alone knows a provider event actually happened —
+   * an engine only ever awaits `hooks.runResearch(...)` and reacts to its
+   * outcome, the same boundary `recommendScene` already draws.
+   */
+  | { type: "research_source" }
+  | { type: "research_failed_source" }
+  | { type: "research_finding" }
 >;
 
 export interface Message {
@@ -230,8 +260,30 @@ export interface TurnState {
   /** Everything that happened this session, newest last. Never cleared. */
   activityLog: ActivityLine[];
   actions: ContextualAction[];
-  /** The most recent validated scene recommendation, for the canvas host. */
-  recommendedScene: CanvasScene | null;
+  /**
+   * The most recent validated scene recommendation, for the canvas host, with
+   * the id of the turn that produced it (issue #13: the only way a later
+   * `turn_failed` can be checked against the recommendation it actually
+   * belongs to, rather than clearing whatever happens to be queued).
+   */
+  recommendedScene: { scene: CanvasScene; turnId: string } | null;
+  /**
+   * The research finding this session's most recent research produced, if
+   * any (T10). Deliberately not cleared when its turn ends: "Add as evidence"
+   * is a *later* turn's action, and this is the only record of which finding
+   * that later turn concerns — the server holds nothing between turns (see
+   * `src/lib/research/types.ts`). Reloading the page loses it, the same
+   * limitation an unaccepted scene recommendation already has.
+   */
+  activeResearch: ResearchFinding | null;
+  /**
+   * Sources research has reported unavailable this session (T10 edge case),
+   * oldest first. Kept for the same reason `activityLog` is: a source that
+   * failed is as real an event as one that succeeded, and the research view
+   * should be able to show it plainly rather than only alluding to it in a
+   * finding's own limitations text.
+   */
+  unavailableSources: { source: ResearchSource; reason: string }[];
   /**
    * The project model as last re-read by the server during this session; null
    * until a turn changes something, when the server-rendered props still stand.
@@ -281,6 +333,8 @@ export const INITIAL_TURN_STATE: TurnState = {
   activityLog: [],
   actions: [],
   recommendedScene: null,
+  activeResearch: null,
+  unavailableSources: [],
   projectModel: null,
   direction: null,
   error: null,
@@ -602,8 +656,39 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
 
         case "scene_recommended":
           // Held for the canvas host, which applies its own validation before
-          // rendering. Nothing here touches project truth.
-          return { ...state, recommendedScene: action.event.scene };
+          // rendering. Nothing here touches project truth. Tagged with the
+          // turn that produced it (issue #13), so a later failure can be
+          // checked against the recommendation it actually belongs to.
+          return {
+            ...state,
+            recommendedScene: {
+              scene: action.event.scene,
+              turnId: action.event.turnId,
+            },
+          };
+
+        case "research_source":
+          // Reported to the activity/history surfaces only.
+          return state;
+
+        case "research_failed_source":
+          return {
+            ...state,
+            unavailableSources: [
+              ...state.unavailableSources,
+              { source: action.event.source, reason: action.event.reason },
+            ],
+          };
+
+        case "research_finding":
+          /*
+            Any `research_failed_source` for this same pass already arrived
+            before its finding does (the provider reports sources, then the
+            finding they informed), so `unavailableSources` is already this
+            pass's own list by the time this fires — replacing it wholesale
+            here would either duplicate or drop nothing, so it is left as is.
+          */
+          return { ...state, activeResearch: action.event.finding };
 
         case "project_model_updated":
           /*
@@ -634,13 +719,26 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             streaming: null,
             activity: NO_ACTIVITY,
             /*
-              Actions and scene recommendations are emitted as the turn goes, so
-              a turn that then fails would otherwise leave buttons and a
-              proposed view belonging to work that was abandoned — offering the
-              user next steps for an answer they never received.
+              Actions are emitted as the turn goes, so a turn that then fails
+              would otherwise leave buttons belonging to work that was
+              abandoned — offering the user next steps for an answer they
+              never received.
             */
             actions: [],
-            recommendedScene: null,
+            /*
+              Issue #13 (T10 exit gate): cleared only when it is *this* turn's
+              own recommendation. Without the turn-id check, a stale
+              `turn_failed` — one that reaches the reducer after a newer turn
+              has already recommended its own scene — would wipe out a
+              recommendation that never failed. Scoping the clear to a
+              matching id is what keeps "turn A fails" and "turn B owns the
+              current recommendation" from being able to interfere with each
+              other, whichever order their events arrive in.
+            */
+            recommendedScene:
+              state.recommendedScene?.turnId === action.event.turnId
+                ? null
+                : state.recommendedScene,
             status: "idle",
           };
 

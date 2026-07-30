@@ -13,6 +13,8 @@ import {
 import type { TurnResult } from "@/lib/ai/discovery-engine";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { commitTurn } from "@/lib/services/model-operations";
+import { writeEvidence } from "@/lib/services/evidence";
+import { MockResearchProvider } from "@/lib/research/mock-research-provider";
 import {
   closeTurnRun,
   completeTurnRecord,
@@ -327,6 +329,17 @@ export async function POST(
           emit,
           scope: turnScope.scope,
           reporter,
+          turnId,
+          researchProvider: new MockResearchProvider(),
+          focalObjectId: turnScope.focalObjectId,
+          activeFindingId: parsed.data.activeFindingId ?? null,
+          writeEvidence: ({ finding, objectId, consequenceSummary }) =>
+            writeEvidence(supabase, {
+              projectId,
+              finding,
+              objectId,
+              consequenceSummary,
+            }),
           onSceneAccepted: (scene) =>
             audit("scene_recommended", {
               target: scene.renderer,
@@ -431,6 +444,7 @@ export async function POST(
             */
             await finishTurn(
               {
+                turnId,
                 /*
                   One transaction, through the one port that can reach it.
                   The elevated function is authorised against this user
@@ -511,6 +525,7 @@ export async function POST(
         await closeTurnRun({ turnId, state: "failed" });
         emit({
           type: "turn_failed",
+          turnId,
           error: {
             code: "engine_unavailable",
             userMessage:

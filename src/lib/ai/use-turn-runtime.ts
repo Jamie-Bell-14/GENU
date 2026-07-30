@@ -304,6 +304,11 @@ export function useTurnRuntime({
         type: "event",
         event: {
           type: "turn_failed",
+          // The server never named this turn, so the message's own id stands
+          // in (see `Message.turnId`'s doc comment) — it cannot collide with
+          // a real turn id, so it cannot wrongly clear another turn's queued
+          // recommendation either.
+          turnId: messageId,
           error: {
             code: "engine_unavailable",
             userMessage:
@@ -318,7 +323,14 @@ export function useTurnRuntime({
       const response = await fetch(turnsEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message }),
+        // `activeFindingId` tells the server which research finding this
+        // session is looking at (T10, `src/lib/research/types.ts`): nothing
+        // about a research run persists server-side between turns, so
+        // "Add as evidence" would otherwise have nothing to link.
+        body: JSON.stringify({
+          message,
+          activeFindingId: state.activeResearch?.id ?? null,
+        }),
         signal: controller.signal,
       });
       /*

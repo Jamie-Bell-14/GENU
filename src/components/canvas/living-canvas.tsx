@@ -24,6 +24,8 @@ import {
   type SceneState,
   type ViewMode,
 } from "@/lib/canvas/scene-state";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
+import { EvidenceResearchRenderer } from "./renderers/evidence-research";
 import { ProblemExplorationRenderer } from "./renderers/problem-exploration";
 import { StructuredInspector } from "./structured-inspector";
 import type { EditSubmit } from "./object-editor";
@@ -95,6 +97,8 @@ export function LivingCanvas({
   relationships = [],
   initialScene = null,
   recommendedScene = null,
+  activeResearch = null,
+  unavailableSources = [],
   activity = null,
   loading = false,
   error = null,
@@ -104,11 +108,21 @@ export function LivingCanvas({
   relationships?: ProjectRelationship[];
   initialScene?: CanvasScene | null;
   /**
-   * A scene the running turn recommended. It has already passed server-side
+   * A scene the running turn recommended, tagged with the turn that produced
+   * it (issue #13, T10 exit gate). It has already passed server-side
    * validation; the host validates it again against the ids it actually
    * rendered, because the boundary belongs to whatever is about to draw.
    */
-  recommendedScene?: CanvasScene | null;
+  recommendedScene?: { scene: CanvasScene; turnId: string } | null;
+  /**
+   * The current research finding (T10), for the `evidence_research`
+   * renderer. Not part of `CanvasScene`: it is ephemeral, pre-evidence
+   * content, never a project object a scene could name
+   * (docs/AI_SYSTEM.md §9).
+   */
+  activeResearch?: ResearchFinding | null;
+  /** Sources research has reported unavailable this session (T10 edge case). */
+  unavailableSources?: { source: ResearchSource; reason: string }[];
   /** Research and canvas activity for the running turn (DESIGN.md §9.1). */
   activity?: ActivityLine | null;
   loading?: boolean;
@@ -239,16 +253,41 @@ export function LivingCanvas({
     duplication — the server validated against the project, this validates
     against what is actually on screen, and neither trusts the other.
   */
-  const lastRecommendation = useRef<CanvasScene | null>(null);
+  const lastRecommendation = useRef<{
+    scene: CanvasScene;
+    turnId: string;
+  } | null>(null);
   useEffect(() => {
-    if (!recommendedScene || recommendedScene === lastRecommendation.current) {
+    if (!recommendedScene) {
+      /*
+        Issue #13 (T10 exit gate): `recommendedScene` only ever becomes null
+        because `turnReducer` cleared *its own matching turn's* entry on
+        `turn_failed` — nothing else in that reducer touches it. So the turn
+        that owned the last recommendation this host received is the one that
+        just failed, and a copy still queued from that same turn is stale.
+        `invalidate_queued` clears it only if it is still that turn's own
+        entry — a newer recommendation the user has not acted on yet, or one
+        they already accepted or dismissed, is untouched either way.
+      */
+      if (lastRecommendation.current) {
+        dispatchScene({
+          type: "invalidate_queued",
+          turnId: lastRecommendation.current.turnId,
+        });
+        lastRecommendation.current = null;
+      }
       return;
     }
+    if (recommendedScene === lastRecommendation.current) return;
     lastRecommendation.current = recommendedScene;
-    const result = validateScene(recommendedScene, scope);
+    const result = validateScene(recommendedScene.scene, scope);
     dispatchScene(
       result.ok
-        ? { type: "recommend_scene", scene: result.scene }
+        ? {
+            type: "recommend_scene",
+            scene: result.scene,
+            turnId: recommendedScene.turnId,
+          }
         : { type: "scene_rejected", rejection: result.rejection },
     );
   }, [recommendedScene, scope]);
@@ -328,7 +367,7 @@ export function LivingCanvas({
         {sceneState.queued && (
           <div className="border-edge-subtle bg-surface-secondary flex items-center justify-between gap-2 border-b px-3 py-2">
             <p className="text-fg-secondary text-xs">
-              Canvas updated · {sceneState.queued.reason}
+              Canvas updated · {sceneState.queued.scene.reason}
             </p>
             <div className="flex gap-1">
               <Button
@@ -372,6 +411,11 @@ export function LivingCanvas({
           </p>
         ) : objects.length === 0 ? (
           <EmptyCanvas />
+        ) : showVisual && scene?.renderer === "evidence_research" ? (
+          <EvidenceResearchRenderer
+            finding={activeResearch}
+            unavailableSources={unavailableSources}
+          />
         ) : showVisual ? (
           <ProblemExplorationRenderer
             map={map}

@@ -22,6 +22,16 @@ interface AssumptionRow {
   recommended_validation: string | null;
 }
 
+interface EvidenceLinkRow {
+  id: string;
+  consequence_summary: string;
+  evidence: {
+    title: string;
+    source_name: string;
+    is_demo: boolean;
+  } | null;
+}
+
 const ASSUMPTION_SUPPORT: Record<string, SupportState> = {
   open: "hypothesis",
   supported: "some_evidence",
@@ -54,7 +64,7 @@ export async function loadCanvasObjects(
   supabase: SupabaseClient,
   projectId: string,
 ): Promise<LoadResult<CanvasObject[]>> {
-  const [fields, assumptions] = await Promise.all([
+  const [fields, assumptions, evidenceLinks] = await Promise.all([
     supabase
       .from("project_fields")
       .select("id, area, label, value, origin, support, updated_at")
@@ -69,6 +79,14 @@ export async function loadCanvasObjects(
       .eq("project_id", projectId)
       .order("created_at", { ascending: true })
       .limit(50),
+    supabase
+      .from("evidence_links")
+      .select(
+        "id, consequence_summary, evidence:evidence_id (title, source_name, is_demo)",
+      )
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: true })
+      .limit(100),
   ]);
 
   const objects: CanvasObject[] = [];
@@ -108,9 +126,33 @@ export async function loadCanvasObjects(
     });
   }
 
+  for (const row of (evidenceLinks.data ??
+    []) as unknown as EvidenceLinkRow[]) {
+    // PostgREST embeds a to-one FK as an object; a malformed or missing join
+    // is skipped rather than rendered with placeholder text.
+    const evidence = Array.isArray(row.evidence)
+      ? (row.evidence[0] ?? null)
+      : row.evidence;
+    if (!evidence) continue;
+    objects.push({
+      id: row.id,
+      kind: "evidence",
+      zone: "evidence",
+      title: evidence.title,
+      detail: row.consequence_summary,
+      origin: "researched",
+      meta: evidence.is_demo
+        ? `${evidence.source_name} · Demonstration data`
+        : evidence.source_name,
+    });
+  }
+
   return {
     data: objects,
-    failed: Boolean(fields.error) || Boolean(assumptions.error),
+    failed:
+      Boolean(fields.error) ||
+      Boolean(assumptions.error) ||
+      Boolean(evidenceLinks.error),
   };
 }
 

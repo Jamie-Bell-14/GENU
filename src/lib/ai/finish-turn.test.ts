@@ -20,9 +20,12 @@ const completed = (patch: Partial<CommitResult> = {}): CommitResult => ({
   ...patch,
 });
 
+const TURN_ID = "dddddddd-0000-4000-8000-000000000001";
+
 function setup(overrides: Partial<FinishTurnPorts> = {}) {
   const events: TurnEvent[] = [];
   const ports: FinishTurnPorts = {
+    turnId: TURN_ID,
     completeTurn: vi.fn(async () => completed()),
     publishProjectModel: vi.fn(async () => {}),
     closeRun: vi.fn(async () => true),
@@ -163,6 +166,7 @@ describe("finishing a turn", () => {
     const closeRun = vi.fn(async () => true);
     await finishTurn(
       {
+        turnId: TURN_ID,
         completeTurn: vi.fn(async () => completed({ outcome: "unavailable" })),
         publishProjectModel: vi.fn(async () => {}),
         closeRun,

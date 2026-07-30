@@ -1,5 +1,7 @@
 import type { ActivityStep } from "./activity-steps";
+import { resolveActions } from "./contextual-actions";
 import type { EngineEvent } from "./turn-events";
+import type { ResearchTask } from "@/lib/research/types";
 
 /**
  * The minimum project context an engine receives. Ids only: an engine needs to
@@ -95,7 +97,42 @@ export interface TurnHooks {
    * will never come.
    */
   takeDirection(options: { final: boolean }): Promise<string | null>;
+  /**
+   * Runs the slice's one research provider to completion inside this turn
+   * (docs/ARCHITECTURE.md §9, T10). Steps, sources and the finding stream to
+   * the client as they happen; this resolves once the pass is over, stopped,
+   * or failed. The engine is told only enough to phrase an honest reply — the
+   * finding's full detail reaches the canvas directly, never through the
+   * engine (docs/AI_SYSTEM.md §9.1: a scene names existing objects, it does
+   * not carry render content the model composed).
+   */
+  runResearch(
+    task: ResearchTask,
+    signal?: AbortSignal,
+  ): Promise<ResearchOutcome>;
+  /**
+   * Records the turn's own research finding as evidence, linked to the
+   * turn's focal object (VERTICAL_SLICE_SPEC Step 6). Which finding and which
+   * object are the host's to decide — from what this turn's research
+   * actually produced and from the project's own reading of what is in focus
+   * — never from anything the model names, so a call here cannot attach
+   * fabricated provenance to an arbitrary object.
+   */
+  addEvidence(input: {
+    consequenceSummary: string;
+  }): Promise<AddEvidenceOutcome>;
 }
+
+export type ResearchOutcome =
+  | { ok: true; findingTitle: string }
+  | { ok: false; reason: "stopped" | "unavailable" };
+
+export type AddEvidenceOutcome =
+  | { ok: true; linked: boolean }
+  | {
+      ok: false;
+      reason: "no_active_research" | "no_focal_object" | "failed";
+    };
 
 export type DirectionApplicationMode = "applies_now" | "next_step" | "restart";
 
@@ -144,6 +181,7 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     const interrupted = () => {
       hooks.emit({
         type: "turn_failed",
+        turnId: input.turnId,
         error: {
           code: "turn_interrupted",
           userMessage:
@@ -157,6 +195,21 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     if (signal?.aborted) return interrupted();
 
     const trimmed = input.userMessage.trim();
+
+    /*
+      Recognised by exact text, not understanding — this engine performs no
+      analysis at all (see the class doc). The live engine recognises the same
+      requests by what they mean, through the same two tools
+      (docs/ARCHITECTURE.md §8); this is only the deterministic stand-in CI and
+      Playwright run against.
+    */
+    if (trimmed.toLowerCase() === "research this") {
+      return this.runResearchTurn(input, hooks, signal, interrupted);
+    }
+    if (trimmed.toLowerCase() === "add as evidence") {
+      return this.runAddEvidenceTurn(input, hooks, signal, interrupted);
+    }
+
     const preview =
       trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
     const lines = [
@@ -238,6 +291,99 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     // outcome is recorded.
     // The scripted engine proposes no project-truth operations.
     return { assistantText: lines.join("\n"), operations: [] };
+  }
+
+  /**
+   * "Research this" (VERTICAL_SLICE_SPEC Step 4). Runs the provider, then — on
+   * a finding — recommends the research view and names the one action that
+   * genuinely follows from it.
+   */
+  private async runResearchTurn(
+    input: TurnInput,
+    hooks: TurnHooks,
+    signal: AbortSignal | undefined,
+    interrupted: () => TurnResult,
+  ): Promise<TurnResult> {
+    if (signal?.aborted) return interrupted();
+
+    const outcome = await hooks.runResearch(
+      {
+        topic: input.userMessage.trim(),
+        focalObjectId: input.context?.focalObjectId ?? null,
+      },
+      signal,
+    );
+    if (signal?.aborted) return interrupted();
+
+    if (!outcome.ok) {
+      const text =
+        outcome.reason === "stopped"
+          ? "Research was stopped before it produced a finding."
+          : "Research could not run just now. Nothing was added to the project.";
+      hooks.emit({ type: "block", kind: "plain" });
+      if (!(await this.stream(text, hooks, signal))) return interrupted();
+      return { assistantText: text, operations: [] };
+    }
+
+    const focalObjectId = input.context?.focalObjectId;
+    if (focalObjectId) {
+      await hooks.recommendScene({
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId,
+        visibleObjectIds: [focalObjectId],
+        visibleRelationshipIds: [],
+        emphasis: "none",
+        reason: `Showing what was found: “${outcome.findingTitle}”. This is demonstration data.`,
+        transition: "replace",
+      });
+    }
+
+    const text = `I found: “${outcome.findingTitle}”. This is demonstration data, not a live lookup — see the canvas for the full finding, its sources and what it does and does not support.`;
+    hooks.emit({ type: "block", kind: "finding" });
+    if (!(await this.stream(text, hooks, signal))) return interrupted();
+
+    hooks.emit({
+      type: "actions",
+      actions: resolveActions(["add_as_evidence"]),
+    });
+    return { assistantText: text, operations: [] };
+  }
+
+  /** "Add as evidence" (VERTICAL_SLICE_SPEC Step 6). */
+  private async runAddEvidenceTurn(
+    input: TurnInput,
+    hooks: TurnHooks,
+    signal: AbortSignal | undefined,
+    interrupted: () => TurnResult,
+  ): Promise<TurnResult> {
+    if (signal?.aborted) return interrupted();
+
+    const outcome = await hooks.addEvidence({
+      consequenceSummary:
+        "It supports that deposit disputes occur at meaningfully different rates across agency sizes in the scripted scenario. It does not establish anything about a real agency's own dispute rate, and the two demonstration sources disagree on the overall figure.",
+    });
+    if (signal?.aborted) return interrupted();
+
+    const text = ((): string => {
+      if (outcome.ok) {
+        return outcome.linked
+          ? "I added the evidence. It supports that deposit disputes occur at meaningfully different rates across agency sizes in the scripted scenario — it does not establish anything about a real agency's own rate, and the two demonstration sources disagree on the overall figure."
+          : "That finding is already linked as evidence here, so I have not added it a second time.";
+      }
+      switch (outcome.reason) {
+        case "no_active_research":
+          return "There is no research finding to add right now — run research first.";
+        case "no_focal_object":
+          return "There is no object currently in focus to link evidence to.";
+        case "failed":
+          return "The evidence could not be saved just now. Nothing was added.";
+      }
+    })();
+
+    hooks.emit({ type: "block", kind: "plain" });
+    if (!(await this.stream(text, hooks, signal))) return interrupted();
+    return { assistantText: text, operations: [] };
   }
 
   /** Streams text, returning false if the turn was stopped part-way. */

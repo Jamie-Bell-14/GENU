@@ -21,6 +21,8 @@ function scene(id: string, transition: CanvasScene["transition"] = "replace") {
 
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "aaaaaaaa-0000-4000-8000-000000000002";
+const TURN_A = "dddddddd-0000-4000-8000-000000000001";
+const TURN_B = "dddddddd-0000-4000-8000-000000000002";
 
 describe("sceneReducer", () => {
   it("applies a user-requested scene immediately and records history", () => {
@@ -36,9 +38,14 @@ describe("sceneReducer", () => {
 
   it("queues a recommendation instead of moving content under the cursor", () => {
     let state = initialSceneState(scene(A));
-    state = sceneReducer(state, { type: "recommend_scene", scene: scene(B) });
+    state = sceneReducer(state, {
+      type: "recommend_scene",
+      scene: scene(B),
+      turnId: TURN_A,
+    });
     expect(state.current?.focalObjectId).toBe(A);
-    expect(state.queued?.focalObjectId).toBe(B);
+    expect(state.queued?.scene.focalObjectId).toBe(B);
+    expect(state.queued?.turnId).toBe(TURN_A);
 
     state = sceneReducer(state, { type: "accept_queued" });
     expect(state.current?.focalObjectId).toBe(B);
@@ -47,7 +54,11 @@ describe("sceneReducer", () => {
 
   it("lets the user decline a recommendation and stay where they are", () => {
     let state = initialSceneState(scene(A));
-    state = sceneReducer(state, { type: "recommend_scene", scene: scene(B) });
+    state = sceneReducer(state, {
+      type: "recommend_scene",
+      scene: scene(B),
+      turnId: TURN_A,
+    });
     state = sceneReducer(state, { type: "dismiss_queued" });
     expect(state.queued).toBeNull();
     expect(state.current?.focalObjectId).toBe(A);
@@ -58,8 +69,59 @@ describe("sceneReducer", () => {
     const next = sceneReducer(state, {
       type: "recommend_scene",
       scene: scene(B, "preserve"),
+      turnId: TURN_A,
     });
     expect(next).toBe(state);
+  });
+
+  describe("invalidate_queued (issue #13, T10 exit gate)", () => {
+    it("clears a queued recommendation when its own turn fails", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: scene(B),
+        turnId: TURN_A,
+      });
+      state = sceneReducer(state, {
+        type: "invalidate_queued",
+        turnId: TURN_A,
+      });
+      expect(state.queued).toBeNull();
+      // The current view is untouched — only the queue is invalidated.
+      expect(state.current?.focalObjectId).toBe(A);
+    });
+
+    it("does not clear a newer turn's recommendation when an older turn fails", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: scene(B),
+        turnId: TURN_B,
+      });
+      // TURN_A is not the turn that owns the current queue.
+      state = sceneReducer(state, {
+        type: "invalidate_queued",
+        turnId: TURN_A,
+      });
+      expect(state.queued?.turnId).toBe(TURN_B);
+      expect(state.queued?.scene.focalObjectId).toBe(B);
+    });
+
+    it("is a no-op once the recommendation has already been accepted or dismissed", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: scene(B),
+        turnId: TURN_A,
+      });
+      state = sceneReducer(state, { type: "accept_queued" });
+      const afterAccept = sceneReducer(state, {
+        type: "invalidate_queued",
+        turnId: TURN_A,
+      });
+      expect(afterAccept).toBe(state);
+      expect(afterAccept.current?.focalObjectId).toBe(B);
+    });
   });
 
   it("leaves the current view untouched when a scene is rejected", () => {

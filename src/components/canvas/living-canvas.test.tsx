@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
+import type { CanvasScene } from "@/lib/canvas/scene";
 import { LivingCanvas } from "./living-canvas";
 
 const PROBLEM = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -221,7 +222,7 @@ describe("problem-exploration renderer", () => {
 });
 
 describe("recommended scenes", () => {
-  const recommendation = {
+  const recommendation: CanvasScene = {
     renderer: "problem_exploration",
     purpose: "explore_problem",
     focalObjectId: CAUSE,
@@ -230,10 +231,20 @@ describe("recommended scenes", () => {
     emphasis: "none",
     reason: "The conversation moved to missing check-in evidence.",
     transition: "replace",
-  } as const;
+  };
+
+  // `recommendedScene` carries the id of the turn that produced it (issue
+  // #13, T10 exit gate); tests default to a fixed turn unless they need a
+  // different one.
+  function withTurn(
+    scene: CanvasScene,
+    turnId = "dddddddd-0000-4000-8000-000000000001",
+  ) {
+    return { scene, turnId };
+  }
 
   it("queues a recommendation with its reason instead of moving the view", () => {
-    renderCanvas({ recommendedScene: recommendation });
+    renderCanvas({ recommendedScene: withTurn(recommendation) });
 
     expect(
       screen.getByText(/The conversation moved to missing check-in evidence/),
@@ -246,7 +257,7 @@ describe("recommended scenes", () => {
 
   it("applies the recommendation only when the user takes it", async () => {
     const user = userEvent.setup();
-    renderCanvas({ recommendedScene: recommendation });
+    renderCanvas({ recommendedScene: withTurn(recommendation) });
 
     await user.click(screen.getByRole("button", { name: "Show it" }));
     expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
@@ -256,7 +267,7 @@ describe("recommended scenes", () => {
 
   it("lets the user decline and stay where they are", async () => {
     const user = userEvent.setup();
-    renderCanvas({ recommendedScene: recommendation });
+    renderCanvas({ recommendedScene: withTurn(recommendation) });
 
     await user.click(screen.getByRole("button", { name: "Stay here" }));
     expect(screen.queryByRole("button", { name: "Show it" })).toBeNull();
@@ -267,7 +278,7 @@ describe("recommended scenes", () => {
 
   it("returns to the previous scene after accepting one", async () => {
     const user = userEvent.setup();
-    renderCanvas({ recommendedScene: recommendation });
+    renderCanvas({ recommendedScene: withTurn(recommendation) });
 
     await user.click(screen.getByRole("button", { name: "Show it" }));
     await user.click(
@@ -280,12 +291,12 @@ describe("recommended scenes", () => {
 
   it("refuses a scene naming an object this canvas did not render", () => {
     renderCanvas({
-      recommendedScene: {
+      recommendedScene: withTurn({
         ...recommendation,
         focalObjectId: "eeeeeeee-0000-4000-8000-000000000009",
         visibleObjectIds: ["eeeeeeee-0000-4000-8000-000000000009"],
         visibleRelationshipIds: [],
-      },
+      }),
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
@@ -299,8 +310,56 @@ describe("recommended scenes", () => {
 
   it("does not interrupt when the recommendation preserves the view", () => {
     renderCanvas({
-      recommendedScene: { ...recommendation, transition: "preserve" },
+      recommendedScene: withTurn({ ...recommendation, transition: "preserve" }),
     });
     expect(screen.queryByRole("button", { name: "Show it" })).toBeNull();
+  });
+
+  describe("issue #13: invalidating a stale recommendation", () => {
+    it("removes a queued recommendation when its own turn's prop clears", () => {
+      const { rerender } = renderCanvas({
+        recommendedScene: withTurn(recommendation, "turn-a"),
+      });
+      expect(
+        screen.getByRole("button", { name: "Show it" }),
+      ).toBeInTheDocument();
+
+      // The parent only ever nulls `recommendedScene` for the turn that owns
+      // it (turnReducer's own turn-id check) — simulating that here is what
+      // the client-side invalidation this issue requires must react to.
+      rerender(
+        <LivingCanvas
+          objects={objects}
+          relationships={relationships}
+          recommendedScene={null}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: "Show it" })).toBeNull();
+    });
+
+    it("keeps a newer turn's recommendation when a different turn's clears", () => {
+      const { rerender } = renderCanvas({
+        recommendedScene: withTurn(recommendation, "turn-a"),
+      });
+      // Turn B's recommendation replaces turn A's — an ordinary update.
+      rerender(
+        <LivingCanvas
+          objects={objects}
+          relationships={relationships}
+          recommendedScene={withTurn(recommendation, "turn-b")}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Show it" }),
+      ).toBeInTheDocument();
+
+      // A stale null for turn A's slot must not appear once turn B owns the
+      // queue — nothing forces that ordering here since the reducer already
+      // guarantees it, but the client must not misread a prop update as an
+      // invalidation of the *newer* recommendation it just adopted.
+      expect(
+        screen.getByText(/The conversation moved to missing check-in evidence/),
+      ).toBeInTheDocument();
+    });
   });
 });

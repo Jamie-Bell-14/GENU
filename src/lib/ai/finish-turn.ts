@@ -1,26 +1,59 @@
+import type {
+  CommitResult,
+  OperationOutcome,
+} from "@/lib/services/model-operations";
 import type { TurnEvent } from "./turn-events";
 
 /**
- * Ending a turn.
+ * Ending a turn — the application's one durable boundary (docs/AI_SYSTEM.md
+ * §4.1).
  *
- * The host owns this, not the engine, and the order matters: the result is
- * stored, the turn's operational outcome is recorded, and only then is the
- * interface told the turn is done. Doing it the other way round can leave an
- * answer on screen that a reload destroys — the user saw a completed response,
- * the message was never persisted, and the record says it completed.
+ * The host owns this, not the engine, and it is deliberately one commit rather
+ * than an ordered sequence of them.
+ *
+ * Ordering alone was not enough, and the reason is worth stating plainly.
+ * Catch-up treats a stored assistant message as settlement — a stored result
+ * settles the turn, whatever the run state says — so a worker that died after
+ * the answer was inserted but before the project writes committed left a turn
+ * that *reads* as completed while every field and assumption belonging to it had
+ * been lost. No ordering of separate writes fixes that. `completeTurn` therefore
+ * stores the answer, applies the accepted operations and records the terminal
+ * state in a single transaction: either the turn ended, or it did not.
+ *
+ * What remains outside that commit is only what cannot be inside it — telling
+ * the canvas what the project now holds, which is a re-read *after* the write
+ * landed, and never anything the model described.
  *
  * It lives apart from the route so the rule can be tested directly rather than
  * inferred from a streaming integration test.
  */
 export interface FinishTurnPorts {
-  /** Stores the assistant result. Returns false when it was not stored. */
-  persistResult(text: string): Promise<boolean>;
-  /** Records the turn's outcome exactly once. Returns false if it did not. */
-  closeRun(state: "completed" | "failed"): Promise<boolean>;
+  /**
+   * The single durable operation: the answer, the turn's project-truth writes
+   * and its terminal state, committed together.
+   *
+   * Individual operations may still be refused inside it — a field the person
+   * owns is expected to be refused — and a refusal is recorded per operation
+   * rather than failing the turn.
+   */
+  completeTurn(assistantText: string): Promise<CommitResult>;
+  /**
+   * Re-reads project truth and tells the canvas. Separate from `completeTurn`
+   * so the emission cannot precede the commit: what the canvas shows comes from
+   * the application's own tables after the write landed.
+   */
+  publishProjectModel(): Promise<void>;
+  /**
+   * Records a failed outcome. Only the failure paths need it — a completed turn
+   * is closed inside its own transaction.
+   */
+  closeRun(state: "failed"): Promise<boolean>;
   audit(
     action: "turn_completed" | "turn_failed",
     detail?: Record<string, string | number>,
   ): Promise<void>;
+  /** Records what the transaction did with one staged operation. */
+  auditOperation(outcome: OperationOutcome): Promise<void>;
   emit(event: TurnEvent): void;
 }
 
@@ -34,14 +67,6 @@ export async function finishTurn(
     never record that it failed, and the run would stay eligible for direction
     and recoverable until its lease expired.
   */
-  const fail = async (code: string, userMessage: string) => {
-    await ports.closeRun("failed");
-    await ports.audit("turn_failed", { code });
-    ports.emit({
-      type: "turn_failed",
-      error: { code: "engine_unavailable", userMessage, recoverable: true },
-    });
-  };
 
   // An engine that produced nothing did not complete, whatever else happened.
   if (!assistantText) {
@@ -50,31 +75,46 @@ export async function finishTurn(
     return;
   }
 
-  if (!(await ports.persistResult(assistantText))) {
-    return fail(
-      "result_not_saved",
-      "The response could not be saved, so it has not been kept. Your message is saved — send another when you are ready.",
-    );
-  }
+  const result = await ports.completeTurn(assistantText);
 
-  if (!(await ports.closeRun("completed"))) {
+  if (result.outcome !== "completed") {
     /*
-      The result is stored but the turn's state is not, so steering and
-      recovery would keep treating it as live until the lease expires. Saying
-      "done" here would be claiming a clean end the system cannot vouch for.
+      Nothing was stored: not the answer, not one field. The run is closed as
+      failed so steering and recovery stop treating it as live — except where it
+      already is not this turn's to close, in which case that write finds no
+      running row and changes nothing, which is correct.
     */
-    await ports.audit("turn_failed", { code: "state_not_recorded" });
+    await ports.closeRun("failed");
+    await ports.audit("turn_failed", {
+      code:
+        result.outcome === "not_running"
+          ? "turn_already_closed"
+          : "completion_failed",
+    });
     ports.emit({
       type: "turn_failed",
       error: {
         code: "engine_unavailable",
         userMessage:
-          "This turn could not be closed cleanly. Your message and the saved response are unaffected.",
+          result.outcome === "not_running"
+            ? "This turn had already been recorded as unfinished, so its response was not kept. Your message is saved — send another when you are ready."
+            : "The response could not be saved, so it has not been kept. Your message is saved — send another when you are ready.",
         recoverable: true,
       },
     });
     return;
   }
+
+  /*
+    Audited from what the database says it did, so an `operation_applied` row
+    means a row exists rather than that a write was attempted.
+  */
+  for (const outcome of result.outcomes) {
+    await ports.auditOperation(outcome);
+  }
+
+  // Only if the project really changed, and only after the commit.
+  if (result.changed) await ports.publishProjectModel();
 
   await ports.audit("turn_completed");
   ports.emit({ type: "done" });

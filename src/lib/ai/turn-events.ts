@@ -1,3 +1,5 @@
+import type { CanvasObject } from "@/lib/canvas/model";
+import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { CanvasScene } from "@/lib/canvas/scene";
 import {
   activityLabel,
@@ -127,6 +129,22 @@ export type TurnEvent =
    * ids can put a scene on this stream.
    */
   | { type: "scene_recommended"; scene: CanvasScene }
+  /**
+   * The project model after a turn's accepted writes, re-read by the
+   * application from its own tables.
+   *
+   * Not model-authored render data: the objects here are built by
+   * `loadCanvasObjects` from stored rows, so a turn can cause a refresh but
+   * cannot describe what appears. Without this event an assumption recorded
+   * during a turn only shows after a reload, which makes the canvas look
+   * broken at exactly the moment it is supposed to be alive
+   * (VERTICAL_SLICE_SPEC Steps 2–3).
+   */
+  | {
+      type: "project_model_updated";
+      objects: CanvasObject[];
+      relationships: ProjectRelationship[];
+    }
   /** Emitted when the running turn actually picked the direction up. */
   | { type: "direction_applied"; note: string }
   | { type: "turn_failed"; error: SafeError }
@@ -183,7 +201,14 @@ export interface ActivityBySurface {
 
 export interface PendingRecovery {
   turnId: string;
-  state: "checking" | "still_running" | "unavailable";
+  /**
+   * `unfinished` is a conclusion about *this* turn and lives here rather than
+   * in `state.error` for the same reason the list exists at all: a global
+   * error field cannot say which turn it belongs to, so an older turn's
+   * verdict would appear against a newer one — and resolving the older turn
+   * would clear an error the newer turn or a direction had raised.
+   */
+  state: "checking" | "still_running" | "unavailable" | "unfinished";
 }
 
 export const NO_ACTIVITY: ActivityBySurface = {
@@ -207,6 +232,14 @@ export interface TurnState {
   actions: ContextualAction[];
   /** The most recent validated scene recommendation, for the canvas host. */
   recommendedScene: CanvasScene | null;
+  /**
+   * The project model as last re-read by the server during this session; null
+   * until a turn changes something, when the server-rendered props still stand.
+   */
+  projectModel: {
+    objects: CanvasObject[];
+    relationships: ProjectRelationship[];
+  } | null;
   /**
    * Steering the user added to the running turn. `applied` separates the
    * promise made when it was accepted from the moment the turn actually used
@@ -248,6 +281,7 @@ export const INITIAL_TURN_STATE: TurnState = {
   activityLog: [],
   actions: [],
   recommendedScene: null,
+  projectModel: null,
   direction: null,
   error: null,
   stopped: false,
@@ -257,6 +291,16 @@ export const INITIAL_TURN_STATE: TurnState = {
 
 export type TurnAction =
   | { type: "user_message_sent"; message: Message }
+  /**
+   * The server refused the send and saved nothing, so the optimistic message is
+   * withdrawn.
+   *
+   * Distinct from `turn_failed`, which describes a turn that really started: a
+   * refusal leaves the text in the composer for a retry, and a message that
+   * stayed in the stream as well would be the same sentence twice — then twice
+   * again in the database once the retry succeeded.
+   */
+  | { type: "send_refused"; messageId: string; error: SafeError }
   | { type: "event"; event: TurnEvent }
   /** The direction endpoint accepted the note and stated what it will do. */
   | {
@@ -355,6 +399,18 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         status: "sending",
       };
 
+    case "send_refused":
+      return {
+        ...state,
+        messages: state.messages.filter(
+          (message) => message.id !== action.messageId,
+        ),
+        error: action.error,
+        streaming: null,
+        activity: NO_ACTIVITY,
+        status: "idle",
+      };
+
     /*
       Stopping discards whatever text had arrived. A truncated answer must not
       be presented as a completed one, and the reducer is the only place that
@@ -409,37 +465,34 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
     case "recovered": {
       const known = new Set(state.messages.map((message) => message.id));
       /*
-        Three different facts, three different things to say. "We could not
-        find out" must never be reported as "your turn produced nothing" — that
-        would be a conclusion the system has not earned.
-      */
-      const error: SafeError | null =
-        action.outcome === "unfinished"
-          ? {
-              code: "turn_interrupted",
-              userMessage:
-                "The connection dropped and this turn did not finish. Your message is saved — send another when you are ready.",
-              recoverable: true,
-            }
-          : null;
-      /*
-        Only "unfinished" is a conclusion about the turn. A turn the server
-        still reports as running has not failed, and a lookup that could not
-        be completed has established nothing — both stay in recovery, with a
-        way to look again, rather than becoming a verdict.
+        Four different facts, four different things to say — and each of them
+        belongs to this turn alone.
 
-        Scoped to this turn: resolving one recovery leaves every other alone.
+        Only `completed` resolves the recovery. The other three stay in the
+        list against their own turn: "we could not find out" must never be
+        reported as "your turn produced nothing", a turn the server still
+        reports as running has not failed, and a turn that did not finish is a
+        verdict about *that* turn and nothing else.
+
+        `state.error` is deliberately untouched here. It is a single field with
+        no turn attached, so writing a recovery's outcome into it would attach
+        that outcome to whatever is on screen — and clearing it on a successful
+        recovery would erase an error belonging to a newer turn or a refused
+        direction. Conversation-level failures still use it; per-turn outcomes
+        do not.
       */
       const recoveries =
-        action.outcome === "still_running" || action.outcome === "lookup_failed"
-          ? upsertRecovery(state.recoveries, {
+        action.outcome === "completed"
+          ? state.recoveries.filter((entry) => entry.turnId !== action.turnId)
+          : upsertRecovery(state.recoveries, {
               turnId: action.turnId,
               state:
                 action.outcome === "still_running"
                   ? "still_running"
-                  : "unavailable",
-            })
-          : state.recoveries.filter((entry) => entry.turnId !== action.turnId);
+                  : action.outcome === "unfinished"
+                    ? "unfinished"
+                    : "unavailable",
+            });
       return {
         ...state,
         activityLog: action.activityLog.reduce(
@@ -451,7 +504,6 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             ? [...state.messages, action.message]
             : state.messages,
         recoveries,
-        error,
       };
     }
 
@@ -553,6 +605,21 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
           // rendering. Nothing here touches project truth.
           return { ...state, recommendedScene: action.event.scene };
 
+        case "project_model_updated":
+          /*
+            Replaces the model the canvas is drawing from. Safe to take
+            wholesale because the server built it by re-reading its own tables,
+            so this is the application telling the client what it now holds —
+            not the turn describing what it would like drawn.
+          */
+          return {
+            ...state,
+            projectModel: {
+              objects: action.event.objects,
+              relationships: action.event.relationships,
+            },
+          };
+
         case "direction_applied":
           return state.direction
             ? { ...state, direction: { ...state.direction, applied: true } }
@@ -566,6 +633,14 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             // truncated answer; the user's own message stays in the stream.
             streaming: null,
             activity: NO_ACTIVITY,
+            /*
+              Actions and scene recommendations are emitted as the turn goes, so
+              a turn that then fails would otherwise leave buttons and a
+              proposed view belonging to work that was abandoned — offering the
+              user next steps for an answer they never received.
+            */
+            actions: [],
+            recommendedScene: null,
             status: "idle",
           };
 

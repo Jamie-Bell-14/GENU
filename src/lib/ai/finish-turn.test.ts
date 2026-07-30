@@ -1,19 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CommitResult } from "@/lib/services/model-operations";
 import { finishTurn, type FinishTurnPorts } from "./finish-turn";
 import type { TurnEvent } from "./turn-events";
 
 /**
- * The rule under test is an ordering one: nothing may be told "done" until the
- * result is stored and the outcome recorded. Every failure below is a case
- * where the interface would otherwise show a completed answer that a reload
- * destroys.
+ * The durable boundary (docs/AI_SYSTEM.md §4.1).
+ *
+ * The rule under test is that a turn either ended or it did not. Nothing may be
+ * told "done", and nothing in the project may be shown as changed, unless the
+ * one transaction that stores the answer, applies the writes and closes the run
+ * actually committed. Every failure below is a case where the interface would
+ * otherwise show a completed answer, or a changed project, that a reload
+ * contradicts.
  */
+const completed = (patch: Partial<CommitResult> = {}): CommitResult => ({
+  outcome: "completed",
+  outcomes: [],
+  changed: false,
+  ...patch,
+});
+
 function setup(overrides: Partial<FinishTurnPorts> = {}) {
   const events: TurnEvent[] = [];
   const ports: FinishTurnPorts = {
-    persistResult: vi.fn(async () => true),
+    completeTurn: vi.fn(async () => completed()),
+    publishProjectModel: vi.fn(async () => {}),
     closeRun: vi.fn(async () => true),
     audit: vi.fn(async () => {}),
+    auditOperation: vi.fn(async () => {}),
     emit: (event) => events.push(event),
     ...overrides,
   };
@@ -21,16 +35,15 @@ function setup(overrides: Partial<FinishTurnPorts> = {}) {
 }
 
 describe("finishing a turn", () => {
-  it("stores the result and records the outcome before saying done", async () => {
+  it("commits once, then publishes, then says done", async () => {
     const order: string[] = [];
     const { events, ports } = setup({
-      persistResult: vi.fn(async () => {
-        order.push("persist");
-        return true;
+      completeTurn: vi.fn(async () => {
+        order.push("commit");
+        return completed({ changed: true });
       }),
-      closeRun: vi.fn(async () => {
-        order.push("close");
-        return true;
+      publishProjectModel: vi.fn(async () => {
+        order.push("publish");
       }),
     });
 
@@ -45,35 +58,116 @@ describe("finishing a turn", () => {
       "The answer.",
     );
 
-    expect(order).toEqual(["persist", "close", "done"]);
-    expect(ports.closeRun).toHaveBeenCalledWith("completed");
+    /*
+      Committing as the engine went was the first defect; committing the answer,
+      the writes and the terminal state as three ordered writes was the second.
+      The canvas cannot be told before the one commit, and there is nothing left
+      to close afterwards.
+    */
+    expect(order).toEqual(["commit", "publish", "done"]);
+    expect(ports.closeRun).not.toHaveBeenCalled();
     expect(ports.audit).toHaveBeenCalledWith("turn_completed");
     expect(events).toEqual([{ type: "done" }]);
   });
 
-  it("records the outcome before emitting, on every failure path", async () => {
-    const order: string[] = [];
+  it("tells the canvas nothing when the project did not change", async () => {
     const { ports } = setup({
-      persistResult: vi.fn(async () => false),
-      closeRun: vi.fn(async () => {
-        order.push("close");
-        return true;
-      }),
-      emit: (event) => order.push(event.type),
+      completeTurn: vi.fn(async () => completed({ changed: false })),
     });
     await finishTurn(ports, "The answer.");
-    // Emission first would let a dead stream stop the turn recording that it
-    // failed, leaving the run eligible for direction until its lease expires.
-    expect(order).toEqual(["close", "turn_failed"]);
+    expect(ports.publishProjectModel).not.toHaveBeenCalled();
+  });
+
+  it("audits what the transaction did with each operation", async () => {
+    const outcomes = completed({
+      changed: true,
+      outcomes: [
+        { applied: true, kind: "update_project_model", count: 2 },
+        {
+          applied: false,
+          kind: "record_assumption",
+          reason: "rejected",
+          issue: "user_owned_field",
+        },
+      ],
+    });
+    const { ports } = setup({ completeTurn: vi.fn(async () => outcomes) });
+    await finishTurn(ports, "The answer.");
+
+    expect(ports.auditOperation).toHaveBeenCalledTimes(2);
+    expect(ports.auditOperation).toHaveBeenCalledWith(outcomes.outcomes[0]);
+    expect(ports.auditOperation).toHaveBeenCalledWith(outcomes.outcomes[1]);
+  });
+
+  it("never says done, publishes or audits when the commit did not happen", async () => {
+    /*
+      Nothing was stored — not the answer, not one field — so the turn is closed
+      as failed and the user is told plainly. Publishing here would show a
+      project change the database does not have.
+    */
+    const { events, ports } = setup({
+      completeTurn: vi.fn(async () =>
+        completed({ outcome: "unavailable", changed: false }),
+      ),
+    });
+    await finishTurn(ports, "The answer.");
+
+    expect(ports.publishProjectModel).not.toHaveBeenCalled();
+    expect(ports.auditOperation).not.toHaveBeenCalled();
+    expect(ports.closeRun).toHaveBeenCalledWith("failed");
+    expect(ports.audit).toHaveBeenCalledWith("turn_failed", {
+      code: "completion_failed",
+    });
+    expect(events.map((event) => event.type)).toEqual(["turn_failed"]);
+    expect(events[0]).toMatchObject({ error: { recoverable: true } });
+  });
+
+  it("says so when the turn had already been declared unfinished", async () => {
+    /*
+      The lease lapsed and a later turn reconciled the run, so recovery may
+      already have told the user this turn did not finish. Its answer is not kept
+      and the message does not pretend otherwise.
+    */
+    const { events, ports } = setup({
+      completeTurn: vi.fn(async () => completed({ outcome: "not_running" })),
+    });
+    await finishTurn(ports, "The answer.");
+
+    expect(ports.audit).toHaveBeenCalledWith("turn_failed", {
+      code: "turn_already_closed",
+    });
+    expect(events[0]).toMatchObject({
+      type: "turn_failed",
+      error: { recoverable: true },
+    });
+    expect(
+      events[0].type === "turn_failed" && events[0].error.userMessage,
+    ).toContain("already been recorded as unfinished");
+  });
+
+  it("does not attempt the commit for a turn that produced nothing", async () => {
+    // Stopping and interruption already told the user what happened; this must
+    // not add a second, contradictory message.
+    const { events, ports } = setup();
+    await finishTurn(ports, "");
+
+    expect(events).toEqual([]);
+    expect(ports.completeTurn).not.toHaveBeenCalled();
+    expect(ports.closeRun).toHaveBeenCalledWith("failed");
+    expect(ports.audit).toHaveBeenCalledWith("turn_failed", {
+      code: "no_result",
+    });
   });
 
   it("finalises even when emitting throws", async () => {
     const closeRun = vi.fn(async () => true);
     await finishTurn(
       {
-        persistResult: vi.fn(async () => false),
+        completeTurn: vi.fn(async () => completed({ outcome: "unavailable" })),
+        publishProjectModel: vi.fn(async () => {}),
         closeRun,
         audit: vi.fn(async () => {}),
+        auditOperation: vi.fn(async () => {}),
         emit: () => {
           throw new Error("the reader is gone");
         },
@@ -82,47 +176,5 @@ describe("finishing a turn", () => {
     ).catch(() => {});
 
     expect(closeRun).toHaveBeenCalledWith("failed");
-  });
-
-  it("never says done when the result was not stored", async () => {
-    const { events, ports } = setup({
-      persistResult: vi.fn(async () => false),
-    });
-    await finishTurn(ports, "The answer.");
-
-    expect(events.map((event) => event.type)).toEqual(["turn_failed"]);
-    expect(events[0]).toMatchObject({
-      error: { recoverable: true },
-    });
-    expect(ports.closeRun).toHaveBeenCalledWith("failed");
-    expect(ports.audit).toHaveBeenCalledWith("turn_failed", {
-      code: "result_not_saved",
-    });
-  });
-
-  it("never says done when the outcome could not be recorded", async () => {
-    // The result is stored, but steering and recovery would keep treating the
-    // turn as live, so a clean end cannot be claimed.
-    const { events, ports } = setup({ closeRun: vi.fn(async () => false) });
-    await finishTurn(ports, "The answer.");
-
-    expect(events.map((event) => event.type)).toEqual(["turn_failed"]);
-    expect(ports.audit).toHaveBeenCalledWith("turn_failed", {
-      code: "state_not_recorded",
-    });
-  });
-
-  it("treats a turn that produced nothing as failed, silently", async () => {
-    // Stopping and interruption already told the user what happened; this must
-    // not add a second, contradictory message.
-    const { events, ports } = setup();
-    await finishTurn(ports, "");
-
-    expect(events).toEqual([]);
-    expect(ports.persistResult).not.toHaveBeenCalled();
-    expect(ports.closeRun).toHaveBeenCalledWith("failed");
-    expect(ports.audit).toHaveBeenCalledWith("turn_failed", {
-      code: "no_result",
-    });
   });
 });

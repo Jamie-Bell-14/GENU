@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { Message, TurnState } from "@/lib/ai/turn-events";
+import type { Message, PendingRecovery, TurnState } from "@/lib/ai/turn-events";
 import { TurnBlock } from "./turn-block";
 import { Button } from "@/components/ui/button";
 import { ActivityIndicator } from "@/components/activity/activity-indicator";
@@ -37,13 +37,78 @@ function AssistantTurn({
   );
 }
 
+/*
+  A recovery notice, rendered inside the turn it concerns.
+
+  It names the question when one is in view, because two unresolved turns
+  otherwise produce two identical notices and two identical Dismiss buttons —
+  and the user cannot tell which of their questions each belongs to.
+*/
+function RecoveryNotice({
+  recovery,
+  question,
+  onCheckAgain,
+  onDismissRecovery,
+}: Readonly<{
+  recovery: PendingRecovery;
+  question?: string;
+  onCheckAgain?: (turnId: string) => void;
+  onDismissRecovery?: (turnId: string) => void;
+}>) {
+  const about = question
+    ? `“${question.length > 60 ? `${question.slice(0, 60)}…` : question}”`
+    : "that turn";
+  const message =
+    recovery.state === "checking"
+      ? `The connection dropped. Checking what was recorded for ${about}…`
+      : recovery.state === "still_running"
+        ? `The connection dropped, and ${about} is still being processed. Your message is saved.`
+        : recovery.state === "unfinished"
+          ? `The connection dropped and ${about} did not finish. Your message is saved — send another when you are ready.`
+          : `The connection dropped, and ${about} could not be checked just now. Your message is saved.`;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <p className="text-fg-tertiary text-xs">{message}</p>
+      {recovery.state !== "checking" && (
+        <>
+          {/* Nothing to look up again once the server has said the turn did
+              not finish: that is a settled outcome, not an unknown. */}
+          {onCheckAgain && recovery.state !== "unfinished" && (
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => onCheckAgain(recovery.turnId)}
+            >
+              Check again
+            </Button>
+          )}
+          {onDismissRecovery && (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => onDismissRecovery(recovery.turnId)}
+            >
+              Dismiss
+            </Button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 interface TurnGroup {
   key: string;
+  /** The turn this group is, when the server has named one. */
+  turnId?: string;
   /** The question, absent only for a response with no matching turn. */
   user?: Message;
   responses: Message[];
   /** Text still arriving for this turn. */
   streaming?: TurnState["streaming"];
+  /** An unresolved recovery belonging to this turn. */
+  recovery?: PendingRecovery;
 }
 
 /**
@@ -63,7 +128,12 @@ function groupTurns(state: TurnState): TurnGroup[] {
     if (message.role === "user") {
       // A message the server has not yet named a turn for stands on its own id.
       const key = message.turnId ?? message.id;
-      const group: TurnGroup = { key, user: message, responses: [] };
+      const group: TurnGroup = {
+        key,
+        turnId: message.turnId,
+        user: message,
+        responses: [],
+      };
       groups.push(group);
       byTurn.set(key, group);
       continue;
@@ -84,9 +154,25 @@ function groupTurns(state: TurnState): TurnGroup[] {
     else
       groups.push({
         key: state.streaming.turnId,
+        turnId: state.streaming.turnId,
         responses: [],
         streaming: state.streaming,
       });
+  }
+
+  /*
+    Recoveries sit inside the turn they concern.
+
+    Rendering them after the whole transcript was isolated in state but not on
+    screen: while a newer turn streams, an older turn's "that turn did not
+    finish" notice appeared beneath it, reading as a verdict on the turn the
+    user is watching. With two unresolved turns the notices were identical, so
+    nothing said which question each belonged to.
+  */
+  for (const recovery of state.recoveries) {
+    const group = byTurn.get(recovery.turnId);
+    if (group) group.recovery = recovery;
+    else groups.push({ key: recovery.turnId, responses: [], recovery });
   }
 
   return groups;
@@ -108,7 +194,7 @@ export function ConversationStream({
     endRef.current?.scrollIntoView({ block: "end" });
   }, [count, state.streaming?.text]);
 
-  if (count === 0 && !state.streaming) {
+  if (count === 0 && !state.streaming && state.recoveries.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-1 p-8 text-center">
         <p className="font-display text-lg font-medium">
@@ -138,6 +224,14 @@ export function ConversationStream({
               }}
             />
           )}
+          {group.recovery && (
+            <RecoveryNotice
+              recovery={group.recovery}
+              question={group.user?.content}
+              onCheckAgain={onCheckAgain}
+              onDismissRecovery={onDismissRecovery}
+            />
+          )}
         </div>
       ))}
 
@@ -158,47 +252,6 @@ export function ConversationStream({
           You stopped this response. Your message is saved.
         </p>
       )}
-
-      {/* Recovery states, each saying only what is known, and each belonging
-          to its own turn — checking one never disturbs another. A turn the
-          server still reports as running has not failed, so the interface
-          offers another look rather than a verdict. */}
-      {state.recoveries.map((recovery) => (
-        <div
-          key={recovery.turnId}
-          className="flex flex-wrap items-center gap-2"
-        >
-          <p className="text-fg-tertiary text-xs">
-            {recovery.state === "checking"
-              ? "The connection dropped. Checking what was recorded…"
-              : recovery.state === "still_running"
-                ? "The connection dropped, and that turn is still being processed. Your message is saved."
-                : "The connection dropped, and that turn could not be checked just now. Your message is saved."}
-          </p>
-          {recovery.state !== "checking" && (
-            <>
-              {onCheckAgain && (
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => onCheckAgain(recovery.turnId)}
-                >
-                  Check again
-                </Button>
-              )}
-              {onDismissRecovery && (
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={() => onDismissRecovery(recovery.turnId)}
-                >
-                  Dismiss
-                </Button>
-              )}
-            </>
-          )}
-        </div>
-      ))}
 
       {state.error && (
         <p

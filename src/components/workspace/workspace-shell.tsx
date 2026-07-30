@@ -85,6 +85,17 @@ export function WorkspaceShell({
     initialMessages,
     initialActivity,
   });
+  /*
+    The canvas draws from the server-rendered model until a turn changes
+    something, at which point the server re-reads its own tables and sends the
+    result. Without that, a field or assumption recorded during a turn only
+    appeared after a reload — the canvas looked inert during the one moment it
+    is meant to be alive.
+  */
+  const liveObjects = runtime.state.projectModel?.objects ?? canvasObjects;
+  const liveRelationships =
+    runtime.state.projectModel?.relationships ?? canvasRelationships;
+
   // Two-pass hydration, same pattern as the appearance provider: the server
   // renders the default layout, the client corrects from storage on mount.
   const [layout, setLayout] = useState<WorkspaceLayout | null>(null);
@@ -205,8 +216,8 @@ export function WorkspaceShell({
                 minSize={25}
               >
                 <LivingCanvas
-                  objects={canvasObjects}
-                  relationships={canvasRelationships}
+                  objects={liveObjects}
+                  relationships={liveRelationships}
                   recommendedScene={runtime.state.recommendedScene}
                   activity={runtime.state.activity.canvas}
                   onEdit={onEditObject}
@@ -217,8 +228,8 @@ export function WorkspaceShell({
             <ConversationPane runtime={runtime} />
           ) : (
             <LivingCanvas
-              objects={canvasObjects}
-              relationships={canvasRelationships}
+              objects={liveObjects}
+              relationships={liveRelationships}
               recommendedScene={runtime.state.recommendedScene}
               activity={runtime.state.activity.canvas}
               onEdit={onEditObject}

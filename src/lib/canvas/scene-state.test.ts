@@ -79,6 +79,32 @@ describe("sceneReducer", () => {
     expect(state.current?.focalObjectId).toBe(A);
   });
 
+  describe("adopting a default view", () => {
+    /*
+      A project can go from empty to populated during a turn: the first turn
+      writes the first objects, and no scene can exist until they do. Filling
+      that vacancy is not the same as choosing a view.
+    */
+    it("fills a vacancy on a project that has just gained its first objects", () => {
+      const adopted = sceneReducer(initialSceneState(null), {
+        type: "adopt_default",
+        scene: scene(A),
+      });
+      expect(adopted.current?.focalObjectId).toBe(A);
+      // Nothing to return to: the project had no previous view.
+      expect(adopted.history).toEqual([]);
+    });
+
+    it("never displaces a view the person is already looking at", () => {
+      const chosen = initialSceneState(scene(A));
+      const after = sceneReducer(chosen, {
+        type: "adopt_default",
+        scene: scene(B),
+      });
+      expect(after).toBe(chosen);
+    });
+  });
+
   it("bounds history and handles returning with nothing to return to", () => {
     let state = initialSceneState(scene(A));
     for (let i = 0; i < 15; i++) {

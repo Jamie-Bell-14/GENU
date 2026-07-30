@@ -31,6 +31,17 @@ export function initialSceneState(scene: CanvasScene | null): SceneState {
 }
 
 export type SceneAction =
+  /**
+   * The application's own default view for a project that has no scene yet.
+   *
+   * Needed because a project can go from empty to populated *during* a turn:
+   * the first turn on a new project writes the first objects, and the scene
+   * derived from them cannot exist until they do. Filling that vacancy is not
+   * the same as choosing a view — it only ever applies when there is no current
+   * scene, so it can never move what a person is already looking at, and it
+   * records no history to return to.
+   */
+  | { type: "adopt_default"; scene: CanvasScene }
   /** A validated scene the user asked for: applied immediately. */
   | { type: "user_scene"; scene: CanvasScene }
   /** A validated recommendation: queued, never applied under the cursor. */
@@ -52,6 +63,12 @@ export function sceneReducer(
   action: SceneAction,
 ): SceneState {
   switch (action.type) {
+    case "adopt_default":
+      // Only ever fills a vacancy. A user's chosen scene, or one they accepted
+      // from a recommendation, is never replaced by a derived default.
+      if (state.current) return state;
+      return { ...state, current: action.scene };
+
     case "user_scene":
       return {
         ...state,

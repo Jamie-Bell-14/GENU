@@ -4,6 +4,20 @@
 
 Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, single-call engine, zoned canvas without dragging, email+password auth, mock research only. References like "02 §L" and "06 §6" point to the Phase 0 review archive in docs/review/.
 
+## Deferred issue gate protocol
+
+`CLAUDE.md` requires this file to be read before implementation. The issue gates recorded here are therefore mandatory task scope and must be checked without waiting for the user to mention them.
+
+Before planning, implementing or reviewing any task `Tn`:
+
+1. Read that task's **Issue gates** line and open every linked issue.
+2. Add each linked issue to the implementation plan and final acceptance checklist.
+3. An **entry gate** must be closed before implementation of that task begins.
+4. An **exit gate** must be closed before that task is marked **Implemented**, approved for merge or merged.
+5. A dated independent-backlog issue remains non-blocking only until its stated date or release gate. Once triggered, treat it as P0 until closed.
+6. A gate may be deferred again only by explicitly updating both the issue's delivery contract and this task plan with a new named task or exact calendar deadline. A PR comment alone does not reassign ownership.
+7. At task completion, report every gate as **closed**, **still blocking**, or **explicitly reclassified**. Silence is not completion.
+
 ---
 
 ### T1 — Project scaffold and tooling
@@ -103,18 +117,29 @@ Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, sing
 - **Done when:** a scripted multi-step activity is observable, steerable, stoppable, and honestly recorded.
 
 ### T9 — Discovery engine (real model)
-- **Objective:** `AnthropicDiscoveryEngine` — one streaming tool-use call per turn; tools `update_project_model`, `propose_connected_change` (stub apply), `suggest_checkpoint`; Zod validation with one retry; context assembly (snapshot + recent messages); prompt versioning; token/step caps; `ScriptedDiscoveryEngine` given the same interface for CI.
+- **Objective:** `AnthropicDiscoveryEngine` — one streaming tool-use call per turn; tools `update_project_model`, `record_assumption`, `propose_connected_change` (stub apply), `suggest_checkpoint`, `recommend_canvas_scene`; Zod validation with one retry; context assembly (snapshot + recent messages); prompt versioning; token/step caps; worker lease renewal for long-running turns; `ScriptedDiscoveryEngine` given the same interface for CI.
+  - The tool list above is wider than this line originally carried. `record_assumption`, `recommend_canvas_scene` and `suggest_actions` are all required by this task's own completion criterion — Step 3 acceptance is "the assumption appears on the canvas" with "≤3 contextual actions", and the scene hook exists from T8 with no tool able to reach it. The first two are in the canonical operation set (docs/AI_SYSTEM.md §5). They are additions to the task line, not to approved scope.
+  - **Turn bounds are per turn, not per request.** `max_tokens` is a per-request ceiling, so the turn tracks a cumulative output allowance and offers each request only the remainder; the tool cap counts tool-use *blocks* rather than provider rounds, because one response may contain many. A `max_tokens` stop reason is a bounded failure, never a completed answer.
+  - **Project-truth writes are staged and committed once, on success.** A turn that fails at any point — schema, provider, timeout, cap, refusal — writes nothing, which is what makes AI_SYSTEM §5's "no partial write" true for every path rather than only the schema one. The engine returns its staged operations rather than committing them: the answer, project truth and the turn's terminal state have to move together, and only the host can order those (AI_SYSTEM §4.1).
+  - **"One unit" means one transaction, and a turn has exactly two.** `start_turn` writes the user message and the run together after reconciling an expired lease; `complete_turn` writes the answer, applies the accepted field and assumption writes, and records the terminal state. Ordering three separate durable writes was not enough: catch-up treats a stored answer as settlement, so an answer that outlived its project writes would read as a completed turn whose changes had vanished. A loop in application code cannot promise all-or-none, and a check followed by a write cannot promise the checked state still holds.
+  - **Both elevated functions authorise their own caller.** They are `security definer` and reachable only by the trusted writer, so RLS cannot decide who is allowed in — each checks the acting user owns the project, inside the transaction, rather than inheriting a check the route may or may not have made.
+  - **A refusal is not a failure.** A field the person stated themselves is expected to be refused; discarding an answer the user is reading because one proposed write was not permitted would be the worse mistake. Refusals are reported per operation and audited; only genuine faults abort the commit.
+  - **The first turn's canvas comes from the application, not the model.** On a new project there are no ids to name, so a recommended scene can only be a guess and is rejected. The visible sparse model is the application's own derived, validated default view, adopted once the committed rows exist.
+  - **Provenance is derived, never accepted.** The model may not set `user_stated` or `researched`; it may offer an excerpt it attributes to the person, which the host verifies against the message it actually received — and the *stored words must be that excerpt*, since a genuine phrase attached to an invented value is not evidence for the value. An unverified excerpt means the field is recorded as inference. A user-stated row carries the verified words and the turn they came from, so the claim can be audited later. An AI update may not replace the value of a field the person stated — that is a proposal, not a turn.
+  - **Turn timeout exceeds the lease deliberately.** `TURN_TIMEOUT_MS` (20 min) is longer than `LEASE_TTL_SECONDS` (15 min) so issue #11's invariant — a healthy turn stays `running` past one lease period because heartbeats say so — is reachable rather than pre-empted by the engine giving up first. Lease renewal is monotonic in SQL, so no renewal can shorten a lease.
+  - **One running turn per project**, serialised on the project row inside `start_turn` and backed by a partial unique index rather than by a React guard. A refused start writes nothing at all, so the 409 keeps the user's text in the composer instead of leaving the same sentence in the transcript as well.
 - **Dependencies:** T6, T7, T8.
-- **Files:** `src/lib/ai/*`, turn route wiring, engine config.
+- **Files:** `src/lib/ai/*`, `src/lib/services/model-operations.ts`, turn route wiring, engine config, lease-renewal migration, `supabase/migrations/20260730090000_turn_start_and_operations.sql`.
 - **Functional:** Steps 2–3 of the journey work live: reflection separating fact from inference, sparse canvas updates, one focused question, specific assumption challenge with ≤3 contextual actions.
 - **UI/UX acceptance:** response depth rules (DESIGN.md §8.2); challenge is specific; no generic praise.
-- **Edge cases:** schema-invalid tool input (retry then safe fail), model timeout, oversized responses, tool-step cap hit, concurrent turns blocked.
+- **Edge cases:** schema-invalid tool input (retry then safe fail), model timeout, oversized responses, tool-step cap hit, concurrent turns blocked, safety refusal (reported as its own state, not as an outage), lease renewal failing or arriving after the run has ended.
 - **Tests:** engine unit tests with recorded/stubbed SDK responses (valid, invalid, malicious-fields, over-limit); prompt-injection suite (user message attempts to override system rules / mint permissions / write via prose); e2e stays on scripted engine.
 - **Out of scope:** research tool (T10), real change application (T12).
 - **Security:** ANTHROPIC_API_KEY server-only; minimum-necessary context sent to provider (§11.5); untrusted user content delimited and labelled in prompts; tool inputs validated + authorised independently of model text; per-turn token caps; usage logged without message bodies.
 - **Done when:** live Steps 2–3 pass acceptance and the malicious-output test suite is green.
 
 ### T10 — Research flow (mock provider) + research view + evidence intake
+- **Issue gates:** **#13 is a T10 exit gate.** It must be included in the T10 plan and closed before T10 is marked **Implemented**, approved for merge or merged.
 - **Objective:** `MockResearchProvider` scripted tenancy-deposit research; "Research this" action; research view (key finding, focused visualisation with data-table alternative, why-it-matters, source markers, explore/inspect actions); provenance detail (source, date, method, limitations, retrieval time, AI interpretation separated); persistent "Demonstration data" labelling; "Add as evidence" → `evidence` rows linked to canvas concepts with consequence summary honest about what the evidence does *not* support.
 - **Dependencies:** T8, T9; `evidence` migration `0005_evidence.sql`.
 - **Files:** `src/lib/research/*`, `src/components/research/*`, evidence service, canvas research mode.
@@ -124,9 +149,10 @@ Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, sing
 - **Tests:** provider event-sequence tests; component states incl. conflicting/unavailable; e2e Steps 4–6; RLS on evidence tables; test that `is_demo` data can never render without its label.
 - **Out of scope:** real web retrieval (deferred with §11.3 controls), deep exploration filters beyond one level.
 - **Security:** no external fetches at all in the slice (SSRF surface deliberately zero); `is_demo` is `NOT NULL` at the schema level; evidence content treated as untrusted when later fed to the model (labelled data-not-instructions).
-- **Done when:** Steps 4–6 acceptance criteria pass with honest provenance.
+- **Done when:** Steps 4–6 acceptance criteria pass with honest provenance **and #13 is closed**.
 
 ### T11 — Connected-change proposals and transactional apply/undo
+- **Issue gates:** **#14 is a T11 entry gate.** After T10 completes, #14 must be closed before T11 implementation begins or a T11 implementation PR is opened.
 - **Objective:** proposal creation from the engine tool; `ChangeProposalSheet` (per-item before/after, include/exclude, partial-approval inconsistency warning); `apply_change_proposal` and `undo_change_proposal` Postgres RPCs (single transaction: fields + document versions + decision + audit); canvas highlight of affected branches; outcome summary with Review changes / Undo / Open document actions.
 - **Dependencies:** T9, T10; documents tables land here (`0006_changes_documents.sql`) since apply writes versions.
 - **Files:** RPC migrations, `src/lib/services/change-proposals.ts`, `src/components/changes/*`, engine tool wiring.
@@ -136,7 +162,7 @@ Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, sing
 - **Tests:** RPC transaction tests incl. forced mid-failure rollback (no partial application — §7.4); RLS: only owner can apply; e2e Steps 7–8 incl. partial approval and undo; audit rows asserted.
 - **Out of scope:** cross-proposal conflict resolution UI beyond the conflict error state.
 - **Security:** the highest-risk task — approval enforced by DB state machine, not prompt; RPCs invoker-rights + ownership-verified; append-only history; every apply/undo audited with actor + approval state; mass-assignment impossible (item targets validated against closed enum of areas).
-- **Done when:** transaction tests prove all-or-nothing; journey Steps 7–8 pass.
+- **Done when:** transaction tests prove all-or-nothing; journey Steps 7–8 pass; #14 was closed before implementation began.
 
 ### T12 — Living documents
 - **Objective:** document view (four documents), per-section states, "what changed / by what / when" header, version history list, named milestone creation, restore-as-new-version; low-risk auto-edit path (`ai_auto`) visible in history.
@@ -185,6 +211,12 @@ Approved decisions in force (PROJECT_PLAN.md §17): qualitative confidence, sing
 - **Out of scope:** new features of any kind.
 - **Security:** §18.1 checklist review; residual risks documented per §23.
 - **Done when:** you can run the journey end to end and every checklist passes or has a recorded, owned exception (§24).
+
+## Dated independent backlog gates
+
+These issues are not owned by a specific task, but they cannot remain indefinitely unowned:
+
+- **#15 — due 2026-09-30 or before external beta, whichever comes first.** Before that trigger it is P2. Once triggered it becomes P0: no release/hardening PR may be marked **Verified** or merged until #15 is closed or explicitly reclassified with a new exact deadline in both places.
 
 ---
 

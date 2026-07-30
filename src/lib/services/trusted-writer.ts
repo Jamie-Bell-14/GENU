@@ -80,30 +80,116 @@ export async function recordActivity(input: {
 }
 
 /**
- * Opens a turn's operational record. Unlike audit and activity this is *not*
- * best-effort: steering and recovery read it, so a turn that cannot record
- * that it is running must not open a stream and advertise controls that
- * cannot work. Returns whether the record exists.
+ * Opens a turn: saves the user's message and the operational record together.
+ *
+ * Unlike audit and activity this is *not* best-effort — steering and recovery
+ * read the run, so a turn that cannot record that it is running must not open a
+ * stream and advertise controls that cannot work.
+ *
+ * Both writes go through one function so they are one transaction. Saving the
+ * message first and opening the run afterwards left an orphan message behind
+ * every refused start, which the client then re-sent as a duplicate. The
+ * function also reconciles a run whose lease has lapsed, so a dead worker
+ * cannot hold the project's only slot for ever (issue #11).
  */
-export async function openTurnRun(input: {
+export type StartTurnOutcome =
+  | "started"
+  /** Another turn is genuinely still running for this project (concurrency). */
+  | "already_running"
+  /** Nothing was written; the turn must not start. */
+  | "unavailable";
+
+export async function startTurn(input: {
   projectId: string;
   turnId: string;
-}): Promise<boolean> {
+  /** The signed-in user. The function authorises against this itself. */
+  actorId: string;
+  content: string;
+}): Promise<StartTurnOutcome> {
   const client = trustedClient();
   if (!client) {
     reportUnavailable("turn_run");
-    return false;
+    return "unavailable";
   }
-  const { error } = await client.from("turn_runs").insert({
-    turn_id: input.turnId,
-    project_id: input.projectId,
-    state: "running",
+  const { data, error } = await client.rpc("start_turn", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_actor_id: input.actorId,
+    p_content: input.content,
   });
   if (error) {
-    console.error("turn_run insert failed", { code: error.code });
-    return false;
+    // No content in the log (SECURITY_STANDARDS §14.1).
+    console.error("start_turn failed", { code: error.code });
+    return "unavailable";
   }
-  return true;
+  return data === "started" ? "started" : "already_running";
+}
+
+/**
+ * What one call to `complete_turn` did.
+ *
+ * `written` and `refused` are keyed by the *slot* of the staged operation that
+ * produced each row, so the caller reports per operation what the database
+ * actually did rather than inferring it from a total.
+ */
+export type CompleteTurnRecord =
+  | {
+      outcome: "completed";
+      written: Record<string, number>;
+      refused: Record<string, string[]>;
+    }
+  /** The run was no longer this turn's to finish; nothing was written. */
+  | { outcome: "not_running" }
+  /** The transaction did not happen; nothing was written. */
+  | { outcome: "unavailable" };
+
+/**
+ * Ends a turn: its answer, its project-truth writes and its terminal state, in
+ * one transaction (docs/AI_SYSTEM.md §4.1).
+ *
+ * A narrow port rather than an elevated client handed to the service layer. The
+ * function it calls is `security definer` and `service_role`-only — it has to be,
+ * because closing a run means writing `turn_runs`, which no browser session may
+ * touch — so this module is the only place that can reach it, and the function
+ * authorises `actorId` against the project itself rather than trusting that a
+ * route checked first.
+ */
+export async function completeTurnRecord(input: {
+  projectId: string;
+  turnId: string;
+  actorId: string;
+  assistantText: string;
+  fields: unknown[];
+  assumptions: unknown[];
+}): Promise<CompleteTurnRecord> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("complete_turn");
+    return { outcome: "unavailable" };
+  }
+  const { data, error } = await client.rpc("complete_turn", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_actor_id: input.actorId,
+    p_assistant_text: input.assistantText,
+    p_fields: input.fields,
+    p_assumptions: input.assumptions,
+  });
+  if (error) {
+    console.error("complete_turn failed", { code: error.code });
+    return { outcome: "unavailable" };
+  }
+  const result = data as {
+    outcome: "completed" | "not_running";
+    written?: Record<string, number>;
+    refused?: Record<string, string[]>;
+  } | null;
+  if (result?.outcome !== "completed") return { outcome: "not_running" };
+  return {
+    outcome: "completed",
+    written: result.written ?? {},
+    refused: result.refused ?? {},
+  };
 }
 
 /**
@@ -144,6 +230,45 @@ export async function closeTurnRun(input: {
     });
   }
   return false;
+}
+
+export type LeaseRenewal =
+  | "renewed"
+  /** No such run. */
+  | "unknown"
+  /** The turn already has an outcome; a heartbeat may not revise it. */
+  | "finished"
+  /** The lease lapsed before this arrived; the run is not revived. */
+  | "expired"
+  /** The renewal did not happen; the lease is unchanged. */
+  | "unavailable";
+
+/**
+ * Extends a running turn's lease (issue #11).
+ *
+ * The bound this maintains is "a run whose worker is gone stops being
+ * steerable and recoverable". Renewal is therefore evidence of life, nothing
+ * more: it cannot revive a finished or already-expired run, and the database
+ * enforces that under a row lock rather than trusting callers to check first.
+ */
+export async function renewTurnLease(input: {
+  turnId: string;
+  seconds: number;
+}): Promise<LeaseRenewal> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("turn_lease");
+    return "unavailable";
+  }
+  const { data, error } = await client.rpc("renew_turn_lease", {
+    p_turn_id: input.turnId,
+    p_seconds: input.seconds,
+  });
+  if (error) {
+    console.error("renew_turn_lease failed", { code: error.code });
+    return "unavailable";
+  }
+  return data as LeaseRenewal;
 }
 
 export type DirectionOutcome =
@@ -252,6 +377,8 @@ export type AuditAction =
   | "direction_rejected"
   | "scene_recommended"
   | "scene_rejected"
+  | "operation_applied"
+  | "operation_rejected"
   | "object_edited"
   | "scope_truncated";
 

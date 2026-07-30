@@ -38,6 +38,7 @@ function setup(overrides: Partial<TurnPorts> = {}) {
     onSceneAccepted: vi.fn(async () => {}),
     onSceneRejected: vi.fn(async () => {}),
     takeDirection: vi.fn(async () => null),
+    onDirectionApplied: () => {},
     ...overrides,
   };
   return {

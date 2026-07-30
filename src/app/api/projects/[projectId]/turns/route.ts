@@ -1,15 +1,25 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { finishTurn } from "@/lib/ai/finish-turn";
+import { withLeaseHeartbeat } from "@/lib/ai/lease-heartbeat";
+import { loadProjectContext, type LoadedContext } from "@/lib/ai/load-context";
+import { selectDiscoveryEngine } from "@/lib/ai/select-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
+import {
+  loadCanvasObjects,
+  loadProjectRelationships,
+} from "@/lib/canvas/project-model-store";
+import type { TurnResult } from "@/lib/ai/discovery-engine";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
+import { commitTurn } from "@/lib/services/model-operations";
 import {
   closeTurnRun,
-  openTurnRun,
+  completeTurnRecord,
+  startTurn,
   recordActivity,
   recordAudit,
+  renewTurnLease,
   takeDirections,
   DIRECTION_CURSOR_START,
   type AuditAction,
@@ -18,6 +28,23 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TurnRequestSchema, TURN_RATE_LIMIT } from "@/lib/validation/turns";
 
 export const runtime = "nodejs";
+
+/**
+ * What the engine sees when the project read failed. Empty rather than absent:
+ * a turn with no context still answers the user's message, and pretending the
+ * project has content that was never read would be worse than saying nothing
+ * about it.
+ */
+function emptyProjectContext(): LoadedContext {
+  return {
+    fields: [],
+    recentMessages: [],
+    objects: [],
+    relationshipIds: [],
+    focalObjectId: null,
+    complete: false,
+  };
+}
 
 function errorResponse(error: SafeError, status: number) {
   return NextResponse.json({ error }, { status });
@@ -131,43 +158,64 @@ export async function POST(
   }
 
   const turnId = crypto.randomUUID();
-  const { error: insertError } = await supabase.from("messages").insert({
-    project_id: projectId,
-    turn_id: turnId,
-    role: "user",
-    content: parsed.data.message,
-  });
-  if (insertError) {
-    return errorResponse(
-      {
-        code: "engine_unavailable",
-        userMessage:
-          "Your message could not be saved, so nothing was sent. Your text is unchanged — try again.",
-        recoverable: true,
-      },
-      503,
-    );
-  }
 
   /*
-    Operational state before the stream opens. Steering and recovery both read
-    it, so a turn that cannot record that it is running must not open a stream
-    and offer controls that cannot work — it fails here, where a plain error
-    response is still possible.
+    The message and the turn's operational record are written together, before
+    the stream opens. Together, because a message saved for a turn that was then
+    refused is an orphan the client re-sends as a duplicate; before, because
+    steering and recovery both read the run, so a turn that cannot record that
+    it is running must not open a stream and offer controls that cannot work —
+    it fails here, where a plain error response is still possible.
   */
-  if (!(await openTurnRun({ projectId, turnId }))) {
+  const started = await startTurn({
+    projectId,
+    turnId,
+    // The function authorises this itself rather than trusting the check above:
+    // an elevated path has to carry its own authorisation.
+    actorId: user.id,
+    content: parsed.data.message,
+  });
+  if (started === "already_running") {
+    /*
+      One turn per project at a time (T9 edge case). Nothing was saved, so the
+      client keeps the draft and this says to send it again — the earlier
+      version claimed the message was saved, which was true then and is not now.
+    */
     return errorResponse(
       {
         code: "engine_unavailable",
         userMessage:
-          "The workspace could not start this turn. Your message is saved — try again.",
+          "This project already has a response in progress — probably in another tab. Wait for it to finish, then send again; your text is unchanged.",
+        recoverable: true,
+      },
+      409,
+    );
+  }
+  if (started !== "started") {
+    return errorResponse(
+      {
+        code: "engine_unavailable",
+        userMessage:
+          "The workspace could not start this turn. Nothing was sent — your text is unchanged, so try again.",
         recoverable: true,
       },
       503,
     );
   }
 
-  const engine = new ScriptedDiscoveryEngine();
+  const engine = selectDiscoveryEngine({
+    buildContext: () => loadedContext ?? emptyProjectContext(),
+    onDiagnostics: (diagnostics) =>
+      // Structured, correlated, and free of message bodies (§12).
+      console.info("turn", { projectId, ...diagnostics }),
+  });
+  /*
+    Populated inside the stream, before the engine runs. The engine asks for
+    context synchronously through `buildContext`, so the read happens here
+    where it can be reported as an activity step and audited.
+  */
+  let loadedContext: LoadedContext | null = null;
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       /*
@@ -232,10 +280,37 @@ export async function POST(
         // project rather than an engine's guess.
         const turnScope = await reporter.step(
           "reading_project_model",
-          () => loadTurnScope(supabase, projectId),
-          // A partial or failed read is not "project model read": the scope in
+          async () => {
+            const scope = await loadTurnScope(supabase, projectId);
+            // Context for the model is read in the same step, because it is
+            // the same operation from the user's point of view: the project
+            // being read before the turn thinks about it.
+            loadedContext = await loadProjectContext(
+              supabase,
+              projectId,
+              {
+                // The inventory a scene may name, with enough about each object
+                // for the choice of focal object to be informed rather than a
+                // guess at a UUID.
+                objects: scope.objects.map((object) => ({
+                  id: object.id,
+                  kind: object.kind,
+                  label: object.title,
+                })),
+                relationshipIds: scope.relationshipIds,
+                focalObjectId: scope.focalObjectId,
+              },
+              // Correlated by turn, not by "whichever message is newest".
+              turnId,
+            );
+            return scope;
+          },
+          // A partial or failed read is not "project model read": what is in
           // hand is narrower than the project, so the label says so.
-          (scope) => (scopeIsWhole(scope) ? "succeeded" : "failed"),
+          (scope) =>
+            scopeIsWhole(scope) && loadedContext?.complete
+              ? "succeeded"
+              : "failed",
         );
         if (!scopeIsWhole(turnScope)) {
           // An incomplete scope fails closed, so record why rather than
@@ -259,6 +334,13 @@ export async function POST(
             }),
           onSceneRejected: (rejection) =>
             audit("scene_rejected", { detail: { code: rejection.code } }),
+          /*
+            Emitted only once the model has actually been given the direction.
+            Announcing it when the note merely existed was the defect: the
+            interface said "applied" for a direction no request ever carried.
+          */
+          onDirectionApplied: (note) =>
+            emit({ type: "direction_applied", note }),
           takeDirection: async ({ final }) => {
             /*
               Reading and sealing are one locked operation: a direction is
@@ -287,49 +369,140 @@ export async function POST(
             const directions = result.directions;
             if (directions.length === 0) return null;
             directionCursor = directions[directions.length - 1].cursor;
-            const note = directions.map((entry) => entry.note).join("\n");
-            emit({ type: "direction_applied", note });
-            return note;
+            // Returned, not announced: whether the model uses it is the
+            // engine's to report through `onDirectionApplied`.
+            return directions.map((entry) => entry.note).join("\n");
           },
         });
 
-        const result = await engine.runTurn(
-          {
-            projectId,
-            turnId,
-            userMessage: parsed.data.message,
-            context: {
-              objectIds: turnScope.objectIds,
-              focalObjectId: turnScope.focalObjectId,
-            },
-          },
-          hooks,
-          request.signal,
-        );
         /*
-          The host — not the engine — decides the turn is over, and only after
-          the result is stored and the outcome recorded (see finish-turn.ts).
-
-          The assistant row is keyed by the turn id, so the message the client
-          rendered live and the message catch-up returns are the same message.
+          A live turn can run for minutes, well past the fixed lease a scripted
+          turn never approached (issue #11). The worker says it is alive while
+          it works; when it can no longer say so, it stops rather than
+          continuing to produce a result that cannot be recorded against a live
+          run — by then recovery may already have told the user the turn did
+          not finish.
         */
-        await finishTurn(
+        const lost = new AbortController();
+
+        let result: TurnResult;
+        /*
+          `withLeaseHeartbeat` keeps the lease renewed for the whole of `work`,
+          not merely for the provider call inside it: the turn is not over when
+          the model stops talking, only once its durable completion has
+          actually committed (docs/AI_SYSTEM.md §4.1), and that commit is
+          itself a database round trip the lease has to survive. Stopping the
+          heartbeat as soon as the model finished would let the lease lapse
+          while the row still said `running` — exactly the state
+          `complete_turn` now refuses to trust on its own (issue #11). Putting
+          both calls inside `work` makes that ordering structural rather than
+          a convention this file has to keep re-deriving correctly.
+        */
+        await withLeaseHeartbeat(
           {
-            persistResult: async (text) => {
-              const { error } = await supabase.from("messages").insert({
-                id: turnId,
-                project_id: projectId,
-                turn_id: turnId,
-                role: "assistant",
-                content: text,
+            renew: (seconds) => renewTurnLease({ turnId, seconds }),
+            onLost: (reason) => {
+              void audit("turn_failed", {
+                detail: { code: `lease_${reason}` },
               });
-              return !error;
+              lost.abort();
             },
-            closeRun: (state) => closeTurnRun({ turnId, state }),
-            audit: (action, detail) => audit(action, { detail }),
-            emit,
           },
-          result.assistantText,
+          async () => {
+            result = await engine.runTurn(
+              {
+                projectId,
+                turnId,
+                userMessage: parsed.data.message,
+                context: {
+                  objectIds: turnScope.objectIds,
+                  focalObjectId: turnScope.focalObjectId,
+                },
+              },
+              hooks,
+              AbortSignal.any([request.signal, lost.signal]),
+            );
+
+            /*
+              The host — not the engine — decides the turn is over, and
+              everything the turn changes is committed together: the answer,
+              the project-truth writes it produced and the terminal state
+              (see finish-turn.ts).
+            */
+            await finishTurn(
+              {
+                /*
+                  One transaction, through the one port that can reach it.
+                  The elevated function is authorised against this user
+                  inside the database, so this path carries its own
+                  authorisation rather than inheriting the ownership check
+                  made above.
+                */
+                completeTurn: (assistantText) =>
+                  commitTurn(
+                    (writes) =>
+                      completeTurnRecord({
+                        projectId,
+                        turnId,
+                        actorId: user.id,
+                        ...writes,
+                      }),
+                    {
+                      projectId,
+                      turnId,
+                      // The message as the server received it, so provenance
+                      // is checked against text the provider cannot have
+                      // rewritten.
+                      userMessage: parsed.data.message,
+                    },
+                    result.operations,
+                    assistantText,
+                  ),
+                /*
+                  What the canvas is told the project now holds — re-read
+                  from the application's own tables after the write landed,
+                  never from anything the model described.
+                */
+                publishProjectModel: async () => {
+                  const [objects, relationships] = await Promise.all([
+                    loadCanvasObjects(supabase, projectId),
+                    loadProjectRelationships(supabase, projectId),
+                  ]);
+                  emit({
+                    type: "project_model_updated",
+                    objects: objects.data,
+                    relationships: relationships.data,
+                  });
+                },
+                closeRun: (state) => closeTurnRun({ turnId, state }),
+                audit: (action, detail) => audit(action, { detail }),
+                /*
+                  Audited from what the transaction did, so
+                  `operation_applied` means a row exists rather than that a
+                  write was attempted. Every outcome is recorded including
+                  refusal, which is exactly the kind of event that matters
+                  after the fact, and none of it travels back to the engine.
+                */
+                auditOperation: (outcome) =>
+                  outcome.applied
+                    ? audit("operation_applied", {
+                        target: outcome.kind,
+                        detail: outcome.refused
+                          ? { count: outcome.count, refused: outcome.refused }
+                          : { count: outcome.count },
+                      })
+                    : audit("operation_rejected", {
+                        target: outcome.kind,
+                        detail:
+                          outcome.reason === "rejected"
+                            ? { reason: outcome.reason, issue: outcome.issue }
+                            : { reason: outcome.reason },
+                      }),
+                emit,
+              },
+              result.assistantText,
+            );
+          },
         );
       } catch {
         // Internal detail stays server-side (SECURITY_STANDARDS §8).

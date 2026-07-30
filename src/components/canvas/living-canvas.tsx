@@ -159,6 +159,26 @@ export function LivingCanvas({
     derivedScene,
     initialSceneState,
   );
+
+  /*
+    A project can go from empty to populated while the user watches: the first
+    turn writes the first objects, and the scene derived from them cannot exist
+    until they do. `useReducer` does not re-run its initialiser when the derived
+    value changes, so without this the visual view kept saying no focus was
+    selected for the whole of the turn that had just created the project model.
+
+    The default is adopted, never imposed — the reducer ignores it once any scene
+    is current — and it is the same application-derived, validated scene as on
+    first render, so nothing the model said decides what is shown.
+  */
+  // Read out first: the lint rule treats any `.current` as a ref, and a ref is
+  // not a valid dependency.
+  const hasScene = sceneState.current !== null;
+  useEffect(() => {
+    if (derivedScene && !hasScene) {
+      dispatchScene({ type: "adopt_default", scene: derivedScene });
+    }
+  }, [derivedScene, hasScene]);
   const [mapView, dispatchMap] = useReducer(mapViewReducer, EMPTY_MAP_VIEW);
 
   // Everything the caller loaded under RLS: the outer bound of what any scene

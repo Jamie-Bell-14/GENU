@@ -32,6 +32,26 @@ export interface TurnInput {
 export interface TurnResult {
   /** Assistant text to persist; empty when the turn failed. */
   assistantText: string;
+  /**
+   * Project-truth operations the turn produced, for the host to commit.
+   *
+   * Returned rather than committed by the engine: project truth, the assistant
+   * row and the turn's terminal state have to move together, and only the host
+   * can order those. A failed turn returns none.
+   */
+  operations: StagedOperation[];
+}
+
+/**
+ * A validated operation waiting for the turn to succeed.
+ *
+ * `candidate` stays `unknown`: shape was checked to decide whether to retry,
+ * which is not the same as being authorised, and the host re-parses it before
+ * anything is written.
+ */
+export interface StagedOperation {
+  name: string;
+  candidate: unknown;
 }
 
 /**
@@ -59,6 +79,15 @@ export interface TurnHooks {
     outcome?: (result: T) => "succeeded" | "failed",
   ): Promise<T>;
   recommendScene(candidate: unknown): Promise<void>;
+  /**
+   * Announces that the model has actually consumed a direction.
+   *
+   * Separate from `takeDirection` because taking a note and using it are
+   * different events, and only the second is `direction_applied`. Announcing on
+   * the first is what let the interface claim a direction had been applied when
+   * the turn had no step left to use it.
+   */
+  directionApplied(note: string): void;
   /**
    * Direction the user added since the last check. `final` says this is the
    * engine's last chance to use one — the host seals the steering window on
@@ -122,7 +151,7 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
           recoverable: true,
         },
       });
-      return { assistantText: "" };
+      return { assistantText: "", operations: [] };
     };
 
     if (signal?.aborted) return interrupted();
@@ -177,7 +206,16 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
       const acknowledgement = `\n\nYou added: “${truncate(direction, 120)}”. It is recorded against this turn and will be used once discovery analysis is connected.`;
       const streamed = await hooks.step(
         "considering_direction",
-        () => this.stream(acknowledgement, hooks, signal),
+        async () => {
+          /*
+            The scripted engine really does pick the direction up: it reads it
+            at its step boundary and answers with it. Announcing that here —
+            rather than when the note merely arrived — keeps the meaning of
+            `direction_applied` the same for both engines.
+          */
+          hooks.directionApplied(direction);
+          return this.stream(acknowledgement, hooks, signal);
+        },
         // A turn stopped part-way through the acknowledgement did not take the
         // direction into account, whatever the label would otherwise say.
         (delivered) => (delivered ? "succeeded" : "failed"),
@@ -198,7 +236,8 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     });
     // No `done`: the host emits that once the result is stored and the turn's
     // outcome is recorded.
-    return { assistantText: lines.join("\n") };
+    // The scripted engine proposes no project-truth operations.
+    return { assistantText: lines.join("\n"), operations: [] };
   }
 
   /** Streams text, returning false if the turn was stopped part-way. */

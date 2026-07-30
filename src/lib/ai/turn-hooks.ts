@@ -21,7 +21,14 @@ export interface TurnPorts {
   reporter: ActivityReporter;
   onSceneAccepted(scene: CanvasScene): Promise<void>;
   onSceneRejected(rejection: SceneRejection): Promise<void>;
+  /**
+   * Reads pending steering. Deliberately does *not* announce that a direction
+   * was applied: a note existing and the model using it are different facts,
+   * and the second is the engine's to report through `onDirectionApplied`.
+   */
   takeDirection(options: { final: boolean }): Promise<string | null>;
+  /** The model has now actually received this direction. */
+  onDirectionApplied(note: string): void;
 }
 
 /**
@@ -65,5 +72,7 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
     },
 
     takeDirection: ports.takeDirection,
+
+    directionApplied: ports.onDirectionApplied,
   };
 }

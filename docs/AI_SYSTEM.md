@@ -61,16 +61,68 @@ The application must validate and authorise every model-proposed operation indep
 For each user turn:
 
 1. validate project ownership
-2. validate and persist the user message
+2. validate the user message, then persist it and open the turn's operational
+   record in one transaction
 3. assemble the minimum necessary project snapshot and recent context
 4. invoke the discovery engine
 5. stream assistant text and application-owned activity events
-6. validate every structured tool proposal
-7. apply only permitted low-risk operations
-8. persist the assistant result and user-facing rationale
-9. emit a completion or safe failure event
+6. validate every structured tool proposal and stage the permitted ones
+7. persist the assistant result and user-facing rationale
+8. apply the staged low-risk operations
+9. record the turn's terminal outcome
+
+   — steps 7 to 9 are one transaction, so a turn either ended or it did not
+
+10. tell the canvas what the project now holds, re-read from the database
+11. emit a completion or safe failure event
 
 A failed turn must not corrupt project state or lose the user's message.
+
+### 4.1 One durable boundary
+
+Steps 7–9 are **one transaction**, and steps 10–11 follow it. Both boundaries are
+the host's, never the engine's.
+
+Ordering alone is not enough, and the reason is worth stating plainly. Catch-up
+treats a stored assistant message as settlement — a stored result settles the
+turn, whatever the run state says — so a worker that died after the answer was
+inserted but before the project writes committed would leave a turn that *reads*
+as completed while every field and assumption belonging to it had been lost. No
+ordering of separate writes fixes that.
+
+So a turn has exactly two transactional boundaries, and both exist because their
+guarantees are otherwise unenforceable:
+
+- **Opening a turn** (step 2) writes the message and the run together, and
+  reconciles a run whose lease has lapsed. Saving the message first left an
+  orphan behind every refused start, which the client re-sent as a duplicate; and
+  a dead worker's `running` row otherwise held the project's only turn slot
+  indefinitely.
+- **Ending a turn** (steps 7–9) writes the answer, applies every accepted field
+  and assumption under each row's own lock, and records the terminal state. A
+  loop in application code cannot promise all-or-none, and a check followed by a
+  write cannot promise the checked state still holds when a concurrent user edit
+  lands in between.
+
+Individual operations may still be refused inside that commit — a field the
+person stated themselves is *expected* to be refused — and a refusal is recorded
+per operation rather than failing the turn. Throwing away an answer the user is
+reading because one proposed write was not permitted would be a worse mistake
+than the write.
+
+A turn whose run is no longer its own to finish writes nothing at all. Its lease
+had lapsed and recovery may already have told the user it did not finish; that
+verdict is not something a late worker may overwrite.
+
+What remains outside the commit is only what cannot be inside it: telling the
+canvas what the project now holds, which is a re-read *after* the write landed
+and never anything the model described.
+
+Both functions are `security definer` and reachable only by the trusted writer,
+so neither can rely on Row-Level Security to decide who is allowed in. Each
+therefore authorises the acting user against the project itself, inside the
+transaction. An elevated path carries its own authorisation rather than
+inheriting a check a route may or may not have made (SECURITY_STANDARDS §11.2).
 
 ## 5. Structured project-model operations
 
@@ -227,6 +279,18 @@ Scene state has no write path to project fields, assumptions, evidence, decision
 ## 10. Prompt-injection and tool safety
 
 Treat user messages, research content and imported project content as untrusted data.
+
+This includes the project's own stored content: field values, object labels and
+earlier messages are all things a person typed and can edit, so a project's
+history is a place to leave an instruction for a later turn. Everything of that
+kind is sent inside an explicitly named data region, and characters that could
+close one are rewritten rather than rejected — a person is entitled to type angle
+brackets into their own project.
+
+A claim that the user stated something is derived by the application, never
+accepted from the model: the stored words must themselves be a verified quotation
+from the message being answered. A genuine phrase attached to an invented value is
+an inference, and is recorded as one.
 
 The system must test attempts to:
 

@@ -16,6 +16,7 @@ function harness(direction: string | null = null) {
   const events: EngineEvent[] = [];
   const steps: string[] = [];
   const candidates: unknown[] = [];
+  const appliedDirections: string[] = [];
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
@@ -33,13 +34,14 @@ function harness(direction: string | null = null) {
     recommendScene: async (candidate) => {
       candidates.push(candidate);
     },
+    directionApplied: (note) => appliedDirections.push(note),
     takeDirection: async () => {
       const next = remaining;
       remaining = null;
       return next;
     },
   };
-  return { events, steps, candidates, hooks };
+  return { events, steps, candidates, appliedDirections, hooks };
 }
 
 const input = {
@@ -101,6 +103,9 @@ describe("ScriptedDiscoveryEngine", () => {
     const { hooks } = harness();
     const result = await new ScriptedDiscoveryEngine().runTurn(input, hooks);
     expect(result.assistantText).toContain("not connected yet");
+    // And it proposes nothing: a scripted engine that changed project truth
+    // would make the message above a lie.
+    expect(result.operations).toEqual([]);
   });
 
   it("names the focal object the application chose, not the first id it was given", async () => {
@@ -165,7 +170,9 @@ describe("ScriptedDiscoveryEngine", () => {
   });
 
   it("picks up direction at the step boundary it promised", async () => {
-    const { events, steps, hooks } = harness("Focus on smaller agencies.");
+    const { events, steps, appliedDirections, hooks } = harness(
+      "Focus on smaller agencies.",
+    );
     const engine = new ScriptedDiscoveryEngine();
     expect(engine.directionApplication).toBe("next_step");
 
@@ -173,6 +180,8 @@ describe("ScriptedDiscoveryEngine", () => {
     expect(steps).toContain("considering_direction:active");
     expect(steps).toContain("considering_direction:succeeded");
     expect(result.assistantText).toContain("Focus on smaller agencies.");
+    // Announced because it was genuinely picked up, not merely received.
+    expect(appliedDirections).toEqual(["Focus on smaller agencies."]);
     // The acknowledgement reaches the user as streamed text, not silently.
     const streamed = events
       .filter((event) => event.type === "assistant_delta")

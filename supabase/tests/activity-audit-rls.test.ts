@@ -43,6 +43,23 @@ async function impersonate(userId: string | null) {
   await db.query("set role authenticated");
 }
 
+/**
+ * Creates another project owned by user A.
+ *
+ * Only one turn per project may be running at a time (T9, issue #7 in review),
+ * so a test that needs two simultaneous runs needs two projects. That is the
+ * constraint working, not a test being worked around: two running turns on one
+ * project is precisely the state the index exists to prevent.
+ */
+async function anotherProject(name: string): Promise<string> {
+  await impersonate(USER_A);
+  const { rows } = await db.query(
+    "insert into projects (owner_id, name) values (auth.uid(), $1) returning id",
+    [name],
+  );
+  return rows[0].id as string;
+}
+
 beforeAll(async () => {
   if (!adminUrl) {
     throw new Error(
@@ -354,13 +371,18 @@ describe.skipIf(skip)("turn_runs", () => {
 describe.skipIf(skip)("the steering window", () => {
   const OPEN = "aaaaaaaa-0000-4000-8000-00000000000a";
   const SEALED = "aaaaaaaa-0000-4000-8000-00000000000b";
+  /** Each running turn needs its own project; see `anotherProject`. */
+  let openProject: string;
+  let sealedProject: string;
 
   beforeAll(async () => {
+    openProject = await anotherProject("steering-open");
+    sealedProject = await anotherProject("steering-sealed");
     await asTrustedWriter();
     await db.query(
       `insert into turn_runs (turn_id, project_id)
-       values ($1, $3), ($2, $3)`,
-      [OPEN, SEALED, projectA],
+       values ($1, $3), ($2, $4)`,
+      [OPEN, SEALED, openProject, sealedProject],
     );
   });
 
@@ -368,14 +390,14 @@ describe.skipIf(skip)("the steering window", () => {
     await asTrustedWriter();
     const accepted = await db.query(
       "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-      [projectA, OPEN, "Before the seal."],
+      [openProject, OPEN, "Before the seal."],
     );
     expect(accepted.rows[0].outcome).toBe("accepted");
 
     // Sealing at the final boundary returns exactly what was inserted first.
     const taken = await db.query(
       "select note from public.take_turn_directions($1, $2, $3, $4, true)",
-      [projectA, OPEN, new Date(0).toISOString(), NIL_UUID],
+      [openProject, OPEN, new Date(0).toISOString(), NIL_UUID],
     );
     expect(taken.rows.map((row) => row.note)).toEqual(["Before the seal."]);
   });
@@ -385,12 +407,12 @@ describe.skipIf(skip)("the steering window", () => {
     // The final boundary passes with nothing pending.
     await db.query(
       "select * from public.take_turn_directions($1, $2, $3, $4, true)",
-      [projectA, SEALED, new Date(0).toISOString(), NIL_UUID],
+      [sealedProject, SEALED, new Date(0).toISOString(), NIL_UUID],
     );
 
     const refused = await db.query(
       "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-      [projectA, SEALED, "After the seal."],
+      [sealedProject, SEALED, "After the seal."],
     );
     // The run is still 'running' — finalisation has not happened yet — but
     // there is no step left to consume this, so it is not accepted.
@@ -413,7 +435,7 @@ describe.skipIf(skip)("the steering window", () => {
     );
     const finished = await db.query(
       "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-      [projectA, OPEN, "Too late."],
+      [openProject, OPEN, "Too late."],
     );
     expect(finished.rows[0].outcome).toBe("finished");
 
@@ -425,33 +447,37 @@ describe.skipIf(skip)("the steering window", () => {
   });
 
   it("refuses a direction once the run's lease has expired", async () => {
+    // Its own project: an expired lease is still `state = 'running'`, so it
+    // occupies the project's single running slot.
+    const project = await anotherProject("lease-expired");
     await asTrustedWriter();
     const expired = "aaaaaaaa-0000-4000-8000-00000000000e";
     await db.query(
       `insert into turn_runs (turn_id, project_id, lease_expires_at)
        values ($1, $2, now() - interval '1 minute')`,
-      [expired, projectA],
+      [expired, project],
     );
     const refused = await db.query(
       "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-      [projectA, expired, "The worker is gone."],
+      [project, expired, "The worker is gone."],
     );
     expect(refused.rows[0].outcome).toBe("expired");
   });
 
   it("reports an expired run as expired, with its result if any", async () => {
+    const project = await anotherProject("expired-snapshot");
     await asTrustedWriter();
     const expired = "aaaaaaaa-0000-4000-8000-00000000000f";
     await db.query(
       `insert into turn_runs (turn_id, project_id, lease_expires_at)
        values ($1, $2, now() - interval '1 minute')`,
-      [expired, projectA],
+      [expired, project],
     );
 
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select state, message_id from public.turn_snapshot($1, $2)",
-      [projectA, expired],
+      [project, expired],
     );
     expect(rows[0]).toEqual({ state: "expired", message_id: null });
   });
@@ -488,17 +514,18 @@ describe.skipIf(skip)("the steering window", () => {
       Anything left behind would be a direction the user was explicitly
       promised would apply, silently stranded.
     */
+    const project = await anotherProject("sealing-read");
     await asTrustedWriter();
     const turnId = "aaaaaaaa-0000-4000-8000-000000000011";
     await db.query(
       "insert into turn_runs (turn_id, project_id) values ($1, $2)",
-      [turnId, projectA],
+      [turnId, project],
     );
 
     for (let index = 0; index < 15; index += 1) {
       const { rows } = await db.query(
         "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-        [projectA, turnId, `Direction ${index}`],
+        [project, turnId, `Direction ${index}`],
       );
       expect(rows[0].outcome).toBe("accepted");
     }
@@ -511,7 +538,7 @@ describe.skipIf(skip)("the steering window", () => {
     */
     const taken = await db.query(
       "select id, note, created_at::text as created_at from public.take_turn_directions($1, $2, $3, $4, true)",
-      [projectA, turnId, new Date(0).toISOString(), NIL_UUID],
+      [project, turnId, new Date(0).toISOString(), NIL_UUID],
     );
     expect(taken.rows).toHaveLength(15);
 
@@ -520,17 +547,18 @@ describe.skipIf(skip)("the steering window", () => {
     const last = taken.rows[taken.rows.length - 1];
     const again = await db.query(
       "select note from public.take_turn_directions($1, $2, $3, $4, false)",
-      [projectA, turnId, last.created_at, last.id],
+      [project, turnId, last.created_at, last.id],
     );
     expect(again.rows).toEqual([]);
   });
 
   it("refuses a direction beyond the per-turn bound, before promising anything", async () => {
+    const project = await anotherProject("per-turn-bound");
     await asTrustedWriter();
     const turnId = "aaaaaaaa-0000-4000-8000-000000000012";
     await db.query(
       "insert into turn_runs (turn_id, project_id) values ($1, $2)",
-      [turnId, projectA],
+      [turnId, project],
     );
 
     /*
@@ -547,13 +575,13 @@ describe.skipIf(skip)("the steering window", () => {
     for (let index = 0; index < bound; index += 1) {
       await db.query(
         "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-        [projectA, turnId, `Direction ${index}`],
+        [project, turnId, `Direction ${index}`],
       );
     }
 
     const refused = await db.query(
       "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-      [projectA, turnId, "One too many"],
+      [project, turnId, "One too many"],
     );
     expect(refused.rows[0].outcome).toBe("too_many");
     // Refused before the row exists, so nothing was accepted and stranded.
@@ -568,6 +596,7 @@ describe.skipIf(skip)("the steering window", () => {
   });
 
   it("leaves the window open when no sealing read happened", async () => {
+    const project = await anotherProject("window-open");
     /*
       The reason a failed read must not be treated as "sealed": nothing has
       changed, so the endpoint would still accept a direction the turn can no
@@ -577,7 +606,7 @@ describe.skipIf(skip)("the steering window", () => {
     const turnId = "aaaaaaaa-0000-4000-8000-000000000013";
     await db.query(
       "insert into turn_runs (turn_id, project_id) values ($1, $2)",
-      [turnId, projectA],
+      [turnId, project],
     );
     const { rows } = await db.query(
       "select accepting_direction from turn_runs where turn_id = $1",
@@ -588,18 +617,19 @@ describe.skipIf(skip)("the steering window", () => {
       (
         await db.query(
           "select public.accept_turn_direction($1, $2, $3, 'next_step') as outcome",
-          [projectA, turnId, "Still open"],
+          [project, turnId, "Still open"],
         )
       ).rows[0].outcome,
     ).toBe("accepted");
   });
 
   it("uses a stable cursor so rows sharing a timestamp are not skipped", async () => {
+    const project = await anotherProject("stable-cursor");
     await asTrustedWriter();
     const turnId = "aaaaaaaa-0000-4000-8000-000000000014";
     await db.query(
       "insert into turn_runs (turn_id, project_id) values ($1, $2)",
-      [turnId, projectA],
+      [turnId, project],
     );
     // Three rows with an identical timestamp: a timestamp-only cursor would
     // skip the ones sharing the last returned value.
@@ -609,12 +639,12 @@ describe.skipIf(skip)("the steering window", () => {
        values ($1, $2, 'one', 'next_step', $3),
               ($1, $2, 'two', 'next_step', $3),
               ($1, $2, 'three', 'next_step', $3)`,
-      [projectA, turnId, stamp],
+      [project, turnId, stamp],
     );
 
     const first = await db.query(
       "select id, note, created_at::text as created_at from public.take_turn_directions($1, $2, $3, $4, false)",
-      [projectA, turnId, new Date(0).toISOString(), NIL_UUID],
+      [project, turnId, new Date(0).toISOString(), NIL_UUID],
     );
     expect(first.rows).toHaveLength(3);
 
@@ -622,7 +652,7 @@ describe.skipIf(skip)("the steering window", () => {
     // timestamp-only cursor would have skipped both, since all three share it.
     const rest = await db.query(
       "select note from public.take_turn_directions($1, $2, $3, $4, false)",
-      [projectA, turnId, first.rows[0].created_at, first.rows[0].id],
+      [project, turnId, first.rows[0].created_at, first.rows[0].id],
     );
     expect(rest.rows.map((row) => row.note)).toEqual(
       first.rows.slice(1).map((row) => row.note),
@@ -633,7 +663,7 @@ describe.skipIf(skip)("the steering window", () => {
     await impersonate(USER_B);
     const { rows } = await db.query(
       "select * from public.turn_snapshot($1, $2)",
-      [projectA, SEALED],
+      [sealedProject, SEALED],
     );
     expect(rows).toEqual([]);
   });

@@ -1,4 +1,3 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
 import type { StagedOperation } from "@/lib/ai/discovery-engine";
 import {
   RecordAssumptionSchema,
@@ -7,6 +6,7 @@ import {
   SuggestCheckpointSchema,
   type DiscoveryToolName,
 } from "@/lib/ai/tools/discovery-tools";
+import type { CompleteTurnRecord } from "./trusted-writer";
 
 /**
  * Where a model-proposed operation is authorised and disposed of
@@ -17,10 +17,11 @@ import {
  * - Every candidate is re-parsed here. The engine already checked the shape to
  *   decide whether to retry, but that check is on the other side of the seam
  *   and cannot be relied on for safety.
- * - **The accepted set is applied in one database transaction**, through
- *   `apply_turn_operations`. Looping and writing one at a time is not what
- *   "one unit" means: field A could land and assumption B fail, leaving the
- *   project half-changed by a turn reported as failed.
+ * - **The accepted set, the assistant answer and the turn's terminal state are
+ *   applied in one transaction**, through the `complete_turn` port. Separate
+ *   writes — even correctly ordered ones — can leave a stored answer whose
+ *   project changes were lost, and catch-up treats a stored answer as
+ *   settlement.
  * - **Provenance is derived, never accepted, and it must be about the stored
  *   words.** See `verifiedQuotation` — it is not enough for a turn to attach
  *   *some* genuine phrase from the message to an invented value.
@@ -34,7 +35,14 @@ import {
  */
 
 export type OperationOutcome =
-  | { applied: true; kind: DiscoveryToolName; count: number }
+  | {
+      applied: true;
+      kind: DiscoveryToolName;
+      /** Rows the database actually wrote. */
+      count: number;
+      /** Rows it refused, when part of the operation was not permitted. */
+      refused?: number;
+    }
   /** Understood, deliberately not applied at this stage of the build. */
   | { applied: false; kind: DiscoveryToolName; reason: "deferred" }
   /** Refused: malformed, not permitted, or it did not survive the write. */
@@ -46,6 +54,8 @@ export type OperationOutcome =
     };
 
 export interface CommitResult {
+  /** How the single durable operation ended. */
+  outcome: "completed" | "not_running" | "unavailable";
   /** One outcome per staged operation, in the order they were staged. */
   outcomes: OperationOutcome[];
   /** True when project truth changed, so the canvas needs re-reading. */
@@ -64,6 +74,17 @@ export interface OperationContext {
    */
   userMessage: string;
 }
+
+/**
+ * Ends the turn durably. Supplied as a port so this module never holds an
+ * elevated client: the one function that can write `turn_runs` lives behind
+ * `trusted-writer`, and this decides only *what* to ask it to write.
+ */
+export type TurnCommitter = (input: {
+  assistantText: string;
+  fields: unknown[];
+  assumptions: unknown[];
+}) => Promise<CompleteTurnRecord>;
 
 function normalise(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
@@ -87,7 +108,7 @@ function normalise(value: string): string {
  */
 export function verifiedQuotation(
   content: string,
-  excerpt: string | undefined,
+  excerpt: string | null | undefined,
   userMessage: string,
 ): string | null {
   if (!excerpt) return null;
@@ -102,7 +123,16 @@ export function verifiedQuotation(
   return excerpt.trim();
 }
 
+/**
+ * A staged row, carrying the index of the operation that produced it.
+ *
+ * The slot travels to the database and back so an outcome describes what
+ * happened to *that* operation, rather than being inferred from a total. One
+ * `update_project_model` call may carry eight field updates, and "seven written,
+ * one refused" is a different fact from either "applied" or "rejected".
+ */
 interface FieldRow {
+  slot: number;
   area: string;
   key: string;
   label: string;
@@ -113,6 +143,7 @@ interface FieldRow {
 }
 
 interface AssumptionRow {
+  slot: number;
   statement: string;
   why_it_matters: string;
   alternatives: string[];
@@ -121,19 +152,26 @@ interface AssumptionRow {
   source_excerpt: string | null;
 }
 
+/** Refusal codes the database reports, in words a person can act on. */
+const REFUSAL_MESSAGES: Record<string, string> = {
+  user_owned_field:
+    "A field the person stated themselves cannot be replaced automatically.",
+};
+
 /**
- * Validates every staged operation, then applies the accepted project-truth
- * writes in one transaction.
+ * Validates every staged operation, then ends the turn: answer, accepted writes
+ * and terminal state in one transaction.
  *
  * Validation refuses individually — a malformed checkpoint should not stop a
- * valid field write — but the *writes* are all-or-none: if the transaction
- * raises, no field and no assumption is written, and every write outcome is
- * reported as refused rather than left ambiguous.
+ * valid field write — but the *transaction* is all-or-none: if it does not
+ * commit, no field, no assumption and no answer is stored, and every write
+ * outcome is reported as refused rather than left ambiguous.
  */
-export async function commitModelOperations(
-  supabase: SupabaseClient,
+export async function commitTurn(
+  commit: TurnCommitter,
   context: OperationContext,
   operations: readonly StagedOperation[],
+  assistantText: string,
 ): Promise<CommitResult> {
   const outcomes: OperationOutcome[] = [];
   const fields: FieldRow[] = [];
@@ -143,6 +181,7 @@ export async function commitModelOperations(
 
   for (const operation of operations) {
     const tool = operation.name as DiscoveryToolName;
+    const slot = outcomes.length;
     switch (tool) {
       case "update_project_model": {
         const parsed = UpdateProjectModelSchema.safeParse(operation.candidate);
@@ -157,6 +196,7 @@ export async function commitModelOperations(
             context.userMessage,
           );
           fields.push({
+            slot,
             area: update.area,
             key: update.key,
             label: update.label,
@@ -166,7 +206,7 @@ export async function commitModelOperations(
             source_excerpt: excerpt,
           });
         }
-        writeSlots.push(outcomes.length);
+        writeSlots.push(slot);
         outcomes.push({
           applied: true,
           kind: tool,
@@ -187,6 +227,7 @@ export async function commitModelOperations(
           context.userMessage,
         );
         assumptions.push({
+          slot,
           statement: parsed.data.statement,
           why_it_matters: parsed.data.whyItMatters,
           alternatives: parsed.data.alternatives,
@@ -194,7 +235,7 @@ export async function commitModelOperations(
           origin: excerpt ? "user_stated" : "ai_inferred",
           source_excerpt: excerpt,
         });
-        writeSlots.push(outcomes.length);
+        writeSlots.push(slot);
         outcomes.push({ applied: true, kind: tool, count: 1 });
         break;
       }
@@ -234,33 +275,51 @@ export async function commitModelOperations(
     }
   }
 
-  if (fields.length === 0 && assumptions.length === 0) {
-    return { outcomes, changed: false };
-  }
+  /*
+    Always committed, even with nothing staged: the answer and the terminal
+    state are part of this transaction too, so there is no path on which a turn
+    ends without one.
+  */
+  const record = await commit({ assistantText, fields, assumptions });
 
-  const { error } = await supabase.rpc("apply_turn_operations", {
-    p_project_id: context.projectId,
-    p_turn_id: context.turnId,
-    p_fields: fields,
-    p_assumptions: assumptions,
-  });
-
-  if (error) {
+  if (record.outcome !== "completed") {
     /*
-      All-or-none: the transaction raised, so nothing was written. Every write
-      outcome is rewritten as refused, because reporting one of them as applied
-      would put a claim in the audit trail that the database does not support.
+      Nothing was written — not the answer, not one field. Every write outcome is
+      rewritten as refused, because reporting one as applied would put a claim in
+      the audit trail the database does not support.
     */
-    const issue = error.message?.includes("user_owned_field")
-      ? "A field the person stated themselves cannot be replaced automatically."
-      : (error.code ?? "write_failed");
     for (const slot of writeSlots) {
-      outcomes[slot] = reject(outcomes[slot].kind, issue);
+      outcomes[slot] = reject(outcomes[slot].kind, record.outcome);
     }
-    return { outcomes, changed: false };
+    return { outcome: record.outcome, outcomes, changed: false };
   }
 
-  return { outcomes, changed: true };
+  /*
+    What the database says it did, per operation. A staged write is only
+    "applied" if a row exists because of it.
+  */
+  let changed = false;
+  for (const slot of writeSlots) {
+    const written = record.written[String(slot)] ?? 0;
+    const refusals = record.refused[String(slot)] ?? [];
+    const kind = outcomes[slot].kind;
+    if (written === 0) {
+      outcomes[slot] = reject(
+        kind,
+        REFUSAL_MESSAGES[refusals[0]] ?? refusals[0] ?? "not_written",
+      );
+      continue;
+    }
+    changed = true;
+    outcomes[slot] = {
+      applied: true,
+      kind,
+      count: written,
+      ...(refusals.length ? { refused: refusals.length } : {}),
+    };
+  }
+
+  return { outcome: "completed", outcomes, changed };
 }
 
 function reject(kind: DiscoveryToolName, issue: string): OperationOutcome {

@@ -251,6 +251,30 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     */
     let directionsSealed = false;
 
+    /**
+     * A direction attached to the transcript whose request has not returned yet.
+     *
+     * `direction_applied` may only be emitted once the model has actually
+     * received the note, and adding it to a local array is not that. Input
+     * exhaustion, output exhaustion or a provider failure can all happen between
+     * attaching it and the model seeing it, and each of those used to leave the
+     * interface saying "applied" for a request that never completed.
+     */
+    let carried: string | null = null;
+
+    /** Announces a carried direction, now that a response really carried it. */
+    const announceCarried = async () => {
+      if (!carried) return;
+      const note = carried;
+      carried = null;
+      // Reported around the fact rather than around the intention: the step and
+      // the event now describe the same moment.
+      await hooks.step("considering_direction", async () => {
+        hooks.directionApplied(note);
+        return true;
+      });
+    };
+
     /*
       Project-truth operations are *staged*, not applied as they arrive.
 
@@ -302,14 +326,11 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         directionsSealed = true;
         const late = await hooks.takeDirection({ final: true });
         if (late) {
-          await hooks.step("considering_direction", async () => {
-            messages.push({
-              role: "user",
-              content: asUntrusted("user_message", late),
-            });
-            hooks.directionApplied(late);
-            return true;
+          messages.push({
+            role: "user",
+            content: asUntrusted("user_message", late),
           });
+          carried = late;
         }
       }
 
@@ -376,6 +397,12 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       outputTokens += final.usage.output_tokens;
 
       /*
+        The model has now genuinely received anything carried into this request,
+        so this is the first honest moment to say a direction was applied.
+      */
+      await announceCarried();
+
+      /*
         A safety refusal is a content outcome, not a transport failure: the
         request succeeded and the model declined. It is reported as its own
         recoverable state rather than as the provider being unavailable, which
@@ -422,15 +449,13 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         const direction = await hooks.takeDirection({ final: true });
         if (!direction) return complete();
 
-        await hooks.step("considering_direction", async () => {
-          messages.push({ role: "assistant", content: final.content });
-          messages.push({
-            role: "user",
-            content: asUntrusted("user_message", direction),
-          });
-          hooks.directionApplied(direction);
-          return true;
+        messages.push({ role: "assistant", content: final.content });
+        messages.push({
+          role: "user",
+          content: asUntrusted("user_message", direction),
         });
+        // Announced by the round that carries it, not by this one.
+        carried = direction;
         continue;
       }
 
@@ -542,14 +567,13 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       if (!directionsSealed) {
         const direction = await hooks.takeDirection({ final: false });
         if (direction) {
-          await hooks.step("considering_direction", async () => {
-            messages.push({
-              role: "user",
-              content: asUntrusted("user_message", direction),
-            });
-            hooks.directionApplied(direction);
-            return true;
+          messages.push({
+            role: "user",
+            content: asUntrusted("user_message", direction),
           });
+          // Announced by the round that carries it: the next request has not
+          // been made yet, and it may still fail before it is.
+          carried = direction;
         }
       }
     }

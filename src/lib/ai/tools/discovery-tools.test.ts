@@ -231,6 +231,76 @@ describe("provider tool definitions", () => {
     }
   });
 
+  /*
+    The two schemas have to describe the same shape.
+
+    They are written separately on purpose — the provider schema is a hint, the
+    Zod schema is the boundary — but "separately" must not mean "differently". A
+    provider-valid call the boundary rejects burns the turn's single schema retry
+    and can fail Step 3 on a well-behaved response, which is the worst kind of
+    disagreement: it looks like the model misbehaved.
+  */
+  describe("the provider schema and the boundary agree", () => {
+    /**
+     * Under `strict`, a property left out of `required` is not optional to the
+     * provider. So every property must be required, and anything that may be
+     * empty has to say so by being nullable.
+     */
+    function requiredNames(schema: unknown): void {
+      const node = schema as {
+        type?: string | string[];
+        properties?: Record<string, unknown>;
+        required?: string[];
+        items?: unknown;
+      };
+      if (node.properties) {
+        expect(Object.keys(node.properties).sort()).toEqual(
+          [...(node.required ?? [])].sort(),
+        );
+        for (const child of Object.values(node.properties)) {
+          requiredNames(child);
+        }
+      }
+      if (node.items) requiredNames(node.items);
+    }
+
+    it("requires every property of every tool, nested objects included", () => {
+      for (const tool of DISCOVERY_TOOLS) {
+        requiredNames(tool.input_schema);
+      }
+    });
+
+    it("accepts the exact payload a strict schema produces for an inference", () => {
+      // `quotedFromMessage: null` is what a correct provider call looks like
+      // when the record is the model's own inference. The boundary used to
+      // reject it outright.
+      const field = validateToolInput("update_project_model", {
+        updates: [{ ...validUpdate.updates[0], quotedFromMessage: null }],
+      });
+      expect(field.ok).toBe(true);
+
+      const assumption = validateToolInput("record_assumption", {
+        statement: "Smaller agencies feel this most.",
+        whyItMatters: "It decides who the first customer is.",
+        alternatives: ["Larger agencies have more disputes by volume."],
+        importance: "material",
+        quotedFromMessage: null,
+      });
+      expect(assumption.ok).toBe(true);
+    });
+
+    it("still refuses a quotation too short to be evidence of anything", () => {
+      const result = validateToolInput("record_assumption", {
+        statement: "Smaller agencies feel this most.",
+        whyItMatters: "It decides who the first customer is.",
+        alternatives: [],
+        importance: "material",
+        quotedFromMessage: "and",
+      });
+      expect(result).toMatchObject({ ok: false });
+    });
+  });
+
   it("offers exactly the tools the application can dispose of", () => {
     // A tool the model can call but the host cannot handle is a dead end the
     // user experiences as a turn that did nothing.

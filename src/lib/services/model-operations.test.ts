@@ -1,7 +1,7 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { describe, expect, it, vi } from "vitest";
 import type { StagedOperation } from "@/lib/ai/discovery-engine";
-import { commitModelOperations, verifiedQuotation } from "./model-operations";
+import { commitTurn, verifiedQuotation } from "./model-operations";
+import type { CompleteTurnRecord } from "./trusted-writer";
 
 /**
  * The authorisation boundary for model-proposed operations
@@ -27,26 +27,39 @@ const USER_MESSAGE =
 
 const ctx = { projectId: PROJECT, turnId: TURN, userMessage: USER_MESSAGE };
 
-interface RpcArgs {
-  p_project_id: string;
-  p_turn_id: string;
-  p_fields: Record<string, unknown>[];
-  p_assumptions: Record<string, unknown>[];
+interface Writes {
+  assistantText: string;
+  fields: unknown[];
+  assumptions: unknown[];
 }
 
-function stubClient(failure?: { message?: string; code?: string }) {
-  const rpc = vi.fn(async (name: string, args: unknown) => {
-    void name;
-    void args;
-    return failure
-      ? { data: null, error: failure }
-      : { data: { fields: 0, assumptions: 0 }, error: null };
+/** The slot a staged row carries, which is how outcomes stay per operation. */
+const slotOf = (row: unknown) => String((row as { slot: number }).slot);
+
+const ANSWER = "Recorded, and here is what I would test next.";
+
+/**
+ * Stands in for the one transaction. By default it reports every staged row as
+ * written, keyed by the slot the row carried — which is how the real function
+ * answers, and what lets an outcome describe its own operation.
+ */
+function stubCommit(
+  result?: CompleteTurnRecord | ((writes: Writes) => CompleteTurnRecord),
+) {
+  const commit = vi.fn(async (writes: Writes) => {
+    if (typeof result === "function") return result(writes);
+    if (result) return result;
+    const written: Record<string, number> = {};
+    for (const row of [...writes.fields, ...writes.assumptions]) {
+      const slot = slotOf(row);
+      written[slot] = (written[slot] ?? 0) + 1;
+    }
+    return { outcome: "completed", written, refused: {} } as CompleteTurnRecord;
   });
   return {
-    client: { rpc } as unknown as SupabaseClient,
-    rpc,
+    commit,
     /** What the single transaction was asked to write. */
-    sent: () => rpc.mock.calls[0]?.[1] as RpcArgs | undefined,
+    sent: () => commit.mock.calls[0]?.[0] as Writes | undefined,
   };
 }
 
@@ -76,24 +89,23 @@ const validAssumption = {
   importance: "material",
 };
 
-describe("commitModelOperations", () => {
+describe("commitTurn", () => {
   it("applies a low-risk field update with its origin intact", async () => {
-    const stub = stubClient();
-    const { outcomes, changed } = await commitModelOperations(
-      stub.client,
+    const stub = stubCommit();
+    const { outcomes, changed } = await commitTurn(
+      stub.commit,
       ctx,
       [op("update_project_model", validUpdate)],
+      ANSWER,
     );
 
     expect(outcomes).toEqual([
       { applied: true, kind: "update_project_model", count: 1 },
     ]);
     expect(changed).toBe(true);
-    expect(stub.rpc).toHaveBeenCalledWith(
-      "apply_turn_operations",
-      expect.anything(),
-    );
-    expect(stub.sent()?.p_fields).toEqual([
+    // The answer travels with the writes: they are one transaction.
+    expect(stub.sent()?.assistantText).toBe(ANSWER);
+    expect(stub.sent()?.fields).toEqual([
       expect.objectContaining({ origin: "ai_inferred", support: "hypothesis" }),
     ]);
   });
@@ -104,36 +116,47 @@ describe("commitModelOperations", () => {
       separately could land the field and fail the assumption, leaving the
       project half-changed by a turn reported as failed.
     */
-    const stub = stubClient();
-    await commitModelOperations(stub.client, ctx, [
-      op("update_project_model", validUpdate),
-      op("record_assumption", validAssumption),
-    ]);
+    const stub = stubCommit();
+    await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("update_project_model", validUpdate),
+        op("record_assumption", validAssumption),
+      ],
+      ANSWER,
+    );
 
-    expect(stub.rpc).toHaveBeenCalledTimes(1);
-    expect(stub.sent()?.p_fields).toHaveLength(1);
-    expect(stub.sent()?.p_assumptions).toHaveLength(1);
+    expect(stub.commit).toHaveBeenCalledTimes(1);
+    expect(stub.sent()?.fields).toHaveLength(1);
+    expect(stub.sent()?.assumptions).toHaveLength(1);
   });
 
-  it("takes the project and the turn from the host, never from the proposal", async () => {
-    const stub = stubClient();
+  it("names no project at all: the host tells the transaction which one", async () => {
+    const stub = stubCommit();
     /*
       The schema already rejects an unknown field, so a candidate carrying
       `project_id` never parses. This states the property from the other end:
-      whatever arrives, the transaction names the authorised project.
+      nothing a staged row carries can influence which project is written, because
+      the project and turn are bound by the caller of the transaction and never
+      appear in the payload at all.
     */
-    await commitModelOperations(stub.client, ctx, [
-      op("update_project_model", validUpdate),
-    ]);
-    expect(stub.sent()?.p_project_id).toBe(PROJECT);
-    expect(stub.sent()?.p_turn_id).toBe(TURN);
-    expect(JSON.stringify(stub.sent())).not.toContain(OTHER_PROJECT);
+    await commitTurn(
+      stub.commit,
+      ctx,
+      [op("update_project_model", validUpdate)],
+      ANSWER,
+    );
+    const payload = JSON.stringify(stub.sent());
+    expect(payload).not.toContain(OTHER_PROJECT);
+    expect(payload).not.toContain(PROJECT);
+    expect(payload).not.toContain("project_id");
   });
 
   it("refuses a proposal carrying an extra field, and writes nothing", async () => {
-    const stub = stubClient();
-    const { outcomes, changed } = await commitModelOperations(
-      stub.client,
+    const stub = stubCommit();
+    const { outcomes, changed } = await commitTurn(
+      stub.commit,
       ctx,
       [
         op("update_project_model", {
@@ -141,47 +164,63 @@ describe("commitModelOperations", () => {
           project_id: OTHER_PROJECT,
         }),
       ],
+      ANSWER,
     );
 
     expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
     expect(changed).toBe(false);
-    // Refused means nothing was sent, not written-then-reverted.
-    expect(stub.rpc).not.toHaveBeenCalled();
+    // Refused means nothing was staged for the transaction, not
+    // written-then-reverted. The answer is still stored: a proposal the
+    // application would not act on does not cost the person their reply.
+    expect(stub.sent()?.fields).toEqual([]);
   });
 
   it("re-validates rather than trusting the engine's own check", async () => {
-    const stub = stubClient();
-    const { outcomes } = await commitModelOperations(stub.client, ctx, [
-      op("update_project_model", {
-        updates: [{ ...validUpdate.updates[0], origin: "user_stated" }],
-      }),
-    ]);
+    const stub = stubCommit();
+    const { outcomes } = await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("update_project_model", {
+          updates: [{ ...validUpdate.updates[0], origin: "user_stated" }],
+        }),
+      ],
+      ANSWER,
+    );
     expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
-    expect(stub.rpc).not.toHaveBeenCalled();
+    expect(stub.sent()?.fields).toEqual([]);
   });
 
   it("refuses one malformed operation without abandoning a valid one", async () => {
     // Validation refuses individually; only the *writes* are all-or-none. A
     // malformed checkpoint must not cost the user a recorded field.
-    const stub = stubClient();
-    const { outcomes } = await commitModelOperations(stub.client, ctx, [
-      op("suggest_checkpoint", { name: "Nothing else" }),
-      op("update_project_model", validUpdate),
-    ]);
+    const stub = stubCommit();
+    const { outcomes } = await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("suggest_checkpoint", { name: "Nothing else" }),
+        op("update_project_model", validUpdate),
+      ],
+      ANSWER,
+    );
 
     expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
     expect(outcomes[1]).toMatchObject({ applied: true });
-    expect(stub.sent()?.p_fields).toHaveLength(1);
+    expect(stub.sent()?.fields).toHaveLength(1);
   });
 
   it("records an assumption with the alternatives it offered", async () => {
-    const stub = stubClient();
-    const { outcomes } = await commitModelOperations(stub.client, ctx, [
-      op("record_assumption", validAssumption),
-    ]);
+    const stub = stubCommit();
+    const { outcomes } = await commitTurn(
+      stub.commit,
+      ctx,
+      [op("record_assumption", validAssumption)],
+      ANSWER,
+    );
 
     expect(outcomes[0]).toMatchObject({ applied: true });
-    expect(stub.sent()?.p_assumptions).toEqual([
+    expect(stub.sent()?.assumptions).toEqual([
       expect.objectContaining({
         // No verified quote, so it is the model's inference — which is what it is.
         origin: "ai_inferred",
@@ -190,113 +229,191 @@ describe("commitModelOperations", () => {
     ]);
   });
 
-  it("reports every write as refused when the transaction raises", async () => {
+  it("reports every write as refused when the transaction did not happen", async () => {
     /*
-      Nothing was written, so reporting one of them as applied would put a claim
-      in the audit trail the database does not support.
+      Nothing was written — not one field, and not the answer either — so
+      reporting any of them as applied would put a claim in the audit trail the
+      database does not support.
     */
-    const stub = stubClient({ code: "42501" });
-    const { outcomes, changed } = await commitModelOperations(
-      stub.client,
+    const stub = stubCommit({ outcome: "unavailable" });
+    const { outcome, outcomes, changed } = await commitTurn(
+      stub.commit,
       ctx,
       [
         op("update_project_model", validUpdate),
         op("record_assumption", validAssumption),
       ],
+      ANSWER,
     );
 
-    expect(outcomes.every((outcome) => !outcome.applied)).toBe(true);
+    expect(outcome).toBe("unavailable");
+    expect(outcomes.every((entry) => !entry.applied)).toBe(true);
     expect(changed).toBe(false);
   });
 
-  it("explains a refused user-owned field in words a person can act on", async () => {
-    const stub = stubClient({
-      message: "user_owned_field:problem/primary_pain",
+  it("reports a write the transaction refused, in words a person can act on", async () => {
+    // The database decides this under the row's own lock, so the refusal comes
+    // back per slot rather than being predicted here.
+    const stub = stubCommit({
+      outcome: "completed",
+      written: {},
+      refused: { "0": ["user_owned_field"] },
     });
-    const { outcomes } = await commitModelOperations(stub.client, ctx, [
-      op("update_project_model", validUpdate),
-    ]);
+    const { outcomes, changed } = await commitTurn(
+      stub.commit,
+      ctx,
+      [op("update_project_model", validUpdate)],
+      ANSWER,
+    );
     expect(outcomes[0]).toMatchObject({
       applied: false,
       reason: "rejected",
       issue:
         "A field the person stated themselves cannot be replaced automatically.",
     });
+    expect(changed).toBe(false);
   });
 
-  it("does not open a transaction when a turn proposed nothing to write", async () => {
-    const stub = stubClient();
-    const { changed } = await commitModelOperations(stub.client, ctx, [
-      op("suggest_checkpoint", {
-        name: "Problem defined",
-        reason: "area_defined",
-        summary: "The problem statement is settled enough to build on.",
-      }),
-    ]);
+  it("reports part of an operation landing and part being refused", async () => {
+    /*
+      One `update_project_model` call may carry eight field updates. "Seven
+      written, one refused" is a different fact from either applied or rejected,
+      and the audit trail should say which.
+    */
+    const stub = stubCommit({
+      outcome: "completed",
+      written: { "0": 1 },
+      refused: { "0": ["user_owned_field"] },
+    });
+    const { outcomes, changed } = await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("update_project_model", {
+          updates: [
+            validUpdate.updates[0],
+            { ...validUpdate.updates[0], key: "secondary_pain" },
+          ],
+        }),
+      ],
+      ANSWER,
+    );
+    expect(outcomes[0]).toEqual({
+      applied: true,
+      kind: "update_project_model",
+      count: 1,
+      refused: 1,
+    });
+    expect(changed).toBe(true);
+  });
+
+  it("still commits when a turn proposed nothing to write", async () => {
+    /*
+      The answer and the terminal state are part of the same transaction, so
+      there is no path on which a turn ends without one. `changed` is false
+      because project truth did not move — not because nothing happened.
+    */
+    const stub = stubCommit();
+    const { outcome, changed } = await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("suggest_checkpoint", {
+          name: "Problem defined",
+          reason: "area_defined",
+          summary: "The problem statement is settled enough to build on.",
+        }),
+      ],
+      ANSWER,
+    );
+    expect(outcome).toBe("completed");
     expect(changed).toBe(false);
-    expect(stub.rpc).not.toHaveBeenCalled();
+    expect(stub.commit).toHaveBeenCalledTimes(1);
+    expect(stub.sent()?.fields).toEqual([]);
+    expect(stub.sent()?.assistantText).toBe(ANSWER);
   });
 
   describe("consequential operations are not applied here", () => {
     it("defers a connected change to the approval machinery", async () => {
-      const stub = stubClient();
-      const { outcomes } = await commitModelOperations(stub.client, ctx, [
-        op("propose_connected_change", {
-          title: "Narrow the target customer",
-          rationale: "The evidence points at smaller agencies.",
-          items: [
-            {
-              area: "customer",
-              key: "primary_customer",
-              before: "Letting agencies",
-              after: "Letting agencies under 20 staff",
-            },
-          ],
-          remainingUncertainty: "No evidence on willingness to pay yet.",
-        }),
-      ]);
+      const stub = stubCommit();
+      const { outcomes } = await commitTurn(
+        stub.commit,
+        ctx,
+        [
+          op("propose_connected_change", {
+            title: "Narrow the target customer",
+            rationale: "The evidence points at smaller agencies.",
+            items: [
+              {
+                area: "customer",
+                key: "primary_customer",
+                before: "Letting agencies",
+                after: "Letting agencies under 20 staff",
+              },
+            ],
+            remainingUncertainty: "No evidence on willingness to pay yet.",
+          }),
+        ],
+        ANSWER,
+      );
 
       expect(outcomes[0]).toEqual({
         applied: false,
         kind: "propose_connected_change",
         reason: "deferred",
       });
-      // Nothing is written: approval is a deterministic state machine (T11),
-      // and prose cannot stand in for it (docs/AI_SYSTEM.md §6).
-      expect(stub.rpc).not.toHaveBeenCalled();
+      // Nothing about it is written: approval is a deterministic state machine
+      // (T11), and prose cannot stand in for it (docs/AI_SYSTEM.md §6).
+      expect(stub.sent()?.fields).toEqual([]);
+      expect(stub.sent()?.assumptions).toEqual([]);
     });
 
     it("still refuses a malformed connected change", async () => {
-      const stub = stubClient();
-      const { outcomes } = await commitModelOperations(stub.client, ctx, [
-        op("propose_connected_change", {
-          title: "Approved already",
-          items: [],
-        }),
-      ]);
+      const stub = stubCommit();
+      const { outcomes } = await commitTurn(
+        stub.commit,
+        ctx,
+        [
+          op("propose_connected_change", {
+            title: "Approved already",
+            items: [],
+          }),
+        ],
+        ANSWER,
+      );
       expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
     });
 
     it("defers a checkpoint", async () => {
-      const stub = stubClient();
-      const { outcomes } = await commitModelOperations(stub.client, ctx, [
-        op("suggest_checkpoint", {
-          name: "Problem defined",
-          reason: "area_defined",
-          summary: "The problem statement is settled enough to build on.",
-        }),
-      ]);
+      const stub = stubCommit();
+      const { outcomes } = await commitTurn(
+        stub.commit,
+        ctx,
+        [
+          op("suggest_checkpoint", {
+            name: "Problem defined",
+            reason: "area_defined",
+            summary: "The problem statement is settled enough to build on.",
+          }),
+        ],
+        ANSWER,
+      );
       expect(outcomes[0]).toMatchObject({ applied: false, reason: "deferred" });
     });
   });
 
   it("refuses a scene, which belongs to a different boundary", async () => {
-    const stub = stubClient();
-    const { outcomes } = await commitModelOperations(stub.client, ctx, [
-      op("recommend_canvas_scene", { renderer: "problem_exploration" }),
-    ]);
+    const stub = stubCommit();
+    const { outcomes } = await commitTurn(
+      stub.commit,
+      ctx,
+      [op("recommend_canvas_scene", { renderer: "problem_exploration" })],
+      ANSWER,
+    );
     expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
-    expect(stub.rpc).not.toHaveBeenCalled();
+    // It reaches no write path: the transaction is asked for nothing.
+    expect(stub.sent()?.fields).toEqual([]);
+    expect(stub.sent()?.assumptions).toEqual([]);
   });
 });
 
@@ -317,11 +434,14 @@ describe("provenance is derived, not accepted", () => {
   });
 
   async function commitField(value: string, quote?: string) {
-    const stub = stubClient();
-    await commitModelOperations(stub.client, ctx, [
-      op("update_project_model", fieldWithQuote(value, quote)),
-    ]);
-    return stub.sent()?.p_fields[0] as {
+    const stub = stubCommit();
+    await commitTurn(
+      stub.commit,
+      ctx,
+      [op("update_project_model", fieldWithQuote(value, quote))],
+      ANSWER,
+    );
+    return stub.sent()?.fields[0] as {
       origin: string;
       source_excerpt: string | null;
     };
@@ -378,31 +498,41 @@ describe("provenance is derived, not accepted", () => {
   });
 
   it("records an assumption as the person's when they really said it", async () => {
-    const stub = stubClient();
-    await commitModelOperations(stub.client, ctx, [
-      op("record_assumption", {
-        ...validAssumption,
-        statement: "at the end of a tenancy",
-        quotedFromMessage: "at the end of a tenancy",
-      }),
-    ]);
-    expect(stub.sent()?.p_assumptions[0]).toMatchObject({
+    const stub = stubCommit();
+    await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("record_assumption", {
+          ...validAssumption,
+          statement: "at the end of a tenancy",
+          quotedFromMessage: "at the end of a tenancy",
+        }),
+      ],
+      ANSWER,
+    );
+    expect(stub.sent()?.assumptions[0]).toMatchObject({
       origin: "user_stated",
       source_excerpt: "at the end of a tenancy",
     });
   });
 
   it("refuses `researched` outright, since no research exists yet", async () => {
-    const stub = stubClient();
-    const { outcomes } = await commitModelOperations(stub.client, ctx, [
-      op("update_project_model", {
-        updates: [{ ...validUpdate.updates[0], origin: "researched" }],
-      }),
-    ]);
+    const stub = stubCommit();
+    const { outcomes } = await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("update_project_model", {
+          updates: [{ ...validUpdate.updates[0], origin: "researched" }],
+        }),
+      ],
+      ANSWER,
+    );
     // A turn claiming research before T10 is claiming evidence that cannot
     // exist, so the shape is refused rather than downgraded.
     expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
-    expect(stub.rpc).not.toHaveBeenCalled();
+    expect(stub.sent()?.fields).toEqual([]);
   });
 
   describe("verifiedQuotation", () => {

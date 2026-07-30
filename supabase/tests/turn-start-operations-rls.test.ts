@@ -62,35 +62,95 @@ async function impersonate(userId: string, client: Client = db) {
   await client.query("set role authenticated");
 }
 
-async function startTurn(turnId: string, client: Client = db) {
+const ANSWER =
+  "Condition disputes cluster at tenancy end. Who raises it first?";
+
+/*
+  Called with *named* parameters throughout, spelled exactly as the TypeScript
+  ports spell them (`src/lib/services/trusted-writer.ts`). That is deliberate:
+  the defect this suite exists to catch was a join failure between the two sides,
+  and positional arguments would keep passing while the names drifted apart.
+*/
+async function startTurn(
+  turnId: string,
+  client: Client = db,
+  actorId: string = USER_A,
+) {
   await asTrustedWriter(client);
   const { rows } = await client.query(
-    "select public.start_turn($1, $2, $3) as outcome",
-    [projectA, turnId, MESSAGE],
+    `select public.start_turn(
+       p_project_id => $1, p_turn_id => $2, p_actor_id => $3, p_content => $4
+     ) as outcome`,
+    [projectA, turnId, actorId, MESSAGE],
   );
   return rows[0].outcome as string;
 }
 
-async function applyOperations(
+interface CompleteResult {
+  outcome: string;
+  written?: Record<string, number>;
+  refused?: Record<string, string[]>;
+}
+
+async function completeTurn(
   turnId: string,
-  fields: unknown[],
-  assumptions: unknown[] = [],
+  options: {
+    fields?: unknown[];
+    assumptions?: unknown[];
+    answer?: string;
+    actorId?: string;
+    client?: Client;
+  } = {},
 ) {
-  await asTrustedWriter();
-  const { rows } = await db.query(
-    "select public.apply_turn_operations($1, $2, $3::jsonb, $4::jsonb) as result",
-    [projectA, turnId, JSON.stringify(fields), JSON.stringify(assumptions)],
+  const client = options.client ?? db;
+  await asTrustedWriter(client);
+  const { rows } = await client.query(
+    `select public.complete_turn(
+       p_project_id => $1,
+       p_turn_id => $2,
+       p_actor_id => $3,
+       p_assistant_text => $4,
+       p_fields => $5::jsonb,
+       p_assumptions => $6::jsonb
+     ) as result`,
+    [
+      projectA,
+      turnId,
+      options.actorId ?? USER_A,
+      options.answer ?? ANSWER,
+      JSON.stringify(options.fields ?? []),
+      JSON.stringify(options.assumptions ?? []),
+    ],
   );
-  return rows[0].result as { fields: number; assumptions: number };
+  return rows[0].result as CompleteResult;
+}
+
+/** Opens a turn and returns its id, so a completion has a run to close. */
+async function openTurn() {
+  const turnId = nextTurnId();
+  await startTurn(turnId);
+  return turnId;
 }
 
 const field = (patch: Record<string, unknown> = {}) => ({
+  slot: 0,
   area: "problem",
   key: "primary_pain",
   label: "Primary pain",
   value: "Deposit disputes at tenancy end.",
   origin: "ai_inferred",
   support: "hypothesis",
+  source_excerpt: null,
+  ...patch,
+});
+
+const assumption = (patch: Record<string, unknown> = {}) => ({
+  slot: 1,
+  statement: "Smaller agencies feel this most.",
+  why_it_matters: "It decides who the first customer is.",
+  alternatives: ["Larger agencies have more disputes by volume."],
+  importance: "material",
+  origin: "ai_inferred",
   source_excerpt: null,
   ...patch,
 });
@@ -270,17 +330,16 @@ describe.skipIf(skip)("start_turn", () => {
     await asTrustedWriter();
     await asTrustedWriter(other);
 
+    const start = (client: Client, turnId: string) =>
+      client.query(
+        `select public.start_turn(
+           p_project_id => $1, p_turn_id => $2, p_actor_id => $3, p_content => $4
+         ) as outcome`,
+        [projectA, turnId, USER_A, MESSAGE],
+      );
     const outcomes = await Promise.all([
-      db.query("select public.start_turn($1, $2, $3) as outcome", [
-        projectA,
-        first,
-        MESSAGE,
-      ]),
-      other.query("select public.start_turn($1, $2, $3) as outcome", [
-        projectA,
-        second,
-        MESSAGE,
-      ]),
+      start(db, first),
+      start(other, second),
     ]);
     const results = outcomes.map((o) => o.rows[0].outcome).sort();
     expect(results).toEqual(["already_running", "started"]);
@@ -297,75 +356,107 @@ describe.skipIf(skip)("start_turn", () => {
     // trusted writer alone (SECURITY_STANDARDS §11.2).
     await impersonate(USER_A);
     await expect(
-      db.query("select public.start_turn($1, $2, $3)", [
+      db.query("select public.start_turn($1, $2, $3, $4)", [
         projectA,
         nextTurnId(),
+        USER_A,
         MESSAGE,
       ]),
     ).rejects.toThrow(/permission denied/);
   });
+
+  it("refuses an actor who does not own the project", async () => {
+    /*
+      The elevated path carries its own authorisation. It bypasses RLS by
+      definition, so "the route checked first" is not a control the database can
+      rely on — and a route that forgot would otherwise write into someone else's
+      project.
+    */
+    await expect(startTurn(nextTurnId(), db, USER_B)).rejects.toThrow(
+      /not_project_owner/,
+    );
+    expect(await countRows("messages")).toBe(0);
+  });
 });
 
-describe.skipIf(skip)("apply_turn_operations", () => {
-  it("writes a turn's fields and assumptions in one call", async () => {
-    const turnId = nextTurnId();
-    const result = await applyOperations(
-      turnId,
-      [field()],
-      [
-        {
-          statement: "Smaller agencies feel this most.",
-          why_it_matters: "It decides who the first customer is.",
-          alternatives: ["Larger agencies have more disputes by volume."],
-          importance: "material",
-          origin: "ai_inferred",
-          source_excerpt: null,
-        },
-      ],
-    );
-    expect(result).toEqual({ fields: 1, assumptions: 1 });
+describe.skipIf(skip)("complete_turn", () => {
+  it("stores the answer, the writes and the outcome in one commit", async () => {
+    const turnId = await openTurn();
+    const result = await completeTurn(turnId, {
+      fields: [field()],
+      assumptions: [assumption()],
+    });
+
+    expect(result.outcome).toBe("completed");
+    // Per slot, so an outcome describes the operation that produced it.
+    expect(result.written).toEqual({ "0": 1, "1": 1 });
+    expect(result.refused).toEqual({});
+
     expect((await storedField())?.value).toBe(
       "Deposit disputes at tenancy end.",
     );
     expect(await countRows("assumptions")).toBe(1);
+    expect(
+      await countRows(
+        "messages",
+        "turn_id = $1 and role = 'assistant'",
+        turnId,
+      ),
+    ).toBe(1);
+    await asOwner();
+    const run = await db.query(
+      "select state, accepting_direction from public.turn_runs where turn_id = $1",
+      [turnId],
+    );
+    expect(run.rows[0].state).toBe("completed");
+    expect(run.rows[0].accepting_direction).toBe(false);
   });
 
-  it("writes nothing when a later operation in the set fails", async () => {
+  it("loses the answer too when a write in the set is malformed", async () => {
     /*
-      The all-or-none property, and the reason this is one function call rather
-      than a loop in TypeScript: field A landing while assumption B fails leaves
-      the project half-changed by a turn reported as failed.
+      All-or-none, and the reason this is one function call rather than an ordered
+      sequence of them: catch-up treats a stored answer as settlement, so an
+      answer that outlived its project writes would read as a completed turn
+      whose changes had silently vanished.
     */
-    const turnId = nextTurnId();
+    const turnId = await openTurn();
     await expect(
-      applyOperations(
-        turnId,
-        [field(), field({ key: "secondary_pain", area: "not_an_area" })],
-        [],
-      ),
+      completeTurn(turnId, {
+        fields: [
+          field(),
+          field({ key: "secondary_pain", area: "not_an_area" }),
+        ],
+      }),
     ).rejects.toThrow();
 
     expect(await countRows("project_fields")).toBe(0);
+    expect(
+      await countRows(
+        "messages",
+        "turn_id = $1 and role = 'assistant'",
+        turnId,
+      ),
+    ).toBe(0);
+    // Still running, so recovery reports it honestly rather than as completed.
+    await asOwner();
+    const run = await db.query(
+      "select state from public.turn_runs where turn_id = $1",
+      [turnId],
+    );
+    expect(run.rows[0].state).toBe("running");
   });
 
-  it("rolls back an accepted field when an assumption in the same set fails", async () => {
-    const turnId = nextTurnId();
+  it("rolls back an accepted field when an assumption in the same set is invalid", async () => {
+    const turnId = await openTurn();
     await expect(
-      applyOperations(
-        turnId,
-        [field()],
-        [
-          {
-            statement: "Claimed as the person's words.",
-            why_it_matters: "It changes who to build for.",
-            alternatives: [],
-            importance: "material",
-            // Claims the person said it, with nothing to quote.
-            origin: "user_stated",
-            source_excerpt: null,
-          },
+      completeTurn(turnId, {
+        fields: [field()],
+        assumptions: [
+          // Claims the person said it, with nothing to quote. An application
+          // invariant rather than an expected refusal, so it aborts.
+          assumption({ origin: "user_stated", source_excerpt: null }),
         ],
-      ),
+      }),
     ).rejects.toThrow(/unsourced_user_stated/);
 
     expect(await countRows("project_fields")).toBe(0);
@@ -375,35 +466,32 @@ describe.skipIf(skip)("apply_turn_operations", () => {
   it("refuses a user_stated field with no verified words behind it", async () => {
     // Origin alone is an assertion. A claim that the person said something has
     // to carry the words that were checked, or it cannot be audited later.
+    const turnId = await openTurn();
     await expect(
-      applyOperations(
-        nextTurnId(),
-        [field({ origin: "user_stated", source_excerpt: null })],
-        [],
-      ),
+      completeTurn(turnId, {
+        fields: [field({ origin: "user_stated", source_excerpt: null })],
+      }),
     ).rejects.toThrow(/unsourced_user_stated/);
   });
 
   it("persists the verified words and the turn they came from", async () => {
-    const turnId = nextTurnId();
-    await applyOperations(
-      turnId,
-      [
+    const turnId = await openTurn();
+    await completeTurn(turnId, {
+      fields: [
         field({
           value: "argue about property condition",
           origin: "user_stated",
           source_excerpt: "argue about property condition",
         }),
       ],
-      [],
-    );
+    });
     const stored = await storedField();
     expect(stored?.origin).toBe("user_stated");
     expect(stored?.source_excerpt).toBe("argue about property condition");
     expect(stored?.source_turn_id).toBe(turnId);
   });
 
-  it("refuses to replace wording the person owns", async () => {
+  it("refuses to replace wording the person owns, and keeps the answer", async () => {
     // Written as the owner, through the grants a browser session really has:
     // this is a person editing their own project (T7).
     await impersonate(USER_A);
@@ -415,11 +503,26 @@ describe.skipIf(skip)("apply_turn_operations", () => {
       [projectA],
     );
 
-    await expect(applyOperations(nextTurnId(), [field()], [])).rejects.toThrow(
-      /user_owned_field/,
-    );
-    // Refused, not written-then-reverted: the person's wording is untouched.
+    const turnId = await openTurn();
+    const result = await completeTurn(turnId, { fields: [field()] });
+
+    /*
+      A refusal is not a failure. Changing a person's own wording belongs to the
+      approval path, but throwing away the answer they are reading would be a
+      second, worse mistake — so the row is refused, reported per slot, and
+      everything else in the turn still commits.
+    */
+    expect(result.outcome).toBe("completed");
+    expect(result.refused).toEqual({ "0": ["user_owned_field"] });
+    expect(result.written).toEqual({});
     expect((await storedField())?.value).toBe("The wording I chose myself.");
+    expect(
+      await countRows(
+        "messages",
+        "turn_id = $1 and role = 'assistant'",
+        turnId,
+      ),
+    ).toBe(1);
   });
 
   it("allows a support revision that leaves the person's wording alone", async () => {
@@ -433,11 +536,10 @@ describe.skipIf(skip)("apply_turn_operations", () => {
       [projectA],
     );
 
-    await applyOperations(
-      nextTurnId(),
-      [field({ support: "some_evidence", label: "The core pain" })],
-      [],
-    );
+    const turnId = await openTurn();
+    await completeTurn(turnId, {
+      fields: [field({ support: "some_evidence", label: "The core pain" })],
+    });
     const stored = await storedField();
     expect(stored?.support).toBe("some_evidence");
     expect(stored?.label).toBe("The core pain");
@@ -451,15 +553,41 @@ describe.skipIf(skip)("apply_turn_operations", () => {
   });
 
   it("revises a field the model already owns", async () => {
-    await applyOperations(
-      nextTurnId(),
-      [field({ value: "An earlier reading." })],
-      [],
-    );
-    await applyOperations(nextTurnId(), [field()], []);
+    await completeTurn(await openTurn(), {
+      fields: [field({ value: "An earlier reading." })],
+    });
+    await completeTurn(await openTurn(), { fields: [field()] });
     expect((await storedField())?.value).toBe(
       "Deposit disputes at tenancy end.",
     );
+  });
+
+  it("writes nothing when the run is no longer this turn's to finish", async () => {
+    /*
+      The lease lapsed and a later turn reconciled the run, so recovery may
+      already have told the user this turn did not finish. A late worker must not
+      overwrite a verdict the person has seen — not with an answer, and not with
+      project changes.
+    */
+    const abandoned = await openTurn();
+    await asTrustedWriter();
+    await db.query(
+      "update public.turn_runs set lease_expires_at = now() - interval '1 minute' where turn_id = $1",
+      [abandoned],
+    );
+    // A new turn reconciles the dead one, exactly as `start_turn` does.
+    await startTurn(nextTurnId());
+
+    const result = await completeTurn(abandoned, { fields: [field()] });
+    expect(result.outcome).toBe("not_running");
+    expect(await countRows("project_fields")).toBe(0);
+    expect(
+      await countRows(
+        "messages",
+        "turn_id = $1 and role = 'assistant'",
+        abandoned,
+      ),
+    ).toBe(0);
   });
 
   it("loses to a concurrent user edit rather than racing it", async () => {
@@ -469,7 +597,8 @@ describe.skipIf(skip)("apply_turn_operations", () => {
       between was silently overwritten. The check now happens under the row's own
       lock, inside the same transaction as the write.
     */
-    await applyOperations(nextTurnId(), [field()], []);
+    await completeTurn(await openTurn(), { fields: [field()] });
+    const turnId = await openTurn();
 
     await impersonate(USER_A);
     await db.query("begin");
@@ -481,24 +610,32 @@ describe.skipIf(skip)("apply_turn_operations", () => {
       [projectA],
     );
 
-    await asTrustedWriter(other);
-    const commit = other.query(
-      "select public.apply_turn_operations($1, $2, $3::jsonb, '[]'::jsonb)",
-      [projectA, nextTurnId(), JSON.stringify([field()])],
-    );
+    const commit = completeTurn(turnId, {
+      fields: [field()],
+      client: other,
+    });
     // The commit blocks on the lock; the edit wins the row.
     await db.query("commit");
 
-    await expect(commit).rejects.toThrow(/user_owned_field/);
+    expect((await commit).refused).toEqual({ "0": ["user_owned_field"] });
     expect((await storedField())?.value).toBe("The wording I chose myself.");
   });
 
+  it("refuses an actor who does not own the project", async () => {
+    const turnId = await openTurn();
+    await expect(
+      completeTurn(turnId, { fields: [field()], actorId: USER_B }),
+    ).rejects.toThrow(/not_project_owner/);
+    expect(await countRows("project_fields")).toBe(0);
+  });
+
   it("is not callable by a browser session", async () => {
+    const turnId = await openTurn();
     await impersonate(USER_A);
     await expect(
       db.query(
-        "select public.apply_turn_operations($1, $2, '[]'::jsonb, '[]'::jsonb)",
-        [projectA, nextTurnId()],
+        "select public.complete_turn($1, $2, $3, 'text', '[]'::jsonb, '[]'::jsonb)",
+        [projectA, turnId, USER_A],
       ),
     ).rejects.toThrow(/permission denied/);
   });

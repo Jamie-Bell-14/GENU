@@ -5,7 +5,45 @@
   Both functions exist because the guarantees they provide are *transactional*.
   A sequence of statements from the application cannot promise all-or-none, and
   a check followed by a write cannot promise the checked state still holds.
+
+  Both are `security definer` and granted to `service_role` alone, which means
+  neither can rely on Row-Level Security to decide who is allowed in. So each one
+  authorises its own caller against `p_actor_id` before it writes anything: the
+  actor must own the project. That check is inside the transaction, so it cannot
+  be skipped by a caller that forgot, and it does not depend on the route having
+  read the project first (SECURITY_STANDARDS §11.2 — an elevated path must carry
+  its own authorisation, not inherit one).
 */
+
+/*
+  Confirms the acting user owns the project, or raises.
+
+  Shared by both functions below so the rule reads the same way in each, and so
+  a new elevated entry point cannot accidentally omit it.
+*/
+create or replace function private.assert_project_actor(
+  p_project_id uuid,
+  p_actor_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if p_actor_id is null or not exists (
+    select 1 from public.projects
+    where id = p_project_id and owner_id = p_actor_id
+  ) then
+    -- Deliberately uniform: a project that does not exist and one owned by
+    -- somebody else raise the same thing, so nothing about existence leaks.
+    raise exception 'not_project_owner'
+      using errcode = 'insufficient_privilege';
+  end if;
+end;
+$$;
+
+revoke all on function private.assert_project_actor(uuid, uuid) from public;
 
 -- ---------------------------------------------------------------------------
 -- Provenance, persisted
@@ -79,6 +117,7 @@ comment on column public.project_fields.source_excerpt is
 create or replace function public.start_turn(
   p_project_id uuid,
   p_turn_id uuid,
+  p_actor_id uuid,
   p_content text
 )
 returns text
@@ -90,6 +129,8 @@ declare
   live_runs integer;
   violated text;
 begin
+  perform private.assert_project_actor(p_project_id, p_actor_id);
+
   /*
     Serialise starts for this project on a row that always exists.
 
@@ -155,26 +196,34 @@ begin
 end;
 $$;
 
-revoke all on function public.start_turn(uuid, uuid, text) from public;
-grant execute on function public.start_turn(uuid, uuid, text) to service_role;
+revoke all on function public.start_turn(uuid, uuid, uuid, text) from public;
+grant execute on function public.start_turn(uuid, uuid, uuid, text) to service_role;
 
-comment on function public.start_turn(uuid, uuid, text) is
+comment on function public.start_turn(uuid, uuid, uuid, text) is
   'Reconciles an expired run, then opens a turn and saves its message atomically. Returns started | already_running.';
 
+
 -- ---------------------------------------------------------------------------
--- Committing a turn's project-truth operations
+-- Ending a turn
 -- ---------------------------------------------------------------------------
 
 /*
-  Applies every project-truth operation a successful turn produced, or none.
+  Everything a successful turn changes, in one transaction: the answer, the
+  project-truth writes it produced, and the turn's terminal state.
 
-  The application used to loop and apply them one at a time, which is not what
-  "committed as one unit" means: field A could land and assumption B fail,
-  leaving the project half-changed by a turn reported as failed. A single
-  function call is one transaction, so the set is genuinely all-or-none.
+  Ordering these as three separate durable writes was not enough, and the reason
+  is worth stating plainly. Catch-up treats a stored assistant message as
+  settlement — "a stored result settles it, whatever the state says" — so a
+  worker that died after the message was inserted but before the operations
+  committed left a turn that *reads* as completed while every field and
+  assumption belonging to it had been lost. There is no ordering of separate
+  writes that fixes that; the three have to be one commit.
 
-  Two protections live here rather than in application code, because both
-  depend on state that can change between a read and a write:
+  Refusals are not failures. A field the person owns is expected to be refused,
+  and raising would throw away an answer the user is entitled to keep — so
+  per-row refusals are collected and reported, while genuine faults still abort
+  the whole thing. Two protections live here rather than in application code,
+  because both depend on state that can change between a read and a write:
 
   - **User-owned wording is not replaced automatically.** Checked under the
     row's own lock, so a concurrent user edit cannot slip in between the check
@@ -184,11 +233,19 @@ comment on function public.start_turn(uuid, uuid, text) is
     owns into an inference, which is what happens if origin is supplied
     unconditionally.
 
-  Anything refused raises, so the caller gets no partial write to reconcile.
+  Each staged row carries the `slot` of the operation that produced it, so the
+  caller can report and audit per operation what the database actually did with
+  it rather than inferring from a total.
+
+  Returns one of:
+    { outcome: 'completed', written: {slot: n}, refused: {slot: [code]} }
+    { outcome: 'not_running' }  -- nothing written at all
 */
-create or replace function public.apply_turn_operations(
+create or replace function public.complete_turn(
   p_project_id uuid,
   p_turn_id uuid,
+  p_actor_id uuid,
+  p_assistant_text text,
   p_fields jsonb,
   p_assumptions jsonb
 )
@@ -199,37 +256,70 @@ set search_path = ''
 as $$
 declare
   item jsonb;
-  current record;
-  fields_written integer := 0;
-  assumptions_written integer := 0;
+  existing record;
+  slot text;
+  written jsonb := '{}'::jsonb;
+  refused jsonb := '{}'::jsonb;
 begin
+  perform private.assert_project_actor(p_project_id, p_actor_id);
+
+  /*
+    The run must still be this turn's to finish. A turn whose lease lapsed may
+    already have been reconciled and reported to the user as unfinished, and
+    recovery's verdict is not something a late worker may overwrite — so nothing
+    is written and the caller is told why.
+  */
+  perform 1
+  from public.turn_runs
+  where turn_id = p_turn_id and project_id = p_project_id and state = 'running'
+  for update;
+
+  if not found then
+    return jsonb_build_object('outcome', 'not_running');
+  end if;
+
+  /*
+    The assistant row is keyed by the turn id, so the message the client watched
+    arrive and the message catch-up returns are the same message.
+  */
+  insert into public.messages (id, project_id, turn_id, role, content)
+  values (p_turn_id, p_project_id, p_turn_id, 'assistant', p_assistant_text);
+
   for item in select * from jsonb_array_elements(coalesce(p_fields, '[]'::jsonb))
   loop
-    select origin, value, source_turn_id, source_excerpt
-      into current
-    from public.project_fields
-    where project_id = p_project_id
-      and area = (item ->> 'area')::public.project_area
-      and key = item ->> 'key'
-    for update;
-
-    if found and current.origin = 'user_stated'
-       and current.value <> (item ->> 'value') then
-      raise exception
-        'user_owned_field:%/%', item ->> 'area', item ->> 'key'
-        using errcode = 'check_violation';
-    end if;
+    slot := coalesce(item ->> 'slot', '0');
 
     /*
       A proposal claiming the person said something must carry the words that
-      were verified. Checked here rather than as a table constraint because a
-      direct user edit is legitimately user-stated with nothing to quote.
+      were verified. This is an application invariant rather than a refusal —
+      origin is *derived* from the excerpt, so the two cannot disagree unless
+      the caller is broken — which is why it aborts rather than being collected.
     */
     if (item ->> 'origin') = 'user_stated'
        and (item ->> 'source_excerpt') is null then
       raise exception 'unsourced_user_stated:%/%',
         item ->> 'area', item ->> 'key'
         using errcode = 'check_violation';
+    end if;
+
+    select origin, value into existing
+    from public.project_fields
+    where project_id = p_project_id
+      and area = (item ->> 'area')::public.project_area
+      and key = item ->> 'key'
+    for update;
+
+    if found and existing.origin = 'user_stated'
+       and existing.value <> (item ->> 'value') then
+      -- Refused, not applied: changing a person's own wording is a proposal for
+      -- them to approve, not something a turn does on its own.
+      refused := jsonb_set(
+        refused,
+        array[slot],
+        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb('user_owned_field'::text),
+        true
+      );
+      continue;
     end if;
 
     insert into public.project_fields
@@ -272,11 +362,18 @@ begin
         end,
         updated_at = now();
 
-    fields_written := fields_written + 1;
+    written := jsonb_set(
+      written,
+      array[slot],
+      to_jsonb(coalesce((written ->> slot)::integer, 0) + 1),
+      true
+    );
   end loop;
 
   for item in select * from jsonb_array_elements(coalesce(p_assumptions, '[]'::jsonb))
   loop
+    slot := coalesce(item ->> 'slot', '0');
+
     if (item ->> 'origin') = 'user_stated'
        and (item ->> 'source_excerpt') is null then
       raise exception 'unsourced_user_stated:assumption'
@@ -296,18 +393,37 @@ begin
       case when item ->> 'source_excerpt' is null then null else p_turn_id end,
       item ->> 'source_excerpt'
     );
-    assumptions_written := assumptions_written + 1;
+
+    written := jsonb_set(
+      written,
+      array[slot],
+      to_jsonb(coalesce((written ->> slot)::integer, 0) + 1),
+      true
+    );
   end loop;
 
+  /*
+    Closing the run is part of the same commit. Constrained to a still-running
+    row, so a second terminal write cannot overwrite the first.
+  */
+  update public.turn_runs
+  set state = 'completed',
+      accepting_direction = false,
+      ended_at = now()
+  where turn_id = p_turn_id and state = 'running';
+
   return jsonb_build_object(
-    'fields', fields_written,
-    'assumptions', assumptions_written
+    'outcome', 'completed',
+    'written', written,
+    'refused', refused
   );
 end;
 $$;
 
-revoke all on function public.apply_turn_operations(uuid, uuid, jsonb, jsonb) from public;
-grant execute on function public.apply_turn_operations(uuid, uuid, jsonb, jsonb) to service_role;
+revoke all on function public.complete_turn(uuid, uuid, uuid, text, jsonb, jsonb)
+  from public;
+grant execute on function public.complete_turn(uuid, uuid, uuid, text, jsonb, jsonb)
+  to service_role;
 
-comment on function public.apply_turn_operations(uuid, uuid, jsonb, jsonb) is
-  'Applies a turn''s staged field and assumption writes in one transaction, or none. Protects user-stated rows under lock.';
+comment on function public.complete_turn(uuid, uuid, uuid, text, jsonb, jsonb) is
+  'Stores a turn''s answer, applies its project-truth writes and closes the run, in one transaction. Returns completed | not_running with per-slot written and refused counts.';

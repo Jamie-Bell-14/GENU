@@ -102,6 +102,8 @@ export type StartTurnOutcome =
 export async function startTurn(input: {
   projectId: string;
   turnId: string;
+  /** The signed-in user. The function authorises against this itself. */
+  actorId: string;
   content: string;
 }): Promise<StartTurnOutcome> {
   const client = trustedClient();
@@ -112,6 +114,7 @@ export async function startTurn(input: {
   const { data, error } = await client.rpc("start_turn", {
     p_project_id: input.projectId,
     p_turn_id: input.turnId,
+    p_actor_id: input.actorId,
     p_content: input.content,
   });
   if (error) {
@@ -120,6 +123,73 @@ export async function startTurn(input: {
     return "unavailable";
   }
   return data === "started" ? "started" : "already_running";
+}
+
+/**
+ * What one call to `complete_turn` did.
+ *
+ * `written` and `refused` are keyed by the *slot* of the staged operation that
+ * produced each row, so the caller reports per operation what the database
+ * actually did rather than inferring it from a total.
+ */
+export type CompleteTurnRecord =
+  | {
+      outcome: "completed";
+      written: Record<string, number>;
+      refused: Record<string, string[]>;
+    }
+  /** The run was no longer this turn's to finish; nothing was written. */
+  | { outcome: "not_running" }
+  /** The transaction did not happen; nothing was written. */
+  | { outcome: "unavailable" };
+
+/**
+ * Ends a turn: its answer, its project-truth writes and its terminal state, in
+ * one transaction (docs/AI_SYSTEM.md §4.1).
+ *
+ * A narrow port rather than an elevated client handed to the service layer. The
+ * function it calls is `security definer` and `service_role`-only — it has to be,
+ * because closing a run means writing `turn_runs`, which no browser session may
+ * touch — so this module is the only place that can reach it, and the function
+ * authorises `actorId` against the project itself rather than trusting that a
+ * route checked first.
+ */
+export async function completeTurnRecord(input: {
+  projectId: string;
+  turnId: string;
+  actorId: string;
+  assistantText: string;
+  fields: unknown[];
+  assumptions: unknown[];
+}): Promise<CompleteTurnRecord> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("complete_turn");
+    return { outcome: "unavailable" };
+  }
+  const { data, error } = await client.rpc("complete_turn", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_actor_id: input.actorId,
+    p_assistant_text: input.assistantText,
+    p_fields: input.fields,
+    p_assumptions: input.assumptions,
+  });
+  if (error) {
+    console.error("complete_turn failed", { code: error.code });
+    return { outcome: "unavailable" };
+  }
+  const result = data as {
+    outcome: "completed" | "not_running";
+    written?: Record<string, number>;
+    refused?: Record<string, string[]>;
+  } | null;
+  if (result?.outcome !== "completed") return { outcome: "not_running" };
+  return {
+    outcome: "completed",
+    written: result.written ?? {},
+    refused: result.refused ?? {},
+  };
 }
 
 /**

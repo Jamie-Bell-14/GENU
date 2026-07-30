@@ -912,6 +912,170 @@ describe("a direction is applied only when the model receives it", () => {
     expect(turn.assistantText).toBe("Final.");
   });
 
+  /*
+    A direction is announced by the request that carries it, never by the
+    intention to carry it. Attaching a note to the local transcript is not the
+    model receiving it: the next request can still be refused by an allowance
+    check or fail outright, and each of these cases used to leave the interface
+    saying "applied" for a request that never completed.
+  */
+  describe("a carried direction is announced only once a response carried it", () => {
+    /** Hands over a direction at the first mid-turn boundary, once. */
+    const midDirection = () => {
+      let taken = false;
+      const seen: { final: boolean }[] = [];
+      return {
+        seen,
+        overrides: {
+          takeDirection: async ({ final }: { final: boolean }) => {
+            seen.push({ final });
+            if (taken || final) return null;
+            taken = true;
+            return "Focus on smaller agencies.";
+          },
+        },
+      };
+    };
+
+    const toolRound = (id: string): StubTurn => ({
+      blocks: [
+        {
+          type: "tool_use",
+          id,
+          name: "update_project_model",
+          input: validUpdate,
+        },
+      ],
+      stopReason: "tool_use",
+    });
+
+    it("does not announce one when the provider fails on the next request", async () => {
+      const { seen, overrides } = midDirection();
+      const { applied, events, hooks } = harness(overrides);
+      let call = 0;
+      const client = {
+        messages: {
+          stream() {
+            call += 1;
+            if (call === 1) {
+              return {
+                async *[Symbol.asyncIterator]() {},
+                finalMessage: async () =>
+                  ({
+                    content: [
+                      {
+                        type: "tool_use",
+                        id: "t1",
+                        name: "update_project_model",
+                        input: validUpdate,
+                      },
+                    ],
+                    stop_reason: "tool_use",
+                    usage: { input_tokens: 10, output_tokens: 10 },
+                  }) as unknown as Anthropic.Message,
+              };
+            }
+            throw new Error("upstream gone");
+          },
+        },
+      } as unknown as Anthropic;
+
+      const turn = await new AnthropicDiscoveryEngine({ client }).runTurn(
+        input,
+        hooks,
+      );
+
+      // The note was taken from the host, so this is the case that matters: it
+      // was accepted, attached, and the model never saw it.
+      expect(seen.some((call) => !call.final)).toBe(true);
+      expect(applied).toEqual([]);
+      expect(turn.assistantText).toBe("");
+      expect(events.at(-1)).toMatchObject({ type: "turn_failed" });
+    });
+
+    it("does not announce one when the output allowance is spent first", async () => {
+      const { seen, overrides } = midDirection();
+      const { applied, events, hooks } = harness(overrides);
+      // The first round spends the turn's whole allowance, so the round that
+      // would have carried the direction never reaches the provider.
+      const { result } = run(
+        [
+          { ...toolRound("t1"), outputTokens: TURN_OUTPUT_ALLOWANCE },
+          { blocks: [text("More.")], stopReason: "end_turn" },
+        ],
+        hooks,
+      );
+      const turn = await result;
+
+      expect(seen.some((call) => !call.final)).toBe(true);
+      expect(applied).toEqual([]);
+      expect(turn.assistantText).toBe("");
+      expect(events.at(-1)).toMatchObject({
+        type: "turn_failed",
+        error: { code: "model_output_invalid" },
+      });
+    });
+
+    it("does not announce one when the input allowance is spent first", async () => {
+      /*
+        The transcript is re-sent every round, so a turn carrying a large project
+        snapshot exhausts its cumulative input allowance after a few rounds. The
+        direction here is handed over at the boundary of a round whose successor
+        never gets to make its request.
+      */
+      let taken = false;
+      let boundaries = 0;
+      const notes: string[] = [];
+      const events: EngineEvent[] = [];
+      const hooks: TurnHooks = {
+        emit: (event) => events.push(event),
+        step: async (_name, work) => work(),
+        recommendScene: async () => {},
+        directionApplied: (note) => notes.push(note),
+        takeDirection: async ({ final }) => {
+          if (final || taken) return null;
+          boundaries += 1;
+          // Late enough that the following round is the one that overruns.
+          if (boundaries < 3) return null;
+          taken = true;
+          return "Focus on smaller agencies.";
+        },
+      };
+      const stub = stubClient(
+        Array.from({ length: MAX_PROVIDER_ROUNDS }, (_, index) =>
+          toolRound(`t${index}`),
+        ),
+      );
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          // Filled to the context budget, so every round re-sends a large
+          // payload and the cumulative input bound is what stops the turn.
+          recentMessages: Array.from({ length: 12 }, (_, index) => ({
+            role: "user" as const,
+            content: `${"z".repeat(20_000)}${index}`,
+          })),
+        }),
+      });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(taken).toBe(true);
+      expect(notes).toEqual([]);
+      expect(turn.assistantText).toBe("");
+      // The turn ran out of *input*, before the request that would have carried
+      // the note — not out of rounds, which would have carried it.
+      expect(events.at(-1)).toMatchObject({
+        type: "turn_failed",
+        error: { code: "model_output_invalid" },
+      });
+      expect(stub.calls()).toBeLessThan(MAX_PROVIDER_ROUNDS);
+    });
+  });
+
   it("keeps live and persisted text identical when it acknowledges one", async () => {
     const { overrides } = directionHooks("Too late.", "final");
     const { events, hooks } = harness(overrides);

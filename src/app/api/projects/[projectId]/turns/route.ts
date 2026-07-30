@@ -11,9 +11,10 @@ import {
   loadProjectRelationships,
 } from "@/lib/canvas/project-model-store";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
-import { commitModelOperations } from "@/lib/services/model-operations";
+import { commitTurn } from "@/lib/services/model-operations";
 import {
   closeTurnRun,
+  completeTurnRecord,
   startTurn,
   recordActivity,
   recordAudit,
@@ -168,6 +169,9 @@ export async function POST(
   const started = await startTurn({
     projectId,
     turnId,
+    // The function authorises this itself rather than trusting the check above:
+    // an elevated path has to carry its own authorisation.
+    actorId: user.id,
     content: parsed.data.message,
   });
   if (started === "already_running") {
@@ -410,39 +414,26 @@ export async function POST(
         }
         /*
           The host — not the engine — decides the turn is over, and everything
-          the turn changes happens here in one ordered sequence: answer stored,
-          project truth applied as one unit, outcome recorded, canvas told
-          (see finish-turn.ts).
-
-          The assistant row is keyed by the turn id, so the message the client
-          rendered live and the message catch-up returns are the same message.
+          the turn changes is committed together: the answer, the project-truth
+          writes it produced and the terminal state (see finish-turn.ts).
         */
         await finishTurn(
           {
-            persistResult: async (text) => {
-              const { error } = await supabase.from("messages").insert({
-                id: turnId,
-                project_id: projectId,
-                turn_id: turnId,
-                role: "assistant",
-                content: text,
-              });
-              return !error;
-            },
             /*
-              Where the operations a successful turn produced are authorised and
-              disposed of — once, as one transaction. Every outcome is audited
-              including refusal, which is exactly the kind of event that matters
-              after the fact, and none of it travels back to the engine.
-
-              Because this only runs for a turn that stored an answer, an audit
-              row here describes something that actually happened rather than an
-              operation later abandoned with a failing turn.
+              One transaction, through the one port that can reach it. The
+              elevated function is authorised against this user inside the
+              database, so this path carries its own authorisation rather than
+              inheriting the ownership check made above.
             */
-            applyOperations: async () => {
-              if (result.operations.length === 0) return false;
-              const { outcomes, changed } = await commitModelOperations(
-                supabase,
+            completeTurn: (assistantText) =>
+              commitTurn(
+                (writes) =>
+                  completeTurnRecord({
+                    projectId,
+                    turnId,
+                    actorId: user.id,
+                    ...writes,
+                  }),
                 {
                   projectId,
                   turnId,
@@ -451,25 +442,8 @@ export async function POST(
                   userMessage: parsed.data.message,
                 },
                 result.operations,
-              );
-              for (const outcome of outcomes) {
-                if (outcome.applied) {
-                  await audit("operation_applied", {
-                    target: outcome.kind,
-                    detail: { count: outcome.count },
-                  });
-                  continue;
-                }
-                await audit("operation_rejected", {
-                  target: outcome.kind,
-                  detail:
-                    outcome.reason === "rejected"
-                      ? { reason: outcome.reason, issue: outcome.issue }
-                      : { reason: outcome.reason },
-                });
-              }
-              return changed;
-            },
+                assistantText,
+              ),
             /*
               What the canvas is told the project now holds — re-read from the
               application's own tables after the write landed, never from
@@ -488,6 +462,28 @@ export async function POST(
             },
             closeRun: (state) => closeTurnRun({ turnId, state }),
             audit: (action, detail) => audit(action, { detail }),
+            /*
+              Audited from what the transaction did, so `operation_applied`
+              means a row exists rather than that a write was attempted. Every
+              outcome is recorded including refusal, which is exactly the kind
+              of event that matters after the fact, and none of it travels back
+              to the engine.
+            */
+            auditOperation: (outcome) =>
+              outcome.applied
+                ? audit("operation_applied", {
+                    target: outcome.kind,
+                    detail: outcome.refused
+                      ? { count: outcome.count, refused: outcome.refused }
+                      : { count: outcome.count },
+                  })
+                : audit("operation_rejected", {
+                    target: outcome.kind,
+                    detail:
+                      outcome.reason === "rejected"
+                        ? { reason: outcome.reason, issue: outcome.issue }
+                        : { reason: outcome.reason },
+                  }),
             emit,
           },
           result.assistantText,

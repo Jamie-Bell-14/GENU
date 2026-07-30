@@ -60,6 +60,36 @@ export const PROPOSABLE_SUPPORT = [
 /** Rejects markup, links and styling smuggled through any user-visible text. */
 const MARKUP_PATTERN = /[<>{}]|javascript:|https?:\/\/|style=|class=/i;
 
+/**
+ * An excerpt the model offers as evidence, or nothing.
+ *
+ * Nullable, not merely optional, and that distinction is a real defect this
+ * fixes. The provider-facing schemas are `strict`, which requires every property
+ * to be present — so a model recording an *inference* correctly sends
+ * `quotedFromMessage: null`. A Zod schema accepting only `string | undefined`
+ * rejected that entirely valid call, consumed the turn's single schema retry and
+ * could fail Step 3 on a well-behaved response.
+ *
+ * Absent, null and blank all mean the same thing here: there is no quotation, so
+ * the record is the model's own inference. Anything present has to be long
+ * enough to be evidence of something — see `verifiedQuotation`, which then
+ * checks it against the message the server actually received.
+ */
+const quotedFromMessage = z
+  .union([z.string(), z.null()])
+  .optional()
+  .transform((value) => {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : null;
+  })
+  .refine((value) => value === null || value.length <= 500, {
+    message: "A quotation may be at most 500 characters.",
+  })
+  .refine((value) => value === null || value.length >= 8, {
+    message:
+      "A quotation must be at least 8 characters, or null when there is none.",
+  });
+
 function safeText(max: number) {
   return z
     .string()
@@ -104,7 +134,7 @@ export const UpdateProjectModelSchema = z
              * `ai_inferred`. The model cannot set the origin either way — it
              * can only offer evidence, which is then verified.
              */
-            quotedFromMessage: z.string().trim().min(8).max(500).optional(),
+            quotedFromMessage,
           })
           .strict(),
       )
@@ -137,7 +167,7 @@ export const RecordAssumptionSchema = z
     alternatives: z.array(safeText(300)).max(5).default([]),
     importance: z.enum(ASSUMPTION_IMPORTANCE),
     /** Verified against the real message before it can mean `user_stated`. */
-    quotedFromMessage: z.string().trim().min(8).max(500).optional(),
+    quotedFromMessage,
   })
   .strict();
 
@@ -249,6 +279,12 @@ export const DISCOVERY_TOOLS = [
           items: {
             type: "object",
             additionalProperties: false,
+            /*
+              Every property, because these schemas are `strict`: a property left
+              out of `required` is not "optional" to the provider. The one that
+              may be empty is nullable instead, and the Zod boundary accepts null
+              for exactly that reason.
+            */
             required: [
               "area",
               "key",
@@ -257,6 +293,7 @@ export const DISCOVERY_TOOLS = [
               "origin",
               "support",
               "rationale",
+              "quotedFromMessage",
             ],
             properties: {
               area: { type: "string", enum: [...PROJECT_AREAS] },
@@ -285,7 +322,7 @@ export const DISCOVERY_TOOLS = [
               quotedFromMessage: {
                 type: ["string", "null"],
                 description:
-                  "An exact, word-for-word excerpt from the person's message, if this records something they actually said. It is checked against the real message; paraphrase it and the field will be recorded as your inference instead. Omit it when the field is your own inference.",
+                  "An exact, word-for-word excerpt from the person's message, if this records something they actually said in those words. It is checked against the real message; paraphrase it and the field will be recorded as your inference instead. Send null when the field is your own inference.",
               },
             },
           },
@@ -320,7 +357,7 @@ export const DISCOVERY_TOOLS = [
         quotedFromMessage: {
           type: ["string", "null"],
           description:
-            "An exact, word-for-word excerpt from the person's message, if the assumption is theirs rather than yours. It is checked against the real message. Omit it when the assumption is your own inference.",
+            "An exact, word-for-word excerpt from the person's message, if the assumption is theirs in those words. It is checked against the real message. Send null when the assumption is your own inference.",
         },
       },
     },

@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationStream } from "@/components/conversation/conversation-stream";
 import { LivingCanvas } from "@/components/canvas/living-canvas";
 import type { CanvasObject } from "@/lib/canvas/model";
-import { validateScene, type ProjectScope } from "@/lib/canvas/scene";
+import type { ProjectScope } from "@/lib/canvas/scene";
+import { commitTurn } from "@/lib/services/model-operations";
+import type { CompleteTurnRecord } from "@/lib/services/trusted-writer";
 import { AnthropicDiscoveryEngine } from "./anthropic-engine";
 import { createActivityReporter } from "./activity-reporter";
 import { finishTurn } from "./finish-turn";
@@ -18,55 +20,34 @@ import {
 } from "./turn-events";
 
 /**
- * The Step 2–3 path, end to end through everything except the provider
- * (docs/VERTICAL_SLICE_SPEC.md Steps 2–3, T9 "Done when").
+ * The Step 2–3 path on a **new** project, end to end through everything except
+ * the provider (docs/VERTICAL_SLICE_SPEC.md Steps 2–3, T9 "Done when").
+ *
+ * The empty start is the point. An earlier version of this test began with an
+ * existing concept and put the not-yet-written assumption's id in the scope, so
+ * the model could name ids that only exist after the commit — a state the real
+ * first turn cannot be in. That hid the transition this task actually has to
+ * make work: no objects, no scene, no ids to name; then a commit that generates
+ * ids; then a canvas that shows the sparse model *in the same turn*.
  *
  * A provider response shaped exactly as the live engine would receive one is
- * driven through the real hooks, the real validation boundary, the real
- * reducer and the real components. What it proves is the join: that a turn
- * which records a field, records an assumption, recommends a scene and offers
- * actions actually reaches the screen — the three gaps GPT found were each a
- * missing *connection* rather than a missing part, and only a test that spans
- * the whole path can catch that class of defect.
+ * driven through the real hooks, the real validation boundary, the real commit
+ * path, the real reducer and the real components.
  *
  * It does not prove the model behaves this way. Only a live smoke test can, and
  * this deliberately does not claim to replace one.
  */
 
 const TURN = "dddddddd-0000-4000-8000-000000000001";
-const CONCEPT = "aaaaaaaa-0000-4000-8000-000000000001";
-const ASSUMPTION_OBJECT = "aaaaaaaa-0000-4000-8000-000000000002";
+/** An id the model invents, because on an empty project it has none to name. */
+const IMAGINED = "aaaaaaaa-0000-4000-8000-00000000dead";
 
 const USER_MESSAGE =
   "Landlords and tenants argue about property condition at the end of a tenancy.";
 
-/** What the canvas holds before the turn: the sparse Step 2 starting point. */
-const objectsBefore: CanvasObject[] = [
-  {
-    id: CONCEPT,
-    kind: "concept",
-    zone: "subject",
-    title: "Property-condition disagreement",
-    origin: "user_stated",
-  },
-];
-
-/** What the server re-reads after the turn's writes land. */
-const objectsAfter: CanvasObject[] = [
-  ...objectsBefore,
-  {
-    id: ASSUMPTION_OBJECT,
-    kind: "assumption",
-    zone: "assumptions",
-    title: "Smaller agencies feel this most",
-    origin: "user_stated",
-    support: "hypothesis",
-    alternatives: ["Larger agencies have more disputes by volume."],
-  },
-];
-
-const scope: ProjectScope = {
-  objectIds: new Set([CONCEPT, ASSUMPTION_OBJECT]),
+/** A new project: nothing on the canvas, and no id a scene could name. */
+const emptyScope: ProjectScope = {
+  objectIds: new Set<string>(),
   relationshipIds: new Set<string>(),
 };
 
@@ -90,8 +71,10 @@ function scriptedProvider() {
                 value: "Condition disputes surface at the end of a tenancy.",
                 origin: "ai_inferred",
                 support: "hypothesis",
-                rationale: "Stated by the person in their own words.",
-                quotedFromMessage: "at the end of a tenancy",
+                rationale: "Drawn from what the person described.",
+                // Provider-valid for an inference: the property is required by
+                // the strict schema and null when there is nothing to quote.
+                quotedFromMessage: null,
               },
             ],
           },
@@ -105,21 +88,28 @@ function scriptedProvider() {
             whyItMatters: "It decides who the first customer is.",
             alternatives: ["Larger agencies have more disputes by volume."],
             importance: "material",
+            quotedFromMessage: null,
           },
         },
         {
+          /*
+            The model reaching for a view of a project that has no objects yet.
+            It can only guess an id, and the guess is refused — which is why the
+            first turn's canvas has to come from the application's own default
+            rather than from a recommendation.
+          */
           type: "tool_use",
           id: "t3",
           name: "recommend_canvas_scene",
           input: {
             renderer: "problem_exploration",
             purpose: "explore_problem",
-            focalObjectId: CONCEPT,
-            visibleObjectIds: [CONCEPT, ASSUMPTION_OBJECT],
+            focalObjectId: IMAGINED,
+            visibleObjectIds: [IMAGINED],
             visibleRelationshipIds: [],
             emphasis: "none",
-            reason: "Showing the problem and the assumption it now rests on.",
-            transition: "augment",
+            reason: "Showing the problem you described.",
+            transition: "replace",
           },
         },
         {
@@ -178,11 +168,62 @@ function scriptedProvider() {
   return { client: client as unknown as Anthropic, requests };
 }
 
+/**
+ * Stands in for `complete_turn`: it generates the ids the database would, so
+ * nothing downstream can depend on an id being known before the commit.
+ */
+function scriptedCommit() {
+  const stored: { objects: CanvasObject[] } = { objects: [] };
+  const commit = async (writes: {
+    assistantText: string;
+    fields: unknown[];
+    assumptions: unknown[];
+  }): Promise<CompleteTurnRecord> => {
+    const written: Record<string, number> = {};
+    let n = 0;
+    const id = () =>
+      `bbbbbbbb-0000-4000-8000-${String((n += 1)).padStart(12, "0")}`;
+    for (const row of writes.fields as {
+      slot: number;
+      label: string;
+      value: string;
+      origin: string;
+    }[]) {
+      stored.objects.push({
+        id: id(),
+        kind: "concept",
+        zone: "subject",
+        title: row.value,
+        origin: row.origin as CanvasObject["origin"],
+      });
+      written[String(row.slot)] = (written[String(row.slot)] ?? 0) + 1;
+    }
+    for (const row of writes.assumptions as {
+      slot: number;
+      statement: string;
+      alternatives: string[];
+      origin: string;
+    }[]) {
+      stored.objects.push({
+        id: id(),
+        kind: "assumption",
+        zone: "assumptions",
+        title: row.statement.replace(/\.$/, ""),
+        origin: row.origin as CanvasObject["origin"],
+        support: "hypothesis",
+        alternatives: row.alternatives,
+      });
+      written[String(row.slot)] = (written[String(row.slot)] ?? 0) + 1;
+    }
+    return { outcome: "completed", written, refused: {} };
+  };
+  return { commit, stored };
+}
+
 describe("a live-shaped Step 2–3 turn reaches the screen", () => {
-  it("records a field and an assumption, refreshes the canvas, shows the scene and the actions", async () => {
+  it("starts an empty project, records a field and an assumption, and shows them in the same turn", async () => {
     const events: TurnEvent[] = [];
-    /** What the host applied, and in what order relative to the answer. */
-    const applied: { name: string; candidate: unknown }[] = [];
+    const rejections: string[] = [];
     const order: string[] = [];
 
     const emit = (event: TurnEvent) => events.push(event);
@@ -193,11 +234,13 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
 
     const hooks = createTurnHooks({
       emit,
-      scope,
+      scope: emptyScope,
       reporter,
-      onSceneAccepted: async () => {},
-      onSceneRejected: async () => {
-        throw new Error("the scene should have been accepted");
+      onSceneAccepted: async () => {
+        throw new Error("an empty project has no id a scene could name");
+      },
+      onSceneRejected: async (rejection) => {
+        rejections.push(rejection.code);
       },
       takeDirection: async () => null,
       onDirectionApplied: () => {},
@@ -210,37 +253,37 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
         projectId: "p1",
         turnId: TURN,
         userMessage: USER_MESSAGE,
-        context: {
-          objectIds: [CONCEPT, ASSUMPTION_OBJECT],
-          focalObjectId: CONCEPT,
-        },
+        // Nothing to name: this is the real shape of a first turn.
+        context: { objectIds: [], focalObjectId: null },
       },
       hooks,
       undefined,
     );
 
+    const committer = scriptedCommit();
+
     /*
-      The host's durable boundary, exactly as the route orders it: the answer is
-      stored, the staged operations are applied as one unit, the turn is closed
-      and only then is the canvas told what the project now holds. The engine
-      never describes what the canvas shows — the application re-reads it.
+      The host's durable boundary, exactly as the route wires it: one commit
+      carrying the answer, the staged writes and the terminal state — then, and
+      only then, the canvas is told what the project holds, re-read from the
+      rows that commit created.
     */
     await finishTurn(
       {
-        persistResult: async () => {
-          order.push("persist");
-          return true;
-        },
-        applyOperations: async () => {
-          order.push("apply");
-          applied.push(...result.operations);
-          return result.operations.length > 0;
+        completeTurn: (assistantText) => {
+          order.push("commit");
+          return commitTurn(
+            committer.commit,
+            { projectId: "p1", turnId: TURN, userMessage: USER_MESSAGE },
+            result.operations,
+            assistantText,
+          );
         },
         publishProjectModel: async () => {
           order.push("publish");
           emit({
             type: "project_model_updated",
-            objects: objectsAfter,
+            objects: committer.stored.objects,
             relationships: [],
           });
         },
@@ -249,31 +292,30 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
           return true;
         },
         audit: async () => {},
+        auditOperation: async () => {},
         emit,
       },
       result.assistantText,
     );
 
-    // 1. The model was given the ids it needs to name an existing object.
-    const firstRequest = provider.requests[0] as {
-      messages: { content: string }[];
-    };
-    expect(firstRequest.messages.at(-1)?.content).toContain(CONCEPT);
+    // 1. One commit, then the canvas. Nothing was closed separately, because
+    //    the terminal state is inside that commit.
+    expect(order).toEqual(["commit", "publish"]);
 
-    // 2. Both project-truth operations were applied, once, after the answer was
-    //    stored — and neither during the turn.
-    expect(applied.map((operation) => operation.name)).toEqual([
-      "update_project_model",
-      "record_assumption",
+    // 2. The model's guessed scene never reached the canvas.
+    expect(rejections).toEqual(["object_not_in_project"]);
+    expect(events.some((event) => event.type === "scene_recommended")).toBe(
+      false,
+    );
+
+    // 3. Both project-truth writes landed, with ids the commit generated.
+    expect(committer.stored.objects.map((object) => object.kind)).toEqual([
+      "concept",
+      "assumption",
     ]);
-    expect(order).toEqual(["persist", "apply", "close", "publish"]);
-
-    // 3. The scene survived validation against the project's real ids.
-    const scene = events.find((event) => event.type === "scene_recommended");
-    expect(scene).toBeDefined();
-    if (scene?.type === "scene_recommended") {
-      expect(validateScene(scene.scene, scope).ok).toBe(true);
-    }
+    expect(
+      committer.stored.objects.every((object) => object.id.startsWith("bbbb")),
+    ).toBe(true);
 
     // 4. Everything the user should see is on the stream.
     let state: TurnState = INITIAL_TURN_STATE;
@@ -314,14 +356,15 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
     expect(state.actions.length).toBeLessThanOrEqual(3);
 
     /*
-      5. The canvas draws the refreshed model, so the assumption is visible in
-      the same turn rather than after a reload. This is the assertion the three
-      earlier gaps would each have failed.
+      5. The canvas draws the new model in the *default visual view*, during the
+      same turn — the transition an empty project has to make and the one the
+      earlier fabricated scope hid. The scene is the application's own derived
+      default: the model never predicted these ids and could not have.
     */
-    expect(state.projectModel?.objects).toEqual(objectsAfter);
+    expect(state.projectModel?.objects).toEqual(committer.stored.objects);
     const canvas = render(
       <LivingCanvas
-        objects={state.projectModel?.objects ?? objectsBefore}
+        objects={state.projectModel?.objects ?? []}
         relationships={[]}
         recommendedScene={state.recommendedScene}
         activity={null}
@@ -329,33 +372,28 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       />,
     );
 
-    /*
-      The recommended scene is *offered*, not applied — the user chooses
-      (docs/AI_SYSTEM.md §9.3), which is why the visual view asks rather than
-      rearranging. So the assertion that the canvas really holds the new
-      assumption is made against the structured view, which is the
-      application-owned inspector of what the project now contains.
-    */
     expect(
-      within(canvas.container).getByText(/Showing the problem/),
-    ).toBeInTheDocument();
+      within(canvas.container).queryByText(/No focus is selected/),
+    ).not.toBeInTheDocument();
     expect(
-      within(canvas.container).getByRole("button", { name: /Show it/ }),
+      within(canvas.container).getByText(
+        /Condition disputes surface at the end of a tenancy/,
+      ),
     ).toBeInTheDocument();
 
-    // The switcher is a toggle group; clicking the labelled control is what a
-    // user does, whatever role the primitive reports.
+    /*
+      And the assumption arrives with its meaning attached, not merely present:
+      the support state and the alternatives are what make an assumption on the
+      canvas honest rather than decorative (Step 3 acceptance). Read in the
+      structured view, which is the application-owned inspector of what the
+      project now contains.
+    */
     await userEvent.click(
       within(canvas.container).getByText("Structured view"),
     );
     expect(
       within(canvas.container).getByText("Smaller agencies feel this most"),
     ).toBeInTheDocument();
-    /*
-      And it arrives with its meaning attached, not merely present: the support
-      state and the alternatives are what make an assumption on the canvas
-      honest rather than decorative (Step 3 acceptance).
-    */
     expect(
       within(canvas.container).getByText(/Hypothesis/),
     ).toBeInTheDocument();

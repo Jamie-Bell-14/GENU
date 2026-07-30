@@ -68,8 +68,11 @@ For each user turn:
 5. stream assistant text and application-owned activity events
 6. validate every structured tool proposal and stage the permitted ones
 7. persist the assistant result and user-facing rationale
-8. apply the staged low-risk operations, all or none
+8. apply the staged low-risk operations
 9. record the turn's terminal outcome
+
+   — steps 7 to 9 are one transaction, so a turn either ended or it did not
+
 10. tell the canvas what the project now holds, re-read from the database
 11. emit a completion or safe failure event
 
@@ -77,31 +80,49 @@ A failed turn must not corrupt project state or lose the user's message.
 
 ### 4.1 One durable boundary
 
-Steps 7–11 are the application's single durable boundary and run in that order,
-outside the engine.
+Steps 7–9 are **one transaction**, and steps 10–11 follow it. Both boundaries are
+the host's, never the engine's.
 
-The order carries the guarantee. An engine that applied operations as it
-produced them changed project truth for a turn that could still fail seconds
-later, and the canvas was told first — so a user could watch the project change
-and then be told the turn did not finish. Staging the operations and applying
-them after the answer is stored means a turn that produces no keepable answer
-leaves no trace in the project model.
+Ordering alone is not enough, and the reason is worth stating plainly. Catch-up
+treats a stored assistant message as settlement — a stored result settles the
+turn, whatever the run state says — so a worker that died after the answer was
+inserted but before the project writes committed would leave a turn that *reads*
+as completed while every field and assumption belonging to it had been lost. No
+ordering of separate writes fixes that.
 
-Two of these steps are transactional because their guarantees are otherwise
-unenforceable:
+So a turn has exactly two transactional boundaries, and both exist because their
+guarantees are otherwise unenforceable:
 
 - **Opening a turn** (step 2) writes the message and the run together, and
   reconciles a run whose lease has lapsed. Saving the message first left an
   orphan behind every refused start, which the client re-sent as a duplicate; and
   a dead worker's `running` row otherwise held the project's only turn slot
   indefinitely.
-- **Applying operations** (step 8) writes every accepted field and assumption in
-  one transaction, under each row's own lock. A loop in application code cannot
-  promise all-or-none, and a check followed by a write cannot promise the checked
-  state still holds when a concurrent user edit lands in between.
+- **Ending a turn** (steps 7–9) writes the answer, applies every accepted field
+  and assumption under each row's own lock, and records the terminal state. A
+  loop in application code cannot promise all-or-none, and a check followed by a
+  write cannot promise the checked state still holds when a concurrent user edit
+  lands in between.
 
-Individual operations may still be refused inside step 8; a refused write is
-recorded per operation and does not fail the turn.
+Individual operations may still be refused inside that commit — a field the
+person stated themselves is *expected* to be refused — and a refusal is recorded
+per operation rather than failing the turn. Throwing away an answer the user is
+reading because one proposed write was not permitted would be a worse mistake
+than the write.
+
+A turn whose run is no longer its own to finish writes nothing at all. Its lease
+had lapsed and recovery may already have told the user it did not finish; that
+verdict is not something a late worker may overwrite.
+
+What remains outside the commit is only what cannot be inside it: telling the
+canvas what the project now holds, which is a re-read *after* the write landed
+and never anything the model described.
+
+Both functions are `security definer` and reachable only by the trusted writer,
+so neither can rely on Row-Level Security to decide who is allowed in. Each
+therefore authorises the acting user against the project itself, inside the
+transaction. An elevated path carries its own authorisation rather than
+inheriting a check a route may or may not have made (SECURITY_STANDARDS §11.2).
 
 ## 5. Structured project-model operations
 

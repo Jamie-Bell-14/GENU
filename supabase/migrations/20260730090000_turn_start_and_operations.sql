@@ -264,14 +264,23 @@ begin
   perform private.assert_project_actor(p_project_id, p_actor_id);
 
   /*
-    The run must still be this turn's to finish. A turn whose lease lapsed may
-    already have been reconciled and reported to the user as unfinished, and
-    recovery's verdict is not something a late worker may overwrite — so nothing
-    is written and the caller is told why.
+    The run must still be this turn's to finish — genuinely, not merely on
+    paper. `state = 'running'` alone is not enough: the stored state does not
+    change when a lease lapses, only how a snapshot *reads* it, so a worker
+    whose heartbeat has already failed could reach this point with the row
+    still saying `running` while `turn_snapshot` has been reporting `expired`
+    to the user, and recovery may already have told them the turn did not
+    finish. Requiring the lease to still be unexpired, under the same lock
+    that the write depends on, is what stops a late finish from overwriting a
+    verdict the person has seen — a check made after the lock is released
+    would leave exactly the race this exists to close.
   */
   perform 1
   from public.turn_runs
-  where turn_id = p_turn_id and project_id = p_project_id and state = 'running'
+  where turn_id = p_turn_id
+    and project_id = p_project_id
+    and state = 'running'
+    and now() < lease_expires_at
   for update;
 
   if not found then

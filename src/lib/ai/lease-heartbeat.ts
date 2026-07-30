@@ -145,3 +145,32 @@ export function startLeaseHeartbeat(
     },
   };
 }
+
+/**
+ * Runs `work`, keeping the lease heartbeat alive for the whole of it — and
+ * stopping it exactly once, whatever `work` does.
+ *
+ * The turn is not over when the model stops talking; it is over once its
+ * durable completion has actually committed (docs/AI_SYSTEM.md §4.1). That
+ * commit is itself a database round trip and can take real time, so the lease
+ * has to stay renewed for as long as it does — stopping the heartbeat as soon
+ * as the model finishes would let the lease lapse under a run that still reads
+ * as `running`, which is exactly the state `complete_turn` now refuses to
+ * trust on its own (issue #11).
+ *
+ * `work` is therefore the only place a caller can put its logic, which is what
+ * makes the ordering structural rather than a convention two statements in a
+ * route happen to be written in the right order to preserve.
+ */
+export async function withLeaseHeartbeat<T>(
+  ports: HeartbeatPorts,
+  work: () => Promise<T>,
+  intervalMs?: number,
+): Promise<T> {
+  const heartbeat = startLeaseHeartbeat(ports, intervalMs);
+  try {
+    return await work();
+  } finally {
+    heartbeat.stop();
+  }
+}

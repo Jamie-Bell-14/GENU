@@ -590,6 +590,107 @@ describe.skipIf(skip)("complete_turn", () => {
     ).toBe(0);
   });
 
+  it("refuses a run whose lease has lapsed even though its row still says running", async () => {
+    /*
+      The P0 this closes. `state = 'running'` alone is not enough: an expired
+      lease does not change the stored state, only how a snapshot *reads* it —
+      so a worker whose heartbeat had already failed could reach this point with
+      the row still saying `running`, while `turn_snapshot` had already been
+      telling the user the turn was `expired` and recovery may have told them it
+      did not finish. Unlike the test above, nothing has reconciled this row: it
+      is exactly the state a slow finalisation racing a dying heartbeat leaves
+      behind, and the earlier version of this function trusted it anyway.
+    */
+    const turnId = await openTurn();
+    await asTrustedWriter();
+    await db.query(
+      "update public.turn_runs set lease_expires_at = now() - interval '1 minute' where turn_id = $1",
+      [turnId],
+    );
+
+    const result = await completeTurn(turnId, {
+      fields: [field()],
+      assumptions: [assumption()],
+    });
+    expect(result.outcome).toBe("not_running");
+    expect(await countRows("project_fields")).toBe(0);
+    expect(await countRows("assumptions")).toBe(0);
+    expect(
+      await countRows(
+        "messages",
+        "turn_id = $1 and role = 'assistant'",
+        turnId,
+      ),
+    ).toBe(0);
+
+    // Untouched: still running in name, exactly as a dead heartbeat leaves it.
+    // The next `start_turn` for this project reconciles it, not this call.
+    await asOwner();
+    const row = await db.query(
+      "select state from public.turn_runs where turn_id = $1",
+      [turnId],
+    );
+    expect(row.rows[0].state).toBe("running");
+  });
+
+  it("leaves one coherent outcome when a heartbeat races a completion in flight", async () => {
+    /*
+      The lifecycle property, not just the state check: a heartbeat and a
+      completion take the same row lock, so one of them always observes the
+      other's committed result rather than two conflicting terminal writes.
+
+      Forced into a specific order — completion wins the row — because that is
+      the case the route's fix makes true: the heartbeat now stops only *after*
+      `finishTurn` has committed, never before it, so a renewal that starts
+      while a completion is in flight is the renewal that has to lose. A raw
+      lock is taken first and awaited, rather than merely dispatching both
+      calls and hoping timing cooperates: two independent connections give no
+      guarantee about which one's `for update` reaches the server first, and an
+      unforced test would only prove the property on whichever run happened to
+      land in the right order.
+    */
+    const turnId = await openTurn();
+    await asTrustedWriter(other);
+    await other.query("begin");
+    // Confirmed held before the renewal is even dispatched. A session may
+    // re-lock a row it already holds, so `complete_turn` below still runs
+    // normally inside this same transaction.
+    await other.query(
+      "select 1 from public.turn_runs where turn_id = $1 for update",
+      [turnId],
+    );
+
+    await asTrustedWriter();
+    const renewing = db.query(
+      "select public.renew_turn_lease($1, 900) as outcome",
+      [turnId],
+    );
+
+    const completing = other.query(
+      `select public.complete_turn(
+         p_project_id => $1,
+         p_turn_id => $2,
+         p_actor_id => $3,
+         p_assistant_text => $4,
+         p_fields => $5::jsonb,
+         p_assumptions => '[]'::jsonb
+       ) as result`,
+      [projectA, turnId, USER_A, ANSWER, JSON.stringify([field()])],
+    );
+    await completing;
+    await other.query("commit");
+    const renewal = await renewing;
+
+    // The completion won the row: the heartbeat's renewal, unblocked only once
+    // the completion had already committed, sees a turn that already ended.
+    expect(renewal.rows[0].outcome).toBe("finished");
+    const row = await db.query(
+      "select state from public.turn_runs where turn_id = $1",
+      [turnId],
+    );
+    expect(row.rows[0].state).toBe("completed");
+  });
+
   it("loses to a concurrent user edit rather than racing it", async () => {
     /*
       The check-then-write race. The application used to read the existing rows,

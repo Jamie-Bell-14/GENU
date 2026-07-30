@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { finishTurn } from "@/lib/ai/finish-turn";
-import { startLeaseHeartbeat } from "@/lib/ai/lease-heartbeat";
+import { withLeaseHeartbeat } from "@/lib/ai/lease-heartbeat";
 import { loadProjectContext, type LoadedContext } from "@/lib/ai/load-context";
 import { selectDiscoveryEngine } from "@/lib/ai/select-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
@@ -10,6 +10,7 @@ import {
   loadCanvasObjects,
   loadProjectRelationships,
 } from "@/lib/canvas/project-model-store";
+import type { TurnResult } from "@/lib/ai/discovery-engine";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { commitTurn } from "@/lib/services/model-operations";
 import {
@@ -383,110 +384,125 @@ export async function POST(
           not finish.
         */
         const lost = new AbortController();
-        const heartbeat = startLeaseHeartbeat({
-          renew: (seconds) => renewTurnLease({ turnId, seconds }),
-          onLost: (reason) => {
-            void audit("turn_failed", { detail: { code: `lease_${reason}` } });
-            lost.abort();
-          },
-        });
 
-        let result;
-        try {
-          result = await engine.runTurn(
-            {
-              projectId,
-              turnId,
-              userMessage: parsed.data.message,
-              context: {
-                objectIds: turnScope.objectIds,
-                focalObjectId: turnScope.focalObjectId,
-              },
-            },
-            hooks,
-            AbortSignal.any([request.signal, lost.signal]),
-          );
-        } finally {
-          // Stopped on every path — completion, failure and cancellation
-          // alike. A heartbeat outliving its turn would keep a finished run's
-          // lease alive, which is the exact thing the lease exists to prevent.
-          heartbeat.stop();
-        }
+        let result: TurnResult;
         /*
-          The host — not the engine — decides the turn is over, and everything
-          the turn changes is committed together: the answer, the project-truth
-          writes it produced and the terminal state (see finish-turn.ts).
+          `withLeaseHeartbeat` keeps the lease renewed for the whole of `work`,
+          not merely for the provider call inside it: the turn is not over when
+          the model stops talking, only once its durable completion has
+          actually committed (docs/AI_SYSTEM.md §4.1), and that commit is
+          itself a database round trip the lease has to survive. Stopping the
+          heartbeat as soon as the model finished would let the lease lapse
+          while the row still said `running` — exactly the state
+          `complete_turn` now refuses to trust on its own (issue #11). Putting
+          both calls inside `work` makes that ordering structural rather than
+          a convention this file has to keep re-deriving correctly.
         */
-        await finishTurn(
+        await withLeaseHeartbeat(
           {
-            /*
-              One transaction, through the one port that can reach it. The
-              elevated function is authorised against this user inside the
-              database, so this path carries its own authorisation rather than
-              inheriting the ownership check made above.
-            */
-            completeTurn: (assistantText) =>
-              commitTurn(
-                (writes) =>
-                  completeTurnRecord({
-                    projectId,
-                    turnId,
-                    actorId: user.id,
-                    ...writes,
-                  }),
-                {
-                  projectId,
-                  turnId,
-                  // The message as the server received it, so provenance is
-                  // checked against text the provider cannot have rewritten.
-                  userMessage: parsed.data.message,
-                },
-                result.operations,
-                assistantText,
-              ),
-            /*
-              What the canvas is told the project now holds — re-read from the
-              application's own tables after the write landed, never from
-              anything the model described.
-            */
-            publishProjectModel: async () => {
-              const [objects, relationships] = await Promise.all([
-                loadCanvasObjects(supabase, projectId),
-                loadProjectRelationships(supabase, projectId),
-              ]);
-              emit({
-                type: "project_model_updated",
-                objects: objects.data,
-                relationships: relationships.data,
+            renew: (seconds) => renewTurnLease({ turnId, seconds }),
+            onLost: (reason) => {
+              void audit("turn_failed", {
+                detail: { code: `lease_${reason}` },
               });
+              lost.abort();
             },
-            closeRun: (state) => closeTurnRun({ turnId, state }),
-            audit: (action, detail) => audit(action, { detail }),
-            /*
-              Audited from what the transaction did, so `operation_applied`
-              means a row exists rather than that a write was attempted. Every
-              outcome is recorded including refusal, which is exactly the kind
-              of event that matters after the fact, and none of it travels back
-              to the engine.
-            */
-            auditOperation: (outcome) =>
-              outcome.applied
-                ? audit("operation_applied", {
-                    target: outcome.kind,
-                    detail: outcome.refused
-                      ? { count: outcome.count, refused: outcome.refused }
-                      : { count: outcome.count },
-                  })
-                : audit("operation_rejected", {
-                    target: outcome.kind,
-                    detail:
-                      outcome.reason === "rejected"
-                        ? { reason: outcome.reason, issue: outcome.issue }
-                        : { reason: outcome.reason },
-                  }),
-            emit,
           },
-          result.assistantText,
+          async () => {
+            result = await engine.runTurn(
+              {
+                projectId,
+                turnId,
+                userMessage: parsed.data.message,
+                context: {
+                  objectIds: turnScope.objectIds,
+                  focalObjectId: turnScope.focalObjectId,
+                },
+              },
+              hooks,
+              AbortSignal.any([request.signal, lost.signal]),
+            );
+
+            /*
+              The host — not the engine — decides the turn is over, and
+              everything the turn changes is committed together: the answer,
+              the project-truth writes it produced and the terminal state
+              (see finish-turn.ts).
+            */
+            await finishTurn(
+              {
+                /*
+                  One transaction, through the one port that can reach it.
+                  The elevated function is authorised against this user
+                  inside the database, so this path carries its own
+                  authorisation rather than inheriting the ownership check
+                  made above.
+                */
+                completeTurn: (assistantText) =>
+                  commitTurn(
+                    (writes) =>
+                      completeTurnRecord({
+                        projectId,
+                        turnId,
+                        actorId: user.id,
+                        ...writes,
+                      }),
+                    {
+                      projectId,
+                      turnId,
+                      // The message as the server received it, so provenance
+                      // is checked against text the provider cannot have
+                      // rewritten.
+                      userMessage: parsed.data.message,
+                    },
+                    result.operations,
+                    assistantText,
+                  ),
+                /*
+                  What the canvas is told the project now holds — re-read
+                  from the application's own tables after the write landed,
+                  never from anything the model described.
+                */
+                publishProjectModel: async () => {
+                  const [objects, relationships] = await Promise.all([
+                    loadCanvasObjects(supabase, projectId),
+                    loadProjectRelationships(supabase, projectId),
+                  ]);
+                  emit({
+                    type: "project_model_updated",
+                    objects: objects.data,
+                    relationships: relationships.data,
+                  });
+                },
+                closeRun: (state) => closeTurnRun({ turnId, state }),
+                audit: (action, detail) => audit(action, { detail }),
+                /*
+                  Audited from what the transaction did, so
+                  `operation_applied` means a row exists rather than that a
+                  write was attempted. Every outcome is recorded including
+                  refusal, which is exactly the kind of event that matters
+                  after the fact, and none of it travels back to the engine.
+                */
+                auditOperation: (outcome) =>
+                  outcome.applied
+                    ? audit("operation_applied", {
+                        target: outcome.kind,
+                        detail: outcome.refused
+                          ? { count: outcome.count, refused: outcome.refused }
+                          : { count: outcome.count },
+                      })
+                    : audit("operation_rejected", {
+                        target: outcome.kind,
+                        detail:
+                          outcome.reason === "rejected"
+                            ? { reason: outcome.reason, issue: outcome.issue }
+                            : { reason: outcome.reason },
+                      }),
+                emit,
+              },
+              result.assistantText,
+            );
+          },
         );
       } catch {
         // Internal detail stays server-side (SECURITY_STANDARDS §8).

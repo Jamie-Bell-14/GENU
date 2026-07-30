@@ -8,6 +8,7 @@ import {
 import {
   MAX_CONSECUTIVE_RENEWAL_FAILURES,
   startLeaseHeartbeat,
+  withLeaseHeartbeat,
 } from "./lease-heartbeat";
 
 /**
@@ -222,5 +223,77 @@ describe("a healthy worker outlives its original lease", () => {
 
     expect(onLost).toHaveBeenCalledExactlyOnceWith("run_not_renewable");
     expect(timer.scheduled).toBe(false);
+  });
+});
+
+/*
+  `withLeaseHeartbeat` is the lifecycle fix itself: the boundary that matters is
+  not "the model finished", it is "the turn's durable completion committed"
+  (docs/AI_SYSTEM.md §4.1). Stopping the heartbeat between those two moments
+  used to let the lease lapse under a run that still said `running`, which is
+  exactly the state `complete_turn` now refuses to trust on its own (issue #11).
+*/
+describe("withLeaseHeartbeat", () => {
+  function controlledPorts() {
+    const timer = controlledTimer();
+    const onLost = vi.fn();
+    const renew = vi.fn(async () => "renewed" as LeaseRenewal);
+    return {
+      timer,
+      onLost,
+      renew,
+      ports: {
+        renew,
+        onLost,
+        setTimer: timer.setTimer,
+        clearTimer: timer.clearTimer,
+      },
+    };
+  }
+
+  it("keeps the lease renewable while the durable completion is still pending", async () => {
+    const { timer, ports } = controlledPorts();
+    let resolveCompletion: () => void = () => {};
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    const run = withLeaseHeartbeat(ports, async () => {
+      // Stands in for `engine.runTurn()` finishing while `finishTurn()`'s
+      // durable commit is still in flight — the exact window the bug lived in.
+      await completion;
+    });
+
+    // The heartbeat is still scheduled: nothing has settled yet, so a beat
+    // here must still succeed rather than finding the lease already stopped.
+    expect(timer.scheduled).toBe(true);
+    await timer.tick();
+    expect(ports.renew).toHaveBeenCalledOnce();
+    expect(timer.scheduled).toBe(true);
+
+    resolveCompletion();
+    await run;
+
+    // Stopped now, and only now: after `work` — which includes the durable
+    // completion, not merely the provider call — has actually finished.
+    expect(timer.scheduled).toBe(false);
+  });
+
+  it("stops exactly once whether work succeeds, fails, or the turn produced nothing", async () => {
+    const succeeding = controlledPorts();
+    await withLeaseHeartbeat(succeeding.ports, async () => {});
+    expect(succeeding.timer.cleared).toBe(1);
+
+    const failing = controlledPorts();
+    await withLeaseHeartbeat(failing.ports, async () => {
+      throw new Error("durable completion failed");
+    }).catch(() => {});
+    expect(failing.timer.cleared).toBe(1);
+  });
+
+  it("returns whatever the completed work returned", async () => {
+    const { ports } = controlledPorts();
+    const result = await withLeaseHeartbeat(ports, async () => "completed");
+    expect(result).toBe("completed");
   });
 });

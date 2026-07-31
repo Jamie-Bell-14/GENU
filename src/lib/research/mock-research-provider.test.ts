@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { MockResearchProvider } from "./mock-research-provider";
+import {
+  ALL_SOURCES_UNAVAILABLE_TRIGGER,
+  MockResearchProvider,
+} from "./mock-research-provider";
 import type { ResearchEvent } from "./types";
 
 function collect(
@@ -114,6 +117,33 @@ describe("MockResearchProvider", () => {
     );
     await done;
     expect(provider.steer(handle, "Anything")).toBe("requires_restart");
+  });
+
+  it("reports requires_restart for a direction it cannot interpret, rather than a false applied_now", () => {
+    const provider = new MockResearchProvider(0);
+    const handle = provider.start(
+      { topic: "t", focalObjectId: null },
+      () => {},
+    );
+    expect(provider.steer(handle, "Please double-check with the tenant")).toBe(
+      "requires_restart",
+    );
+  });
+
+  it("fails closed with no finding when every source is unavailable (edge case)", async () => {
+    const provider = new MockResearchProvider(0);
+    const { events, done } = collect(provider, {
+      topic: `Research this (${ALL_SOURCES_UNAVAILABLE_TRIGGER})`,
+      focalObjectId: null,
+    });
+    await done;
+
+    expect(events.some((event) => event.type === "finding")).toBe(false);
+    expect(events.some((event) => event.type === "failed_source")).toBe(true);
+    const failed = events.find((event) => event.type === "failed");
+    expect(failed).toMatchObject({
+      error: { code: "research_source_unavailable" },
+    });
   });
 
   it("stops mid-research and never emits a finding or done afterwards", async () => {

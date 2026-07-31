@@ -22,14 +22,17 @@ interface AssumptionRow {
   recommended_validation: string | null;
 }
 
-interface EvidenceLinkRow {
+interface EvidenceRow {
   id: string;
-  consequence_summary: string;
-  evidence: {
-    title: string;
-    source_name: string;
-    is_demo: boolean;
-  } | null;
+  title: string;
+  summary: string;
+  source_name: string;
+  is_demo: boolean;
+}
+
+interface EvidenceNoteRow {
+  from_object_id: string;
+  note: string | null;
 }
 
 const ASSUMPTION_SUPPORT: Record<string, SupportState> = {
@@ -64,7 +67,7 @@ export async function loadCanvasObjects(
   supabase: SupabaseClient,
   projectId: string,
 ): Promise<LoadResult<CanvasObject[]>> {
-  const [fields, assumptions, evidenceLinks] = await Promise.all([
+  const [fields, assumptions, evidence, evidenceNotes] = await Promise.all([
     supabase
       .from("project_fields")
       .select("id, area, label, value, origin, support, updated_at")
@@ -79,15 +82,33 @@ export async function loadCanvasObjects(
       .eq("project_id", projectId)
       .order("created_at", { ascending: true })
       .limit(50),
+    // Evidence's own id is its canvas-object identity (T10 review round 1,
+    // P0-3) — it is registered in `project_objects`, the same registry every
+    // other object kind uses, rather than a bespoke link row standing in for
+    // it.
     supabase
-      .from("evidence_links")
-      .select(
-        "id, consequence_summary, evidence:evidence_id (title, source_name, is_demo)",
-      )
+      .from("evidence")
+      .select("id, title, summary, source_name, is_demo")
       .eq("project_id", projectId)
       .order("created_at", { ascending: true })
       .limit(100),
+    // What a piece of evidence changes lives on the canonical relationship
+    // that connects it to the object it supports or contradicts, not on the
+    // evidence row itself — the same relationship the visual map renders
+    // (P0-3: structured and visual views consume the same canonical data).
+    supabase
+      .from("project_relationships")
+      .select("from_object_id, note")
+      .eq("project_id", projectId)
+      .in("relation", ["supports", "contradicts"])
+      .limit(200),
   ]);
+  const consequenceByEvidenceId = new Map(
+    ((evidenceNotes.data ?? []) as EvidenceNoteRow[]).map((row) => [
+      row.from_object_id,
+      row.note,
+    ]),
+  );
 
   const objects: CanvasObject[] = [];
 
@@ -126,24 +147,20 @@ export async function loadCanvasObjects(
     });
   }
 
-  for (const row of (evidenceLinks.data ??
-    []) as unknown as EvidenceLinkRow[]) {
-    // PostgREST embeds a to-one FK as an object; a malformed or missing join
-    // is skipped rather than rendered with placeholder text.
-    const evidence = Array.isArray(row.evidence)
-      ? (row.evidence[0] ?? null)
-      : row.evidence;
-    if (!evidence) continue;
+  for (const row of (evidence.data ?? []) as EvidenceRow[]) {
     objects.push({
       id: row.id,
       kind: "evidence",
       zone: "evidence",
-      title: evidence.title,
-      detail: row.consequence_summary,
+      title: row.title,
+      // Falls back to the evidence's own summary if no relationship note was
+      // recorded — every evidence row this slice produces has one, but a
+      // future direct-add path is not assumed to.
+      detail: consequenceByEvidenceId.get(row.id) ?? row.summary,
       origin: "researched",
-      meta: evidence.is_demo
-        ? `${evidence.source_name} · Demonstration data`
-        : evidence.source_name,
+      meta: row.is_demo
+        ? `${row.source_name} · Demonstration data`
+        : row.source_name,
     });
   }
 
@@ -152,7 +169,8 @@ export async function loadCanvasObjects(
     failed:
       Boolean(fields.error) ||
       Boolean(assumptions.error) ||
-      Boolean(evidenceLinks.error),
+      Boolean(evidence.error) ||
+      Boolean(evidenceNotes.error),
   };
 }
 

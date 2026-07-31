@@ -39,7 +39,8 @@ export const PROJECT_AREAS = [
  * (docs/AI_SYSTEM.md §2, §10). `researched` stays excluded even though T10
  * adds a research provider: it names *evidence support* for a claim, not
  * whether the claim's own wording was inferred, and evidence support is
- * tracked separately, on `evidence_links` and the field's `support` state
+ * tracked separately, on `project_relationships` and the field's `support`
+ * state
  * (already settable via `PROPOSABLE_SUPPORT`'s `some_evidence`) — not by
  * rewriting a field's origin.
  */
@@ -261,10 +262,14 @@ export type StartResearch = z.infer<typeof StartResearchSchema>;
  * research the turn just ran, and the object that research was launched
  * from), so a call here cannot attach fabricated provenance to an arbitrary
  * object the model names.
+ *
+ * Bounded to 500, matching `project_relationships.note`'s own check
+ * constraint — the consequence summary is stored there, not in a bespoke
+ * column, so the two limits have to agree.
  */
 export const AddEvidenceSchema = z
   .object({
-    consequenceSummary: safeText(1_000),
+    consequenceSummary: safeText(500),
   })
   .strict();
 

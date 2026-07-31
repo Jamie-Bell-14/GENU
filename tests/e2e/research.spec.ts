@@ -130,11 +130,11 @@ test("Step 6: adding evidence links it and states an honest consequence", async 
 });
 
 /*
-  Idempotency for "add as evidence twice" is a database property (unique
-  constraints on `evidence` and `evidence_links`) and is proved directly
-  against Postgres in supabase/tests/evidence-rls.test.ts. This dev route
-  persists nothing at all (see its module doc), so it cannot honestly
-  simulate a second call finding an existing row — it always reports
-  "linked", which would make an e2e assertion here test the dev harness
-  rather than the product.
+  Idempotency for "add as evidence twice" is a database property (the
+  `add_evidence_link` RPC's own conflict handling on `evidence` and
+  `project_relationships`) and is proved directly against Postgres in
+  supabase/tests/evidence-rls.test.ts. This dev route persists nothing at all
+  (see its module doc), so it cannot honestly simulate a second call finding
+  an existing row — it always reports "linked", which would make an e2e
+  assertion here test the dev harness rather than the product.
 */

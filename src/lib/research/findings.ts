@@ -5,13 +5,13 @@ import type { ResearchFinding, ResearchSource } from "./types";
  * one scripted scenario (VERTICAL_SLICE_SPEC §4: "MockResearchProvider
  * scripted tenancy-deposit research").
  *
- * A finding's `id` is the only thing that ever crosses back to the server
- * from a later turn (the "Add as evidence" flow, T10). Every provenance field
- * — source name, methodology, limitations, retrieval time — is re-derived
- * here from that id rather than trusted from anything the client sends,
- * exactly like a project field's origin is derived rather than asserted
- * (docs/AI_SYSTEM.md §2, §10). Sources are deliberately, plainly fictional
- * (VERTICAL_SLICE_SPEC §6: "fabricated sources must not look real").
+ * Sources are deliberately, plainly fictional (VERTICAL_SLICE_SPEC §6:
+ * "fabricated sources must not look real").
+ *
+ * A finding's exact, post-steering result is persisted server-side the moment
+ * it is produced (`research_findings`, T10 review round 1, P0-1) rather than
+ * re-derived from this catalogue on a later turn — a later turn's "Add as
+ * evidence" resolves that durable receipt, not this file.
  */
 
 export const TENANCY_DEPOSIT_FINDING_ID = "tenancy-deposit-disputes-2024";
@@ -41,22 +41,9 @@ export const UNAVAILABLE_SOURCE: ResearchSource = {
 
 /**
  * Builds the one scripted finding with its retrieval time stamped at the
- * moment it is actually produced — by a running research pass, or again when
- * evidence is added in a later turn — rather than a value frozen in this
- * catalogue (docs/VERTICAL_SLICE_TASKS.md T10: "retrieval time" is part of
- * honest provenance).
+ * moment it is actually produced (docs/VERTICAL_SLICE_TASKS.md T10:
+ * "retrieval time" is part of honest provenance).
  */
-/**
- * Re-derives a finding from its id alone (T10's "Add as evidence" flow —
- * nothing about a research run persists on the server between turns, so a
- * later turn re-fetches it here rather than trusting anything the client
- * sends back). `null` for any id outside this one-entry catalogue.
- */
-export function findFindingById(id: string): ResearchFinding | null {
-  if (id !== TENANCY_DEPOSIT_FINDING_ID) return null;
-  return buildTenancyDepositFinding(new Date().toISOString());
-}
-
 export function buildTenancyDepositFinding(
   retrievedAt: string,
 ): ResearchFinding {

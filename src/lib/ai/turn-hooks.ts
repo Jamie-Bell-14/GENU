@@ -4,7 +4,6 @@ import {
   type ProjectScope,
   type SceneRejection,
 } from "@/lib/canvas/scene";
-import { findFindingById } from "@/lib/research/findings";
 import type {
   ResearchEvent,
   ResearchFinding,
@@ -13,7 +12,11 @@ import type {
   ResearchTask,
 } from "@/lib/research/types";
 import type { ActivityReporter } from "./activity-reporter";
-import type { ResearchOutcome, TurnHooks } from "./discovery-engine";
+import type {
+  AddEvidenceOutcome,
+  ResearchOutcome,
+  TurnHooks,
+} from "./discovery-engine";
 import type { TurnEvent } from "./turn-events";
 
 /**
@@ -48,23 +51,46 @@ export interface TurnPorts {
    */
   focalObjectId: string | null;
   /**
-   * The finding id this turn's client says it is looking at, if any — the
-   * only thing about a prior turn's research this turn is told
-   * (`src/lib/research/types.ts`: nothing about a research run persists on
-   * the server between turns). "Add as evidence" re-derives every provenance
-   * field from this id via the closed catalogue; it is never trusted content.
+   * The research receipt id this turn's client says it is looking at, if any
+   * (T10 review round 1, P0-1) — an opaque reference into `research_findings`,
+   * never trusted content: `linkEvidence` re-reads the actual result from that
+   * table by this id, inside its own transaction, rather than accepting
+   * anything else the client supplies about it.
    */
   activeFindingId: string | null;
   /**
-   * Writes one evidence row and its link, or reports that the pairing already
-   * exists. The only DB-touching step in the evidence flow, so it is a port
-   * like `onSceneAccepted` rather than logic living in this file.
+   * Persists the exact result a research pass produced, before it is shown —
+   * so a finding the client can see always has a receipt "Add as evidence"
+   * can later resolve (T10 review round 1, P0-1). Returns the receipt id, or
+   * `null` if it could not be recorded.
    */
-  writeEvidence(input: {
-    finding: ResearchFinding;
+  recordResearchFinding(finding: ResearchFinding): Promise<string | null>;
+  /**
+   * Creates (or reuses) the evidence row for a receipt and links it to an
+   * object, atomically (T10 review round 1, P0-2, P0-3) — the only DB-touching
+   * step in the evidence flow, so it is a port like `onSceneAccepted` rather
+   * than logic living in this file.
+   */
+  linkEvidence(input: {
+    receiptId: string;
     objectId: string;
     consequenceSummary: string;
-  }): Promise<"linked" | "already_linked" | "failed">;
+  }): Promise<
+    | "linked"
+    | "already_linked"
+    | "no_active_research"
+    | "no_focal_object"
+    | "not_running"
+    | "unavailable"
+  >;
+  /**
+   * Re-reads project truth and tells the canvas, exactly like
+   * `finishTurn`'s own `publishProjectModel` — called directly here because a
+   * successful evidence link is its own immediately-committed, independently
+   * true change, not something waiting on the turn's own completion (T10
+   * review round 1, P0-2).
+   */
+  publishProjectModel(): Promise<void>;
 }
 
 /**
@@ -117,23 +143,34 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
 
     runResearch: (task, signal) => runResearch(ports, task, signal),
 
-    async addEvidence({ consequenceSummary }) {
+    async addEvidence({ consequenceSummary }): Promise<AddEvidenceOutcome> {
       if (!ports.activeFindingId) {
         return { ok: false, reason: "no_active_research" };
       }
       if (!ports.focalObjectId) {
         return { ok: false, reason: "no_focal_object" };
       }
-      const finding = findFindingById(ports.activeFindingId);
-      if (!finding) return { ok: false, reason: "no_active_research" };
-
-      const result = await ports.writeEvidence({
-        finding,
+      const outcome = await ports.linkEvidence({
+        receiptId: ports.activeFindingId,
         objectId: ports.focalObjectId,
         consequenceSummary,
       });
-      if (result === "failed") return { ok: false, reason: "failed" };
-      return { ok: true, linked: result === "linked" };
+      switch (outcome) {
+        case "linked":
+          // Independently true the moment it committed — the canvas is told
+          // now, not deferred to the turn's own (possibly later-failing) end.
+          await ports.publishProjectModel();
+          return { ok: true, linked: true };
+        case "already_linked":
+          return { ok: true, linked: false };
+        case "no_active_research":
+          return { ok: false, reason: "no_active_research" };
+        case "no_focal_object":
+          return { ok: false, reason: "no_focal_object" };
+        case "not_running":
+        case "unavailable":
+          return { ok: false, reason: "failed" };
+      }
     },
   };
 }
@@ -158,6 +195,7 @@ function runResearch(
     let handle: ResearchHandle | null = null;
     let awaitingNext: (() => void) | null = null;
     let lastFindingTitle = "";
+    let findingReceipt: Promise<string | null> | null = null;
     let settled = false;
 
     const settle = (outcome: ResearchOutcome) => {
@@ -196,8 +234,17 @@ function runResearch(
             if (handle) {
               const note = await ports.takeDirection({ final: false });
               if (note) {
-                ports.researchProvider.steer(handle, note);
-                ports.onDirectionApplied(note);
+                const outcome = ports.researchProvider.steer(handle, note);
+                /*
+                  `direction_applied` is only ever true when the provider's
+                  own answer says the direction is genuinely in effect —
+                  `requires_restart` means the provider did nothing with it,
+                  and announcing "applied" regardless would tell the user a
+                  direction changed the run when it did not.
+                */
+                if (outcome !== "requires_restart") {
+                  ports.onDirectionApplied(note);
+                }
               }
             }
             await waitForNextEvent();
@@ -215,10 +262,36 @@ function runResearch(
           break;
         case "finding":
           lastFindingTitle = event.finding.title;
-          ports.emit({ type: "research_finding", finding: event.finding });
+          /*
+            Persisted before it is shown (T10 review round 1, P0-1): a
+            finding the client can see must always have a receipt "Add as
+            evidence" can later resolve. `done` below waits for this rather
+            than racing it — the provider emits the two back to back with no
+            delay in between, and settling "ok" before the receipt exists
+            would let the engine promise a finding is on the canvas before
+            anything durable actually backs it.
+          */
+          findingReceipt = ports
+            .recordResearchFinding(event.finding)
+            .then((receiptId) => {
+              if (receiptId) {
+                ports.emit({
+                  type: "research_finding",
+                  finding: { ...event.finding, id: receiptId },
+                });
+              }
+              return receiptId;
+            });
           break;
         case "done":
-          settle({ ok: true, findingTitle: lastFindingTitle });
+          void (async () => {
+            const receiptId = findingReceipt ? await findingReceipt : null;
+            settle(
+              receiptId
+                ? { ok: true, findingTitle: lastFindingTitle }
+                : { ok: false, reason: "unavailable" },
+            );
+          })();
           break;
         case "failed":
           settle({ ok: false, reason: "unavailable" });

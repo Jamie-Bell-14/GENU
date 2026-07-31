@@ -81,12 +81,20 @@ project_fields     (id, project_id, area problem|customer|value_proposition|mvp_
                     key, value jsonb, origin user_stated|ai_inferred|researched,
                     support unexplored|hypothesis|some_evidence|credible|strongly_evidenced|contradicted,
                     updated_at)                       -- qualitative only, no numeric confidence
+research_findings  (id, project_id, turn_id, title, key_finding, why_it_matters,
+                    visualisation jsonb, sources jsonb, methodology, limitations,
+                    retrieved_at, is_demo boolean, conflicting boolean, created_at)
+                    -- the exact, post-steering result one research pass produced;
+                    -- system-authored only (T10 review round 1, P0-1)
 evidence           (id, project_id, title, summary, source_name, source_url,
                     retrieved_at, methodology, limitations,
                     kind user_stated|secondary_research|customer_reported|observed|commitment,
                     is_demo boolean NOT NULL,          -- demonstration data is always marked
-                    created_at)
-evidence_links     (id, evidence_id, target_type field|assumption|decision, target_id)
+                    source_receipt_id → research_findings, created_at)
+                    -- registered in project_objects like project_fields/assumptions
+                    -- (T10 review round 1, P0-3); written only by add_evidence_link(),
+                    -- which also links it via project_relationships (supports|contradicts)
+                    -- rather than a bespoke evidence_links table
 assumptions        (id, project_id, statement, why_it_matters, alternatives jsonb,
                     status open|supported|weakened|invalidated, importance low|material,
                     created_at, updated_at)

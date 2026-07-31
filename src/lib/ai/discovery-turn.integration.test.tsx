@@ -252,7 +252,9 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       },
       focalObjectId: null,
       activeFindingId: null,
-      writeEvidence: async () => "failed",
+      recordResearchFinding: async () => null,
+      linkEvidence: async () => "unavailable",
+      publishProjectModel: async () => {},
     });
 
     const provider = scriptedProvider();

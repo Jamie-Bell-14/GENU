@@ -145,8 +145,28 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         errorCode,
       });
 
+    /*
+      Evidence-linking is not staged (see its own module doc in
+      `turn-hooks.ts`): it commits immediately, atomically, independent of
+      this turn's own outcome. So a failure reached *after* it succeeded must
+      not repeat the generic "nothing in your project was changed" claim —
+      that would be false, and specifically the false claim T10 review round
+      1 (P0-2) flagged. `fail` is the one place every failure path passes
+      through, so the correction lives here rather than in each message.
+    */
+    let evidenceLinked = false;
+
     const fail = (error: SafeError): TurnResult => {
-      hooks.emit({ type: "turn_failed", turnId: input.turnId, error });
+      hooks.emit({
+        type: "turn_failed",
+        turnId: input.turnId,
+        error: evidenceLinked
+          ? {
+              ...error,
+              userMessage: `${error.userMessage} The evidence you asked to add earlier in this turn has already been saved.`,
+            }
+          : error,
+      });
       report("failed", error.code);
       // No operations: staged work is discarded with the turn.
       return { assistantText: "", operations: [] };
@@ -553,22 +573,42 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             activity has to stream while the model is still working, not after
             the turn ends, so it cannot be staged (docs/ARCHITECTURE.md §14).
           */
+          const focalObjectId = input.context?.focalObjectId ?? null;
           const outcome = await hooks.runResearch(
             {
               topic: (validation.value as { topic: string }).topic,
-              focalObjectId: input.context?.focalObjectId ?? null,
+              focalObjectId,
             },
             signal,
           );
+          /*
+            The scene is queued here, by the host, rather than left to a
+            second model tool call the response might never make — the tool
+            result below says the finding is on the canvas, so that has to be
+            true by the time it is said, not merely likely.
+          */
+          if (outcome.ok && focalObjectId) {
+            await hooks.recommendScene({
+              renderer: "evidence_research",
+              purpose: "research_evidence",
+              focalObjectId,
+              visibleObjectIds: [focalObjectId],
+              visibleRelationshipIds: [],
+              emphasis: "none",
+              reason: `Showing what was found: "${outcome.findingTitle}". This is demonstration data.`,
+              transition: "replace",
+            });
+          }
           content = outcome.ok
             ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. The full finding is already on the canvas; do not restate its detail, only react to it and offer to add it as evidence if that follows.`
             : outcome.reason === "stopped"
               ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
-              : "Research could not run. Tell the person plainly; nothing was added.";
+              : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added.";
         } else if (validation.tool === "add_evidence") {
           const outcome = await hooks.addEvidence(
             validation.value as { consequenceSummary: string },
           );
+          if (outcome.ok) evidenceLinked = true;
           content = outcome.ok
             ? outcome.linked
               ? "Evidence linked."

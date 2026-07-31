@@ -202,8 +202,14 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
       requests by what they mean, through the same two tools
       (docs/ARCHITECTURE.md §8); this is only the deterministic stand-in CI and
       Playwright run against.
+
+      "Research this" matches by prefix, not full equality: the T10
+      all-sources-unavailable edge case is reached by appending a marker
+      MockResearchProvider recognises on the topic it is handed (e.g.
+      "Research this (all sources unavailable)"), and the full message is
+      what becomes that topic — see `runResearchTurn` below.
     */
-    if (trimmed.toLowerCase() === "research this") {
+    if (trimmed.toLowerCase().startsWith("research this")) {
       return this.runResearchTurn(input, hooks, signal, interrupted);
     }
     if (trimmed.toLowerCase() === "add as evidence") {

@@ -395,6 +395,105 @@ export interface AuditInput {
   detail?: Record<string, string | number | boolean>;
 }
 
+/**
+ * Persists the exact result one research pass produced (T10 review round 1,
+ * P0-1) — system-authored, like activity and audit, so `research_findings`
+ * can later prove a project genuinely produced a given result rather than
+ * trusting a client's say-so.
+ *
+ * Returns the receipt id "Add as evidence" resolves in a later turn, or
+ * `null` if it could not be recorded — the caller treats that as the research
+ * pass itself having failed, rather than showing a finding nothing can later
+ * reference.
+ */
+export async function recordResearchFinding(input: {
+  projectId: string;
+  turnId: string;
+  finding: {
+    title: string;
+    keyFinding: string;
+    whyItMatters: string;
+    visualisation: unknown;
+    sources: unknown;
+    methodology: string;
+    limitations: string;
+    retrievedAt: string;
+    isDemo: boolean;
+    conflicting: boolean;
+  };
+}): Promise<string | null> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("research_finding");
+    return null;
+  }
+  const { data, error } = await client
+    .from("research_findings")
+    .insert({
+      project_id: input.projectId,
+      turn_id: input.turnId,
+      title: input.finding.title,
+      key_finding: input.finding.keyFinding,
+      why_it_matters: input.finding.whyItMatters,
+      visualisation: input.finding.visualisation,
+      sources: input.finding.sources,
+      methodology: input.finding.methodology,
+      limitations: input.finding.limitations,
+      retrieved_at: input.finding.retrievedAt,
+      is_demo: input.finding.isDemo,
+      conflicting: input.finding.conflicting,
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    console.error("research_finding insert failed", { code: error?.code });
+    return null;
+  }
+  return data.id as string;
+}
+
+export type AddEvidenceLinkOutcome =
+  | "linked"
+  | "already_linked"
+  | "no_active_research"
+  | "no_focal_object"
+  | "not_running"
+  | "unavailable";
+
+/**
+ * Adds evidence and links it, atomically (T10 review round 1, P0-2, P0-3):
+ * one transactional function creates or reuses the evidence row from its
+ * `research_findings` receipt and writes the `project_relationships` link,
+ * rather than two separate, individually-failable writes.
+ */
+export async function linkEvidence(input: {
+  projectId: string;
+  turnId: string;
+  actorId: string;
+  receiptId: string;
+  objectId: string;
+  consequenceSummary: string;
+}): Promise<AddEvidenceLinkOutcome> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("add_evidence_link");
+    return "unavailable";
+  }
+  const { data, error } = await client.rpc("add_evidence_link", {
+    p_project_id: input.projectId,
+    p_turn_id: input.turnId,
+    p_actor_id: input.actorId,
+    p_receipt_id: input.receiptId,
+    p_object_id: input.objectId,
+    p_consequence_summary: input.consequenceSummary,
+  });
+  if (error) {
+    console.error("add_evidence_link failed", { code: error.code });
+    return "unavailable";
+  }
+  return data as AddEvidenceLinkOutcome;
+}
+
 export async function recordAudit(input: AuditInput): Promise<void> {
   const client = trustedClient();
   if (!client) return reportUnavailable(`audit:${input.action}`);

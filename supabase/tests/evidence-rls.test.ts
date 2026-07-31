@@ -1,10 +1,15 @@
 /**
- * Evidence and evidence-link isolation (T10, SECURITY_STANDARDS §6/§7.1).
+ * Evidence, its receipt and its canonical link (T10 review round 1,
+ * P0-1/P0-2/P0-3; SECURITY_STANDARDS §6/§7.1/§11.2).
  *
- * The headline properties under test: evidence and its links are invisible
- * and unwritable across projects, `is_demo` cannot be omitted, and
- * `object_id` on a link is checked against the project's own field/assumption
- * union at the database layer — not only in application code.
+ * The headline properties under test: `research_findings` and `evidence` are
+ * both system-authored (no insert grant for `authenticated`, and invisible
+ * across projects); `add_evidence_link` is the only way an `evidence` row and
+ * its `project_relationships` link can ever come to exist, that pair is
+ * all-or-none, a foreign/unknown/stale receipt or object is rejected
+ * uniformly, a repeat call is idempotent, and an 'open' assumption's status
+ * moves to 'supported' on a genuine new link but never further and never for
+ * an already-resolved assumption.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -22,8 +27,13 @@ let db: Client;
 let projectA: string;
 let projectB: string;
 let fieldA: string;
-let assumptionA: string;
 let fieldB: string;
+let turnSeq = 0;
+
+async function asTrustedWriter() {
+  await db.query("reset role");
+  await db.query("set role service_role");
+}
 
 async function impersonate(userId: string | null) {
   await db.query("reset role");
@@ -46,20 +56,72 @@ async function addField(projectId: string, key: string): Promise<string> {
   return rows[0].id;
 }
 
-async function addEvidence(
+/** Opens a running turn for the project, closing whatever was left running. */
+async function openRun(
   projectId: string,
-  externalFindingId: string,
+  options: { expired?: boolean } = {},
 ): Promise<string> {
+  turnSeq += 1;
+  const turnId = `55555555-0000-4000-8000-${String(turnSeq).padStart(12, "0")}`;
+  await asTrustedWriter();
+  await db.query(
+    `update turn_runs set state = 'completed', accepting_direction = false, ended_at = now()
+     where project_id = $1 and state = 'running'`,
+    [projectId],
+  );
+  await db.query(
+    `insert into turn_runs (turn_id, project_id, lease_expires_at)
+     values ($1, $2, now() + ($3 || ' minutes')::interval)`,
+    [turnId, projectId, options.expired ? "-1" : "15"],
+  );
+  return turnId;
+}
+
+async function closeRun(turnId: string, state: "completed" | "failed") {
+  await asTrustedWriter();
+  await db.query(
+    `update turn_runs set state = $2, accepting_direction = false, ended_at = now()
+     where turn_id = $1`,
+    [turnId, state],
+  );
+}
+
+/** Records a receipt exactly as `recordResearchFinding` does. */
+async function recordFinding(
+  projectId: string,
+  turnId: string,
+  overrides: Partial<{ title: string }> = {},
+): Promise<string> {
+  await asTrustedWriter();
   const { rows } = await db.query(
-    `insert into evidence
-       (project_id, title, summary, source_name, retrieved_at, kind, is_demo,
-        external_finding_id)
-     values ($1, 'Deposit disputes', 'Summary.', 'Demo source', now(),
-             'secondary_research', true, $2)
+    `insert into research_findings
+       (project_id, turn_id, title, key_finding, why_it_matters,
+        visualisation, sources, methodology, limitations, retrieved_at,
+        is_demo, conflicting)
+     values ($1, $2, $3, 'Key finding.', 'Why it matters.',
+             '{"kind":"bar","unit":"%","series":[]}'::jsonb,
+             '[{"id":"s1","name":"Demo source","url":null,"retrievedAt":""}]'::jsonb,
+             'Method.', 'Limits.', now(), true, false)
      returning id`,
-    [projectId, externalFindingId],
+    [projectId, turnId, overrides.title ?? "Deposit disputes"],
   );
   return rows[0].id;
+}
+
+async function linkEvidence(
+  projectId: string,
+  turnId: string,
+  actorId: string,
+  receiptId: string,
+  objectId: string,
+  consequenceSummary = "Supports the object.",
+): Promise<string> {
+  await asTrustedWriter();
+  const { rows } = await db.query(
+    "select public.add_evidence_link($1, $2, $3, $4, $5, $6) as outcome",
+    [projectId, turnId, actorId, receiptId, objectId, consequenceSummary],
+  );
+  return rows[0].outcome as string;
 }
 
 beforeAll(async () => {
@@ -98,14 +160,6 @@ beforeAll(async () => {
     )
   ).rows[0].id;
   fieldA = await addField(projectA, "primary_pain");
-  assumptionA = (
-    await db.query(
-      `insert into assumptions (project_id, statement, origin)
-       values ($1, 'Smaller agencies feel this most', 'ai_inferred')
-       returning id`,
-      [projectA],
-    )
-  ).rows[0].id;
 
   await impersonate(USER_B);
   projectB = (
@@ -120,65 +174,281 @@ afterAll(async () => {
   await db?.end();
 });
 
+describe.skipIf(skip)("research_findings", () => {
+  it("is not directly writable by the authenticated role", async () => {
+    await impersonate(USER_A);
+    await expect(
+      db.query(
+        `insert into research_findings
+           (project_id, turn_id, title, key_finding, why_it_matters,
+            visualisation, sources, methodology, limitations, retrieved_at,
+            is_demo, conflicting)
+         values ($1, gen_random_uuid(), 'T', 'K', 'W',
+                 '{}'::jsonb, '[]'::jsonb, 'M', 'L', now(), true, false)`,
+        [projectA],
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("hides receipts from other users", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+
+    await impersonate(USER_B);
+    expect(
+      (
+        await db.query("select 1 from research_findings where id = $1", [
+          receiptId,
+        ])
+      ).rowCount,
+    ).toBe(0);
+  });
+
+  it("denies anonymous access", async () => {
+    await impersonate(null);
+    await expect(db.query("select * from research_findings")).rejects.toThrow(
+      /permission denied/,
+    );
+  });
+});
+
+describe.skipIf(skip)("add_evidence_link", () => {
+  it("is not callable by a browser session", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+
+    await impersonate(USER_A);
+    await expect(
+      db.query(
+        "select public.add_evidence_link($1, $2, auth.uid(), $3, $4, 'x')",
+        [projectA, turnId, receiptId, fieldA],
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("creates the evidence row and its relationship together, and reports linked", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+
+    const outcome = await linkEvidence(
+      projectA,
+      turnId,
+      USER_A,
+      receiptId,
+      fieldA,
+      "Supports the field; does not support the rest.",
+    );
+    expect(outcome).toBe("linked");
+
+    await impersonate(USER_A);
+    const evidence = await db.query(
+      "select id, project_id, source_receipt_id from evidence where source_receipt_id = $1",
+      [receiptId],
+    );
+    expect(evidence.rowCount).toBe(1);
+    const evidenceId = evidence.rows[0].id;
+
+    const relationship = await db.query(
+      `select relation, origin, support, note from project_relationships
+       where from_object_id = $1 and to_object_id = $2`,
+      [evidenceId, fieldA],
+    );
+    expect(relationship.rows[0]).toMatchObject({
+      relation: "supports",
+      origin: "researched",
+      support: "some_evidence",
+      note: "Supports the field; does not support the rest.",
+    });
+  });
+
+  it("is idempotent: relinking the same receipt to the same object reuses both rows", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
+    ).toBe("linked");
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
+    ).toBe("already_linked");
+
+    await impersonate(USER_A);
+    const evidenceCount = await db.query(
+      "select count(*)::int as n from evidence where source_receipt_id = $1",
+      [receiptId],
+    );
+    expect(evidenceCount.rows[0].n).toBe(1);
+    const linkCount = await db.query(
+      `select count(*)::int as n from project_relationships r
+       join evidence e on e.id = r.from_object_id
+       where e.source_receipt_id = $1
+         and r.to_object_id = $2
+         and r.relation = 'supports'`,
+      [receiptId, fieldA],
+    );
+    expect(linkCount.rows[0].n).toBe(1);
+  });
+
+  it("rejects a receipt id from a different project as no_active_research", async () => {
+    const turnIdB = await openRun(projectB);
+    const receiptIdB = await recordFinding(projectB, turnIdB);
+
+    const turnIdA = await openRun(projectA);
+    expect(
+      await linkEvidence(projectA, turnIdA, USER_A, receiptIdB, fieldA),
+    ).toBe("no_active_research");
+  });
+
+  it("rejects an unknown receipt id as no_active_research", async () => {
+    const turnId = await openRun(projectA);
+    expect(
+      await linkEvidence(
+        projectA,
+        turnId,
+        USER_A,
+        "99999999-0000-4000-8000-000000000099",
+        fieldA,
+      ),
+    ).toBe("no_active_research");
+  });
+
+  it("rejects an object from a different project as no_focal_object", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldB),
+    ).toBe("no_focal_object");
+  });
+
+  it("refuses a turn that has already finished", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+    await closeRun(turnId, "completed");
+
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
+    ).toBe("not_running");
+  });
+
+  it("refuses a turn whose lease has already lapsed", async () => {
+    const turnId = await openRun(projectA, { expired: true });
+    const receiptId = await recordFinding(projectA, turnId);
+
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
+    ).toBe("not_running");
+  });
+
+  it("moves an open assumption to supported on a genuine new link", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId, {
+      title: "Assumption evidence",
+    });
+    await impersonate(USER_A);
+    const assumptionId = (
+      await db.query(
+        `insert into assumptions (project_id, statement, status, origin)
+         values ($1, 'Smaller agencies feel this most', 'open', 'ai_inferred')
+         returning id`,
+        [projectA],
+      )
+    ).rows[0].id;
+
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, assumptionId),
+    ).toBe("linked");
+
+    await impersonate(USER_A);
+    const status = await db.query(
+      "select status from assumptions where id = $1",
+      [assumptionId],
+    );
+    expect(status.rows[0].status).toBe("supported");
+  });
+
+  it("never overwrites an assumption that is not open", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId, {
+      title: "Resolved assumption evidence",
+    });
+    await impersonate(USER_A);
+    const assumptionId = (
+      await db.query(
+        `insert into assumptions (project_id, statement, status, origin)
+         values ($1, 'Already invalidated', 'invalidated', 'ai_inferred')
+         returning id`,
+        [projectA],
+      )
+    ).rows[0].id;
+
+    expect(
+      await linkEvidence(projectA, turnId, USER_A, receiptId, assumptionId),
+    ).toBe("linked");
+
+    await impersonate(USER_A);
+    const status = await db.query(
+      "select status from assumptions where id = $1",
+      [assumptionId],
+    );
+    expect(status.rows[0].status).toBe("invalidated");
+  });
+});
+
 describe.skipIf(skip)("evidence", () => {
-  it("is_demo cannot be omitted", async () => {
+  it("is not directly writable by the authenticated role", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+
     await impersonate(USER_A);
     await expect(
       db.query(
         `insert into evidence
            (project_id, title, summary, source_name, retrieved_at, kind,
-            external_finding_id)
-         values ($1, 'T', 'S', 'Src', now(), 'secondary_research', 'x')`,
-        [projectA],
+            is_demo, source_receipt_id)
+         values ($1, 'T', 'S', 'Src', now(), 'secondary_research', true, $2)`,
+        [projectA, receiptId],
       ),
-    ).rejects.toThrow(/null value in column "is_demo"/);
-  });
-
-  it("stores a row for the owning project", async () => {
-    await impersonate(USER_A);
-    const id = await addEvidence(projectA, "finding-1");
-    const { rows } = await db.query(
-      "select project_id, is_demo from evidence where id = $1",
-      [id],
-    );
-    expect(rows[0]).toMatchObject({ project_id: projectA, is_demo: true });
-  });
-
-  it("is idempotent per project and external finding id", async () => {
-    await impersonate(USER_A);
-    const first = await addEvidence(projectA, "finding-dup");
-    await expect(addEvidence(projectA, "finding-dup")).rejects.toThrow(
-      /duplicate key value/,
-    );
-    const { rowCount } = await db.query(
-      "select 1 from evidence where id = $1",
-      [first],
-    );
-    expect(rowCount).toBe(1);
-  });
-
-  it("hides evidence from other users and rejects their writes", async () => {
-    await impersonate(USER_A);
-    const id = await addEvidence(projectA, "finding-hidden");
-
-    await impersonate(USER_B);
-    expect(
-      (await db.query("select 1 from evidence where id = $1", [id])).rowCount,
-    ).toBe(0);
-    await expect(addEvidence(projectA, "finding-cross")).rejects.toThrow(
-      /row-level security/,
-    );
+    ).rejects.toThrow(/permission denied/);
   });
 
   it("has no update or delete grant for the authenticated role", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+    await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA);
     await impersonate(USER_A);
-    const id = await addEvidence(projectA, "finding-immutable");
+    const { rows } = await db.query(
+      "select id from evidence where source_receipt_id = $1",
+      [receiptId],
+    );
+    const evidenceId = rows[0].id;
+
     await expect(
-      db.query("update evidence set title = 'changed' where id = $1", [id]),
+      db.query("update evidence set title = 'changed' where id = $1", [
+        evidenceId,
+      ]),
     ).rejects.toThrow(/permission denied/);
     await expect(
-      db.query("delete from evidence where id = $1", [id]),
+      db.query("delete from evidence where id = $1", [evidenceId]),
     ).rejects.toThrow(/permission denied/);
+  });
+
+  it("hides evidence from other users", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId);
+    await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA);
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      "select id from evidence where source_receipt_id = $1",
+      [receiptId],
+    );
+    const evidenceId = rows[0].id;
+
+    await impersonate(USER_B);
+    expect(
+      (await db.query("select 1 from evidence where id = $1", [evidenceId]))
+        .rowCount,
+    ).toBe(0);
   });
 
   it("denies anonymous access", async () => {
@@ -187,130 +457,34 @@ describe.skipIf(skip)("evidence", () => {
       /permission denied/,
     );
   });
-});
 
-describe.skipIf(skip)("evidence_links", () => {
-  it("links evidence to a field in the same project", async () => {
+  it("cascades deletion from the project object registry", async () => {
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId, {
+      title: "Cascade check",
+    });
+    await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA);
     await impersonate(USER_A);
-    const evidenceId = await addEvidence(projectA, "finding-field-link");
     const { rows } = await db.query(
-      `insert into evidence_links
-         (project_id, evidence_id, object_id, consequence_summary)
-       values ($1, $2, $3, 'Supports the field; does not support the rest.')
-       returning id`,
-      [projectA, evidenceId, fieldA],
+      "select id from evidence where source_receipt_id = $1",
+      [receiptId],
     );
-    expect(rows[0].id).toBeDefined();
-  });
+    const evidenceId = rows[0].id;
 
-  it("links evidence to an assumption in the same project", async () => {
-    await impersonate(USER_A);
-    const evidenceId = await addEvidence(projectA, "finding-assumption-link");
-    const { rows } = await db.query(
-      `insert into evidence_links
-         (project_id, evidence_id, object_id, consequence_summary)
-       values ($1, $2, $3, 'Supports the assumption.')
-       returning id`,
-      [projectA, evidenceId, assumptionA],
+    // `evidence` itself has no delete grant (only `add_evidence_link` writes
+    // it) — deleting the registry row is what an owner actually can do, and
+    // is exactly the path `evidence_object_fk ... on delete cascade` exists
+    // to make safe.
+    await db.query("delete from project_objects where id = $1", [evidenceId]);
+
+    const remaining = await db.query("select 1 from evidence where id = $1", [
+      evidenceId,
+    ]);
+    expect(remaining.rowCount).toBe(0);
+    const orphanLink = await db.query(
+      "select 1 from project_relationships where from_object_id = $1",
+      [evidenceId],
     );
-    expect(rows[0].id).toBeDefined();
-  });
-
-  it("rejects an object_id that is not a field or assumption of this project", async () => {
-    await impersonate(USER_A);
-    const evidenceId = await addEvidence(projectA, "finding-foreign-object");
-    // fieldB belongs to project B, not project A.
-    await expect(
-      db.query(
-        `insert into evidence_links
-           (project_id, evidence_id, object_id, consequence_summary)
-         values ($1, $2, $3, 'Should not be linkable.')`,
-        [projectA, evidenceId, fieldB],
-      ),
-    ).rejects.toThrow(/row-level security/);
-  });
-
-  it("rejects evidence and object_id belonging to different projects", async () => {
-    await impersonate(USER_B);
-    const evidenceIdB = await addEvidence(projectB, "finding-mismatch-b");
-    await impersonate(USER_A);
-    // evidence_links.project_id says A, but the evidence row is B's.
-    await expect(
-      db.query(
-        `insert into evidence_links
-           (project_id, evidence_id, object_id, consequence_summary)
-         values ($1, $2, $3, 'Cross-project mismatch.')`,
-        [projectA, evidenceIdB, fieldA],
-      ),
-    ).rejects.toThrow(/row-level security/);
-  });
-
-  it("is idempotent per (evidence_id, object_id)", async () => {
-    await impersonate(USER_A);
-    const evidenceId = await addEvidence(projectA, "finding-relink");
-    await db.query(
-      `insert into evidence_links
-         (project_id, evidence_id, object_id, consequence_summary)
-       values ($1, $2, $3, 'First link.')`,
-      [projectA, evidenceId, fieldA],
-    );
-    await expect(
-      db.query(
-        `insert into evidence_links
-           (project_id, evidence_id, object_id, consequence_summary)
-         values ($1, $2, $3, 'Second attempt.')`,
-        [projectA, evidenceId, fieldA],
-      ),
-    ).rejects.toThrow(/duplicate key value/);
-  });
-
-  it("hides links from other users and rejects their writes", async () => {
-    await impersonate(USER_A);
-    const evidenceId = await addEvidence(projectA, "finding-hidden-link");
-    const linkId = (
-      await db.query(
-        `insert into evidence_links
-           (project_id, evidence_id, object_id, consequence_summary)
-         values ($1, $2, $3, 'Visible only to A.')
-         returning id`,
-        [projectA, evidenceId, fieldA],
-      )
-    ).rows[0].id;
-
-    await impersonate(USER_B);
-    expect(
-      (await db.query("select 1 from evidence_links where id = $1", [linkId]))
-        .rowCount,
-    ).toBe(0);
-  });
-
-  it("has no update or delete grant for the authenticated role", async () => {
-    await impersonate(USER_A);
-    const evidenceId = await addEvidence(projectA, "finding-link-immutable");
-    const linkId = (
-      await db.query(
-        `insert into evidence_links
-           (project_id, evidence_id, object_id, consequence_summary)
-         values ($1, $2, $3, 'Immutable once written.')
-         returning id`,
-        [projectA, evidenceId, fieldA],
-      )
-    ).rows[0].id;
-    await expect(
-      db.query(
-        "update evidence_links set consequence_summary = 'changed' where id = $1",
-        [linkId],
-      ),
-    ).rejects.toThrow(/permission denied/);
-    await expect(
-      db.query("delete from evidence_links where id = $1", [linkId]),
-    ).rejects.toThrow(/permission denied/);
-  });
-
-  it("denies anonymous access", async () => {
-    await impersonate(null);
-    await expect(db.query("select * from evidence_links")).rejects.toThrow(
-      /permission denied/,
-    );
+    expect(orphanLink.rowCount).toBe(0);
   });
 });

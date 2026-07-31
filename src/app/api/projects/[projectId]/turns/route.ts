@@ -13,14 +13,15 @@ import {
 import type { TurnResult } from "@/lib/ai/discovery-engine";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { commitTurn } from "@/lib/services/model-operations";
-import { writeEvidence } from "@/lib/services/evidence";
 import { MockResearchProvider } from "@/lib/research/mock-research-provider";
 import {
   closeTurnRun,
   completeTurnRecord,
   startTurn,
+  linkEvidence,
   recordActivity,
   recordAudit,
+  recordResearchFinding,
   renewTurnLease,
   takeDirections,
   DIRECTION_CURSOR_START,
@@ -325,6 +326,27 @@ export async function POST(
           });
         }
 
+        /*
+          What the canvas is told the project now holds — re-read from the
+          application's own tables after a write landed, never from anything
+          the model described. Shared between `finishTurn` (after the turn's
+          own commit) and evidence-linking (T10 review round 1, P0-2): a
+          successful "Add as evidence" is its own independently-true,
+          immediately-committed change and refreshes the canvas the moment it
+          commits, not only if the turn later succeeds too.
+        */
+        const publishProjectModel = async () => {
+          const [objects, relationships] = await Promise.all([
+            loadCanvasObjects(supabase, projectId),
+            loadProjectRelationships(supabase, projectId),
+          ]);
+          emit({
+            type: "project_model_updated",
+            objects: objects.data,
+            relationships: relationships.data,
+          });
+        };
+
         const hooks = createTurnHooks({
           emit,
           scope: turnScope.scope,
@@ -333,13 +355,18 @@ export async function POST(
           researchProvider: new MockResearchProvider(),
           focalObjectId: turnScope.focalObjectId,
           activeFindingId: parsed.data.activeFindingId ?? null,
-          writeEvidence: ({ finding, objectId, consequenceSummary }) =>
-            writeEvidence(supabase, {
+          recordResearchFinding: (finding) =>
+            recordResearchFinding({ projectId, turnId, finding }),
+          linkEvidence: ({ receiptId, objectId, consequenceSummary }) =>
+            linkEvidence({
               projectId,
-              finding,
+              turnId,
+              actorId: user.id,
+              receiptId,
               objectId,
               consequenceSummary,
             }),
+          publishProjectModel,
           onSceneAccepted: (scene) =>
             audit("scene_recommended", {
               target: scene.renderer,
@@ -472,22 +499,7 @@ export async function POST(
                     result.operations,
                     assistantText,
                   ),
-                /*
-                  What the canvas is told the project now holds — re-read
-                  from the application's own tables after the write landed,
-                  never from anything the model described.
-                */
-                publishProjectModel: async () => {
-                  const [objects, relationships] = await Promise.all([
-                    loadCanvasObjects(supabase, projectId),
-                    loadProjectRelationships(supabase, projectId),
-                  ]);
-                  emit({
-                    type: "project_model_updated",
-                    objects: objects.data,
-                    relationships: relationships.data,
-                  });
-                },
+                publishProjectModel,
                 closeRun: (state) => closeTurnRun({ turnId, state }),
                 audit: (action, detail) => audit(action, { detail }),
                 /*

@@ -258,6 +258,67 @@ describe("AnthropicDiscoveryEngine", () => {
     expect(turn.operations).toEqual([]);
   });
 
+  describe("start_research (T10)", () => {
+    const focalObjectId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const inputWithFocus = {
+      ...input,
+      context: { objectIds: [focalObjectId], focalObjectId },
+    };
+
+    it("queues the evidence_research scene itself, rather than trusting a second model call", async () => {
+      const { scenes, hooks } = harness();
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        // The model's own response never calls recommend_canvas_scene — the
+        // host must not depend on it doing so.
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      expect(scenes).toHaveLength(1);
+      expect(scenes[0]).toMatchObject({
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId,
+      });
+    });
+
+    it("does not queue a scene when research did not produce a finding", async () => {
+      const { scenes, hooks } = harness({
+        runResearch: async () => ({ ok: false, reason: "unavailable" }),
+      });
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Research could not run.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      expect(scenes).toHaveLength(0);
+    });
+  });
+
   it("retries once on invalid output, then fails without proposing anything", async () => {
     const { events, hooks } = harness();
     const invalid = {

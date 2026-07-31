@@ -1,3 +1,5 @@
+import type { ResearchSource } from "@/lib/research/types";
+
 /**
  * Canvas object grammar (DESIGN.md §10). A controlled set of object types
  * sharing one visual frame; objects differ by content and status, never by
@@ -55,6 +57,21 @@ export interface CanvasObject {
   /** Assumption presentation data (DESIGN.md §10.3). */
   alternatives?: string[];
   recommendedValidation?: string;
+  /**
+   * The durable receipt behind a piece of evidence — its full source set,
+   * methodology, limitations and whether the sources disagreed — so a
+   * saved evidence object's sources stay inspectable after a reload, not
+   * only for as long as the ephemeral research view that produced it
+   * survives (T10 review round 2, P0-C, Step 6's "source is accessible").
+   * Present only for `kind: "evidence"`.
+   */
+  evidenceProvenance?: {
+    sources: ResearchSource[];
+    conflicting: boolean;
+    methodology: string;
+    limitations: string;
+    retrievedAt: string;
+  };
 }
 
 export const ORIGIN_LABELS: Record<Origin, string> = {

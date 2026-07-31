@@ -17,6 +17,7 @@ import type { EditSubmit } from "@/components/canvas/object-editor";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { ActivityLine, Message } from "@/lib/ai/turn-events";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import { useTurnRuntime } from "@/lib/ai/use-turn-runtime";
 import { ActivityHistory } from "@/components/activity/activity-history";
 import { AppearanceSettings } from "./appearance-settings";
@@ -61,6 +62,7 @@ export function WorkspaceShell({
   activityTruncated = false,
   canvasObjects = [],
   canvasRelationships = [],
+  initialResearch = null,
   onEditObject,
 }: Readonly<{
   projectId: string;
@@ -72,6 +74,16 @@ export function WorkspaceShell({
   activityTruncated?: boolean;
   canvasObjects?: CanvasObject[];
   canvasRelationships?: ProjectRelationship[];
+  /**
+   * The research receipt "Add as evidence" can still resolve, if the most
+   * recent thing that happened in this project was the research that
+   * produced it (T10 review round 2, P0-A) — otherwise absent, exactly as
+   * a fresh session would be.
+   */
+  initialResearch?: {
+    finding: ResearchFinding;
+    unavailableSources: { source: ResearchSource; reason: string }[];
+  } | null;
   onEditObject?: EditSubmit;
 }>) {
   /*
@@ -84,6 +96,7 @@ export function WorkspaceShell({
     projectId,
     initialMessages,
     initialActivity,
+    initialResearch,
   });
   /*
     The canvas draws from the server-rendered model until a turn changes

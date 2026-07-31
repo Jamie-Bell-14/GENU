@@ -14,11 +14,11 @@ export const TurnRequestSchema = z
         `Messages are limited to ${MAX_MESSAGE_LENGTH.toLocaleString("en-GB")} characters. Shorten it and send again.`,
       ),
     /**
-     * The research finding the client is currently looking at, if any (T10).
-     * An opaque key into the closed catalogue in `src/lib/research/findings.ts`
-     * — never content itself, and never trusted as such: "Add as evidence"
-     * re-derives every provenance field from this id rather than from
-     * anything the client sends about the finding.
+     * The research receipt the client is currently looking at, if any (T10).
+     * An opaque id into `research_findings` — never content itself, and
+     * never trusted as such: "Add as evidence" resolves the receipt and its
+     * recorded target from that table, never from anything else the client
+     * sends about the finding.
      */
     activeFindingId: z.string().trim().min(1).max(100).nullish(),
   })

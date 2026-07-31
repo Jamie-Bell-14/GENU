@@ -55,11 +55,7 @@ function setup(overrides: Partial<TurnPorts> = {}) {
     onDirectionApplied: () => {},
     turnId: TURN_ID,
     researchProvider: inertResearchProvider,
-    focalObjectId: OBJECT_A,
-    activeFindingId: null,
     recordResearchFinding: vi.fn(async () => "receipt-1"),
-    linkEvidence: vi.fn(async (): Promise<"linked"> => "linked"),
-    publishProjectModel: vi.fn(async () => {}),
     ...overrides,
   };
   return {
@@ -305,6 +301,18 @@ const FINDING: ResearchFinding = {
 };
 
 describe("runResearch orchestration (T10)", () => {
+  it("emits research_started before the provider begins, superseding any earlier pass", async () => {
+    const { provider, push } = fakeProvider();
+    const { events, hooks } = setup({ researchProvider: provider });
+
+    const outcome = hooks.runResearch({ topic: "t", focalObjectId: OBJECT_A });
+    push({ type: "finding", finding: FINDING });
+    push({ type: "done" });
+    await outcome;
+
+    expect(events[0]).toEqual({ type: "research_started" });
+  });
+
   it("brackets a step's activity for the duration until the next provider event", async () => {
     const { provider, push } = fakeProvider();
     const { activity, hooks } = setup({ researchProvider: provider });
@@ -352,6 +360,7 @@ describe("runResearch orchestration (T10)", () => {
     await outcome;
 
     expect(events.map((event) => event.type)).toEqual([
+      "research_started",
       "research_source",
       "research_failed_source",
       "research_finding",
@@ -397,10 +406,10 @@ describe("runResearch orchestration (T10)", () => {
     await outcome;
   });
 
-  it("never announces direction_applied when the provider says it requires a restart", async () => {
+  it("never announces direction_applied when the provider says it requires a restart, and corrects the earlier promise", async () => {
     const { provider, push, steerCalls } = fakeProvider("requires_restart");
     const onDirectionApplied = vi.fn();
-    const { hooks } = setup({
+    const { events, hooks } = setup({
       researchProvider: provider,
       takeDirection: async () => "Please double-check with the tenant",
       onDirectionApplied,
@@ -411,6 +420,38 @@ describe("runResearch orchestration (T10)", () => {
     await flush();
     expect(steerCalls).toEqual(["Please double-check with the tenant"]);
     expect(onDirectionApplied).not.toHaveBeenCalled();
+    // The direction endpoint already told the user this would be applied
+    // (T10 review round 2, P0-D) — silence would leave that standing.
+    expect(events).toContainEqual({
+      type: "direction_rejected",
+      note: "Please double-check with the tenant",
+      reason: expect.any(String),
+    });
+
+    push({ type: "finding", finding: FINDING });
+    push({ type: "done" });
+    await outcome;
+  });
+
+  it("defers announcing direction_applied until the step it genuinely affects", async () => {
+    const { provider, push } = fakeProvider("applies_next_step");
+    const onDirectionApplied = vi.fn();
+    const { hooks } = setup({
+      researchProvider: provider,
+      takeDirection: async () => "Focus on newer sources",
+      onDirectionApplied,
+    });
+
+    const outcome = hooks.runResearch({ topic: "t", focalObjectId: OBJECT_A });
+    push({ type: "step", step: "reviewing_sources" });
+    await flush();
+    // Not yet true: the provider said this only takes effect next step.
+    expect(onDirectionApplied).not.toHaveBeenCalled();
+
+    push({ type: "step", step: "comparing_methods" });
+    await flush();
+    // Now genuinely at the step it affects.
+    expect(onDirectionApplied).toHaveBeenCalledWith("Focus on newer sources");
 
     push({ type: "finding", finding: FINDING });
     push({ type: "done" });
@@ -447,93 +488,47 @@ describe("runResearch orchestration (T10)", () => {
   });
 });
 
-describe("addEvidence (T10)", () => {
-  it("refuses when there is no active research to link", async () => {
-    const { hooks } = setup({ activeFindingId: null });
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: false, reason: "no_active_research" });
-  });
-
-  it("refuses when there is no focal object to link to", async () => {
+describe("research receipts (T10 review round 2, P0-A)", () => {
+  it("records the receipt with the pass's own focal object, unavailable sources and applied steering", async () => {
+    const { provider, push } = fakeProvider();
+    const recordResearchFinding = vi.fn(async () => "receipt-1");
     const { hooks } = setup({
-      activeFindingId: "tenancy-deposit-disputes-2024",
-      focalObjectId: null,
+      researchProvider: provider,
+      takeDirection: async () => "Focus on England",
+      recordResearchFinding,
     });
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: false, reason: "no_focal_object" });
-  });
 
-  it("propagates no_active_research when the receipt cannot be resolved server-side", async () => {
-    // A foreign, unknown or stale receipt id is not distinguished here — that
-    // is `add_evidence_link`'s call to make (T10 review round 1, P0-1), not
-    // this hook's. This only checks the outcome is passed through honestly.
-    const { hooks } = setup({
-      activeFindingId: "not-a-real-receipt",
-      linkEvidence: vi.fn(async () => "no_active_research" as const),
+    const outcome = hooks.runResearch({ topic: "t", focalObjectId: OBJECT_A });
+    push({ type: "step", step: "searching_sources" });
+    await flush();
+    push({
+      type: "failed_source",
+      source: { id: "s2", name: "Other", url: null, retrievedAt: "" },
+      reason: "unavailable",
     });
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: false, reason: "no_active_research" });
-  });
+    push({ type: "finding", finding: FINDING });
+    push({ type: "done" });
+    await outcome;
 
-  it("writes through the port with the receipt id and object, then republishes the model", async () => {
-    const linkEvidence = vi.fn(async () => "linked" as const);
-    const publishProjectModel = vi.fn(async () => {});
-    const { hooks } = setup({
-      activeFindingId: "receipt-1",
+    expect(recordResearchFinding).toHaveBeenCalledWith({
+      finding: FINDING,
       focalObjectId: OBJECT_A,
-      linkEvidence,
-      publishProjectModel,
+      unavailableSources: [
+        {
+          source: { id: "s2", name: "Other", url: null, retrievedAt: "" },
+          reason: "unavailable",
+        },
+      ],
+      appliedDirections: ["Focus on England"],
     });
-
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: true, linked: true });
-    expect(linkEvidence).toHaveBeenCalledWith({
-      receiptId: "receipt-1",
-      objectId: OBJECT_A,
-      consequenceSummary: "It supports X.",
-    });
-    // Independently true the moment it committed, not deferred to the turn's
-    // own end (T10 review round 1, P0-2).
-    expect(publishProjectModel).toHaveBeenCalledTimes(1);
   });
+});
 
-  it("reports an idempotent replay as linked:false, and does not republish", async () => {
-    const publishProjectModel = vi.fn(async () => {});
-    const { hooks } = setup({
-      activeFindingId: "receipt-1",
-      focalObjectId: OBJECT_A,
-      linkEvidence: vi.fn(async () => "already_linked" as const),
-      publishProjectModel,
-    });
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: true, linked: false });
-    expect(publishProjectModel).not.toHaveBeenCalled();
-  });
-
-  it("reports a write failure honestly", async () => {
-    const { hooks } = setup({
-      activeFindingId: "receipt-1",
-      focalObjectId: OBJECT_A,
-      linkEvidence: vi.fn(async () => "unavailable" as const),
-    });
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: false, reason: "failed" });
-  });
-
-  it("reports a not-running turn as a failure", async () => {
-    const { hooks } = setup({
-      activeFindingId: "receipt-1",
-      focalObjectId: OBJECT_A,
-      linkEvidence: vi.fn(async () => "not_running" as const),
-    });
-    await expect(
-      hooks.addEvidence({ consequenceSummary: "It supports X." }),
-    ).resolves.toEqual({ ok: false, reason: "failed" });
+describe("addEvidence is staged, not a hook (T10 review round 2, P0-B)", () => {
+  it("no longer exposes an addEvidence call on TurnHooks", () => {
+    const { hooks } = setup();
+    expect(
+      (hooks as unknown as Record<string, unknown>).addEvidence,
+    ).toBeUndefined();
   });
 });

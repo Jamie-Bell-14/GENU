@@ -6,6 +6,7 @@ import type { EditSubmit } from "@/components/canvas/object-editor";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { ActivityLine, Message } from "@/lib/ai/turn-events";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import { editProjectObject } from "./canvas-actions";
 
 /**
@@ -21,6 +22,7 @@ export function WorkspaceClient({
   activityTruncated,
   canvasObjects,
   canvasRelationships,
+  initialResearch,
 }: Readonly<{
   projectId: string;
   projectName: string;
@@ -29,6 +31,10 @@ export function WorkspaceClient({
   activityTruncated: boolean;
   canvasObjects: CanvasObject[];
   canvasRelationships: ProjectRelationship[];
+  initialResearch: {
+    finding: ResearchFinding;
+    unavailableSources: { source: ResearchSource; reason: string }[];
+  } | null;
 }>) {
   const onEditObject = useCallback<EditSubmit>(
     async (object, text) => {
@@ -53,6 +59,7 @@ export function WorkspaceClient({
       activityTruncated={activityTruncated}
       canvasObjects={canvasObjects}
       canvasRelationships={canvasRelationships}
+      initialResearch={initialResearch}
       onEditObject={onEditObject}
     />
   );

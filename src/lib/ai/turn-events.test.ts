@@ -703,4 +703,105 @@ describe("research (T10)", () => {
       },
     ]);
   });
+
+  describe("a new pass supersedes the last one (T10 review round 2, P0-D)", () => {
+    it("clears a previous finding the moment a new pass starts", () => {
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const state = turnReducer(withFinding, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+      expect(state.activeResearch).toBeNull();
+    });
+
+    it("clears the previous pass's unavailable sources the moment a new pass starts", () => {
+      const unavailable = {
+        id: "demo-regional-authority-bulletin",
+        name: "Demonstration Regional Housing Authority — Illustrative Bulletin",
+        url: null,
+        retrievedAt: "2026-07-30T00:00:00.000Z",
+      };
+      const withUnavailable = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "research_failed_source",
+          source: unavailable,
+          reason: "unavailable",
+        },
+      });
+      const state = turnReducer(withUnavailable, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+      expect(state.unavailableSources).toEqual([]);
+    });
+
+    it("leaves a pass that produces nothing with no stale receipt to add", () => {
+      // The exact scenario the review flagged: a successful pass, then a
+      // second pass that produces no finding at all (e.g. every source
+      // unavailable) must not leave the first pass's receipt answerable to
+      // "Add as evidence".
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const secondPassStarted = turnReducer(withFinding, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+      const failed = turnReducer(secondPassStarted, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: "t1",
+          error: {
+            code: "research_source_unavailable",
+            userMessage:
+              "None of the demonstration sources could be retrieved.",
+            recoverable: true,
+          },
+        },
+      });
+      expect(failed.activeResearch).toBeNull();
+    });
+  });
+
+  describe("direction_rejected (T10 review round 2, P0-D)", () => {
+    it("corrects the earlier promise once the provider says it cannot apply", () => {
+      const withDirection = turnReducer(streamStarted(send()), {
+        type: "direction_accepted",
+        note: "Focus on smaller agencies.",
+        application: "next_step",
+      });
+      const state = turnReducer(withDirection, {
+        type: "event",
+        event: {
+          type: "direction_rejected",
+          note: "Focus on smaller agencies.",
+          reason:
+            "This direction cannot be applied to the research already running.",
+        },
+      });
+      expect(state.direction).toMatchObject({
+        applied: false,
+        rejectedReason:
+          "This direction cannot be applied to the research already running.",
+      });
+    });
+
+    it("does nothing when no direction was ever accepted", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "direction_rejected",
+          note: "unseen",
+          reason: "unseen",
+        },
+      });
+      expect(state.direction).toBeNull();
+    });
+  });
 });

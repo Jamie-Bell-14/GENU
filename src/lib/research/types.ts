@@ -42,11 +42,13 @@ export interface ResearchVisualisation {
 
 export interface ResearchFinding {
   /**
-   * Stable key into the closed, application-owned finding catalogue
-   * (`src/lib/research/findings.ts`). Carried to the client and back so
-   * "Add as evidence", in a later turn, can ask the server to write the exact
-   * same finding it was shown — the server re-derives every provenance field
-   * from this id rather than trusting anything else the client sends back.
+   * The durable receipt id this finding was recorded under
+   * (`research_findings`, T10 review round 1, P0-1) — overwritten onto this
+   * shape once persisted, replacing whatever id the provider itself used.
+   * Carried to the client and back so "Add as evidence", in a later turn,
+   * can name the exact receipt to resolve; the server re-reads every
+   * provenance field from that row rather than trusting anything else the
+   * client sends back.
    */
   id: string;
   title: string;

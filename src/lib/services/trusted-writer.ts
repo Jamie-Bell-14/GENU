@@ -161,6 +161,12 @@ export async function completeTurnRecord(input: {
   assistantText: string;
   fields: unknown[];
   assumptions: unknown[];
+  /**
+   * "Add as evidence" proposals, staged like any other write (T10 review
+   * round 2, P0-B) — each names a receipt, never a target: the target is
+   * the receipt's own stored focal object.
+   */
+  evidence: unknown[];
 }): Promise<CompleteTurnRecord> {
   const client = trustedClient();
   if (!client) {
@@ -174,6 +180,7 @@ export async function completeTurnRecord(input: {
     p_assistant_text: input.assistantText,
     p_fields: input.fields,
     p_assumptions: input.assumptions,
+    p_evidence: input.evidence,
   });
   if (error) {
     console.error("complete_turn failed", { code: error.code });
@@ -401,6 +408,12 @@ export interface AuditInput {
  * can later prove a project genuinely produced a given result rather than
  * trusting a client's say-so.
  *
+ * Also carries the object the pass actually concerned, and the unavailable
+ * sources and applied steering that were part of what the user saw
+ * (T10 review round 2, P0-A) — so a later "Add as evidence" links to what
+ * was researched, never a freshly recomputed default, and that part of the
+ * displayed result is not lost once session state holding it is gone.
+ *
  * Returns the receipt id "Add as evidence" resolves in a later turn, or
  * `null` if it could not be recorded — the caller treats that as the research
  * pass itself having failed, rather than showing a finding nothing can later
@@ -409,6 +422,9 @@ export interface AuditInput {
 export async function recordResearchFinding(input: {
   projectId: string;
   turnId: string;
+  focalObjectId: string | null;
+  unavailableSources: unknown[];
+  appliedDirections: string[];
   finding: {
     title: string;
     keyFinding: string;
@@ -432,6 +448,9 @@ export async function recordResearchFinding(input: {
     .insert({
       project_id: input.projectId,
       turn_id: input.turnId,
+      focal_object_id: input.focalObjectId,
+      unavailable_sources: input.unavailableSources,
+      applied_directions: input.appliedDirections,
       title: input.finding.title,
       key_finding: input.finding.keyFinding,
       why_it_matters: input.finding.whyItMatters,
@@ -450,48 +469,6 @@ export async function recordResearchFinding(input: {
     return null;
   }
   return data.id as string;
-}
-
-export type AddEvidenceLinkOutcome =
-  | "linked"
-  | "already_linked"
-  | "no_active_research"
-  | "no_focal_object"
-  | "not_running"
-  | "unavailable";
-
-/**
- * Adds evidence and links it, atomically (T10 review round 1, P0-2, P0-3):
- * one transactional function creates or reuses the evidence row from its
- * `research_findings` receipt and writes the `project_relationships` link,
- * rather than two separate, individually-failable writes.
- */
-export async function linkEvidence(input: {
-  projectId: string;
-  turnId: string;
-  actorId: string;
-  receiptId: string;
-  objectId: string;
-  consequenceSummary: string;
-}): Promise<AddEvidenceLinkOutcome> {
-  const client = trustedClient();
-  if (!client) {
-    reportUnavailable("add_evidence_link");
-    return "unavailable";
-  }
-  const { data, error } = await client.rpc("add_evidence_link", {
-    p_project_id: input.projectId,
-    p_turn_id: input.turnId,
-    p_actor_id: input.actorId,
-    p_receipt_id: input.receiptId,
-    p_object_id: input.objectId,
-    p_consequence_summary: input.consequenceSummary,
-  });
-  if (error) {
-    console.error("add_evidence_link failed", { code: error.code });
-    return "unavailable";
-  }
-  return data as AddEvidenceLinkOutcome;
 }
 
 export async function recordAudit(input: AuditInput): Promise<void> {

@@ -120,15 +120,12 @@ export async function POST(request: NextRequest) {
         onDirectionApplied: (note) => emit({ type: "direction_applied", note }),
         turnId,
         researchProvider: new MockResearchProvider(devChunkDelayMs()),
-        focalObjectId,
-        activeFindingId: parsed.data.activeFindingId ?? null,
         // This route persists nothing (see the module doc above): a receipt
-        // id is fabricated in memory rather than durably recorded, and
-        // linking is simulated as always succeeding, the same no-op pattern
-        // `onSceneAccepted` already uses.
+        // id is fabricated in memory rather than durably recorded, the same
+        // no-op pattern `onSceneAccepted` already uses. "Add as evidence" is
+        // staged like any other write here too, and this route never commits
+        // anything, so there is nothing further to simulate for it.
         recordResearchFinding: async () => crypto.randomUUID(),
-        linkEvidence: async () => "linked",
-        publishProjectModel: async () => {},
       });
 
       try {

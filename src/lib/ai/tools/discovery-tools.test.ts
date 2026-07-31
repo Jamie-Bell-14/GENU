@@ -336,14 +336,32 @@ describe("provider tool definitions", () => {
       ).toMatchObject({ ok: false });
     });
 
-    it("accepts a bounded consequence summary and rejects an empty one", () => {
+    it("accepts a bounded consequence summary with a direction, and rejects an empty summary", () => {
       expect(
         validateToolInput("add_evidence", {
           consequenceSummary: "It supports X but not Y.",
+          direction: "supports",
         }),
       ).toMatchObject({ ok: true });
       expect(
-        validateToolInput("add_evidence", { consequenceSummary: "" }),
+        validateToolInput("add_evidence", {
+          consequenceSummary: "",
+          direction: "supports",
+        }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("requires a direction from the closed vocabulary, never a free-form guess", () => {
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "It supports X.",
+        }),
+      ).toMatchObject({ ok: false });
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "It supports X.",
+          direction: "probably",
+        }),
       ).toMatchObject({ ok: false });
     });
 
@@ -353,6 +371,7 @@ describe("provider tool definitions", () => {
       expect(
         validateToolInput("add_evidence", {
           consequenceSummary: "It supports X.",
+          direction: "supports",
           objectId: "aaaaaaaa-0000-4000-8000-000000000001",
         }),
       ).toMatchObject({ ok: false });

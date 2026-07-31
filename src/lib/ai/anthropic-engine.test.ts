@@ -106,7 +106,6 @@ function harness(overrides: Partial<TurnHooks> = {}) {
     takeDirection: async () => null,
     directionApplied: (note) => applied.push(note),
     runResearch: async () => ({ ok: true, findingTitle: "Test finding" }),
-    addEvidence: async () => ({ ok: true, linked: true }),
     ...overrides,
   };
   return { events, steps, scenes, applied, hooks };
@@ -1113,7 +1112,6 @@ describe("a direction is applied only when the model receives it", () => {
           return "Focus on smaller agencies.";
         },
         runResearch: async () => ({ ok: true, findingTitle: "Test finding" }),
-        addEvidence: async () => ({ ok: true, linked: true }),
       };
       /*
         Schema-valid but large: `propose_connected_change` allows up to 12

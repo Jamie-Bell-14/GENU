@@ -18,7 +18,6 @@ import {
   closeTurnRun,
   completeTurnRecord,
   startTurn,
-  linkEvidence,
   recordActivity,
   recordAudit,
   recordResearchFinding,
@@ -329,11 +328,10 @@ export async function POST(
         /*
           What the canvas is told the project now holds — re-read from the
           application's own tables after a write landed, never from anything
-          the model described. Shared between `finishTurn` (after the turn's
-          own commit) and evidence-linking (T10 review round 1, P0-2): a
-          successful "Add as evidence" is its own independently-true,
-          immediately-committed change and refreshes the canvas the moment it
-          commits, not only if the turn later succeeds too.
+          the model described. Used by `finishTurn` after the turn's own
+          commit, whenever that commit actually changed something — including
+          "Add as evidence", which is staged into that same commit like any
+          other project-truth write (T10 review round 2, P0-B).
         */
         const publishProjectModel = async () => {
           const [objects, relationships] = await Promise.all([
@@ -353,20 +351,20 @@ export async function POST(
           reporter,
           turnId,
           researchProvider: new MockResearchProvider(),
-          focalObjectId: turnScope.focalObjectId,
-          activeFindingId: parsed.data.activeFindingId ?? null,
-          recordResearchFinding: (finding) =>
-            recordResearchFinding({ projectId, turnId, finding }),
-          linkEvidence: ({ receiptId, objectId, consequenceSummary }) =>
-            linkEvidence({
+          recordResearchFinding: ({
+            finding,
+            focalObjectId,
+            unavailableSources,
+            appliedDirections,
+          }) =>
+            recordResearchFinding({
               projectId,
               turnId,
-              actorId: user.id,
-              receiptId,
-              objectId,
-              consequenceSummary,
+              finding,
+              focalObjectId,
+              unavailableSources,
+              appliedDirections,
             }),
-          publishProjectModel,
           onSceneAccepted: (scene) =>
             audit("scene_recommended", {
               target: scene.renderer,
@@ -495,6 +493,7 @@ export async function POST(
                       // is checked against text the provider cannot have
                       // rewritten.
                       userMessage: parsed.data.message,
+                      activeFindingId: parsed.data.activeFindingId ?? null,
                     },
                     result.operations,
                     assistantText,

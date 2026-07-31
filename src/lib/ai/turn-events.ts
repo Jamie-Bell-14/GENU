@@ -146,6 +146,23 @@ export type TurnEvent =
   | { type: "research_failed_source"; source: ResearchSource; reason: string }
   | { type: "research_finding"; finding: ResearchFinding }
   /**
+   * A research pass has begun (T10 review round 2, P0-D). Marks the point at
+   * which whatever the previous pass left behind — its finding, its
+   * unavailable sources — stops being current: a second pass that itself
+   * produces nothing (all sources unavailable, stopped) must not leave a
+   * stale receipt from an earlier pass still answerable to "Add as
+   * evidence".
+   */
+  | { type: "research_started" }
+  /**
+   * A direction the direction endpoint already told the user would be
+   * applied could not actually be honoured by the research in progress
+   * (T10 review round 2, P0-D) — the provider's own answer, not a guess.
+   * Distinct from silence: the promise made when the direction was accepted
+   * has to be corrected, not merely left unconfirmed forever.
+   */
+  | { type: "direction_rejected"; note: string; reason: string }
+  /**
    * The project model after a turn's accepted writes, re-read by the
    * application from its own tables.
    *
@@ -195,6 +212,8 @@ export type EngineEvent = Exclude<
   | { type: "research_source" }
   | { type: "research_failed_source" }
   | { type: "research_finding" }
+  | { type: "research_started" }
+  | { type: "direction_rejected" }
 >;
 
 export interface Message {
@@ -301,6 +320,13 @@ export interface TurnState {
     note: string;
     application: DirectionApplication;
     applied: boolean;
+    /**
+     * Set when the research provider itself said this direction could not
+     * be applied to the pass in progress (T10 review round 2, P0-D) — takes
+     * priority over the generic promise text once present, because that
+     * promise did not hold.
+     */
+    rejectedReason?: string;
   } | null;
   error: SafeError | null;
   /**
@@ -667,6 +693,17 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             },
           };
 
+        case "research_started":
+          /*
+            A new pass supersedes the last one, immediately (T10 review
+            round 2, P0-D) — not only once it produces its own finding. A
+            pass that produces nothing (all sources unavailable, stopped)
+            must not leave an earlier pass's finding answerable to "Add as
+            evidence", and its unavailable-source list belongs to *that*
+            pass, not this one.
+          */
+          return { ...state, activeResearch: null, unavailableSources: [] };
+
         case "research_source":
           // Reported to the activity/history surfaces only.
           return state;
@@ -689,6 +726,18 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             here would either duplicate or drop nothing, so it is left as is.
           */
           return { ...state, activeResearch: action.event.finding };
+
+        case "direction_rejected":
+          return state.direction
+            ? {
+                ...state,
+                direction: {
+                  ...state.direction,
+                  applied: false,
+                  rejectedReason: action.event.reason,
+                },
+              }
+            : state;
 
         case "project_model_updated":
           /*

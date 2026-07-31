@@ -19,12 +19,14 @@
   queryable through the same canonical graph `loadProjectRelationships`
   already reads, and T11 can follow it like any other relationship.
 
-  Evidence is written only through the elevated `add_evidence_link` function
-  (`20260801100000_add_evidence_link.sql`), atomically with its relationship
-  row — T10 review round 1 (P0-2). `authenticated` therefore has no insert
-  grant here at all; the only way an `evidence` row can exist is through that
-  one transactional path, which is also what makes "evidence row and its
-  link are all-or-none" true rather than conventional.
+  Evidence is written only through `complete_turn`
+  (`20260801100000_complete_turn_evidence.sql`), atomically with its
+  relationship row and the turn's own answer and terminal state — T10
+  review round 1 (P0-2), folded into `complete_turn` itself in review round
+  2 (P0-B) so a committed add is exactly as durable and recoverable as any
+  other staged write. `authenticated` therefore has no insert grant here at
+  all; the only way an `evidence` row can exist is through that one
+  transactional path.
 */
 
 create type public.evidence_kind as enum (
@@ -79,7 +81,7 @@ create policy evidence_select on public.evidence
   for select to authenticated using (private.is_project_owner(project_id));
 /*
   No insert, update or delete policy, and no grant beyond select. Every
-  evidence row is created by `add_evidence_link` (security definer), which
+  evidence row is created by `complete_turn` (security definer), which
   authorises its own caller — see that migration's header. A direct-insert
   grant here would just be a second, unauthorised write path alongside it.
 */
@@ -87,7 +89,7 @@ create policy evidence_select on public.evidence
 grant select on public.evidence to authenticated;
 
 comment on table public.evidence is
-  'Research findings a user has added to their project. is_demo is mandatory so mocked findings can never be mistaken for real ones. Written only by add_evidence_link(), atomically with its project_relationships link.';
+  'Research findings a user has added to their project. is_demo is mandatory so mocked findings can never be mistaken for real ones. Written only by complete_turn(), atomically with its project_relationships link and the turn''s own answer.';
 
 -- Registers evidence in the stable identity registry, exactly like
 -- project_fields and assumptions (20260728150000_project_objects_relationships.sql).

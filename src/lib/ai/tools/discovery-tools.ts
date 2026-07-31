@@ -256,20 +256,32 @@ export type StartResearch = z.infer<typeof StartResearchSchema>;
 /**
  * Records a research finding as evidence (T10, VERTICAL_SLICE_SPEC Step 6).
  *
- * The model supplies only the honest, bounded consequence text — what this
- * specific finding does and does not support. It never supplies *which*
- * finding or *which* object: those come from the host's own turn context (the
- * research the turn just ran, and the object that research was launched
- * from), so a call here cannot attach fabricated provenance to an arbitrary
+ * The model supplies the honest, bounded consequence text — what this
+ * specific finding does and does not support — and, separately, `direction`:
+ * a closed judgement of whether the finding genuinely supports, contradicts,
+ * or does not clearly bear on whatever object is currently in focus.
+ * `direction` is never inferred by application code from the mere fact that
+ * evidence is being linked (T10 review round 2, P0-C) — it must reflect a
+ * real comparison between the finding and the target's own stated content,
+ * and `unclear` is always the honest answer when that comparison cannot be
+ * made confidently. Getting this wrong the model's own way is a normal
+ * reasoning error the person can see and correct; a database that asserted
+ * "supports" unconditionally would be silently wrong on principle every time
+ * the true relationship happened to be otherwise.
+ *
+ * The model never supplies *which* finding or *which* object: those come
+ * from the receipt this turn is looking at and that receipt's own recorded
+ * target, so a call here cannot attach fabricated provenance to an arbitrary
  * object the model names.
  *
- * Bounded to 500, matching `project_relationships.note`'s own check
- * constraint — the consequence summary is stored there, not in a bespoke
- * column, so the two limits have to agree.
+ * `consequenceSummary` is bounded to 500, matching
+ * `project_relationships.note`'s own check constraint — it is stored there,
+ * not in a bespoke column, so the two limits have to agree.
  */
 export const AddEvidenceSchema = z
   .object({
     consequenceSummary: safeText(500),
+    direction: z.enum(["supports", "contradicts", "unclear"]),
   })
   .strict();
 
@@ -537,17 +549,23 @@ export const DISCOVERY_TOOLS = [
   {
     name: "add_evidence",
     description:
-      "Add the research finding this turn just produced as evidence, linked to the object research was launched from. Only call this once a finding exists and the person has asked to keep it. State plainly what the finding supports and — just as plainly — what it does not support; never claim more than the evidence shows.",
+      "Add the research finding this turn just produced as evidence, linked to the object research was launched from. Only call this once a finding exists and the person has asked to keep it. State plainly what the finding supports and — just as plainly — what it does not support; never claim more than the evidence shows. Set direction from a real comparison between the finding and the target's own stated content — use unclear rather than guess when that comparison is not confident.",
     strict: true,
     input_schema: {
       type: "object",
       additionalProperties: false,
-      required: ["consequenceSummary"],
+      required: ["consequenceSummary", "direction"],
       properties: {
         consequenceSummary: {
           type: "string",
           description:
             "One or two honest sentences: what this specific finding supports, and what it does not.",
+        },
+        direction: {
+          type: "string",
+          enum: ["supports", "contradicts", "unclear"],
+          description:
+            "Whether this finding genuinely supports, contradicts, or does not clearly bear on the object currently in focus. Never a default — judge it from the finding and the object's own text.",
         },
       },
     },

@@ -110,29 +110,11 @@ export interface TurnHooks {
     task: ResearchTask,
     signal?: AbortSignal,
   ): Promise<ResearchOutcome>;
-  /**
-   * Records the turn's own research finding as evidence, linked to the
-   * turn's focal object (VERTICAL_SLICE_SPEC Step 6). Which finding and which
-   * object are the host's to decide — from what this turn's research
-   * actually produced and from the project's own reading of what is in focus
-   * — never from anything the model names, so a call here cannot attach
-   * fabricated provenance to an arbitrary object.
-   */
-  addEvidence(input: {
-    consequenceSummary: string;
-  }): Promise<AddEvidenceOutcome>;
 }
 
 export type ResearchOutcome =
   | { ok: true; findingTitle: string }
   | { ok: false; reason: "stopped" | "unavailable" };
-
-export type AddEvidenceOutcome =
-  | { ok: true; linked: boolean }
-  | {
-      ok: false;
-      reason: "no_active_research" | "no_focal_object" | "failed";
-    };
 
 export type DirectionApplicationMode = "applies_now" | "next_step" | "restart";
 
@@ -356,7 +338,18 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     return { assistantText: text, operations: [] };
   }
 
-  /** "Add as evidence" (VERTICAL_SLICE_SPEC Step 6). */
+  /**
+   * "Add as evidence" (VERTICAL_SLICE_SPEC Step 6).
+   *
+   * Staged like any other project-truth write (T10 review round 2, P0-B):
+   * whether it actually links is decided when the turn completes, not here,
+   * so the reply speaks in the same present-progressive terms as any other
+   * staged proposal rather than claiming a result this engine cannot yet
+   * know. This engine cannot itself judge whether the scripted finding
+   * supports or contradicts an arbitrary, unknown target object, so it
+   * honestly proposes `unclear` rather than guess — the live engine, which
+   * can read the target's own text, judges this for real.
+   */
   private async runAddEvidenceTurn(
     input: TurnInput,
     hooks: TurnHooks,
@@ -365,31 +358,21 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
   ): Promise<TurnResult> {
     if (signal?.aborted) return interrupted();
 
-    const outcome = await hooks.addEvidence({
-      consequenceSummary:
-        "It supports that deposit disputes occur at meaningfully different rates across agency sizes in the scripted scenario. It does not establish anything about a real agency's own dispute rate, and the two demonstration sources disagree on the overall figure.",
-    });
-    if (signal?.aborted) return interrupted();
-
-    const text = ((): string => {
-      if (outcome.ok) {
-        return outcome.linked
-          ? "I added the evidence. It supports that deposit disputes occur at meaningfully different rates across agency sizes in the scripted scenario — it does not establish anything about a real agency's own rate, and the two demonstration sources disagree on the overall figure."
-          : "That finding is already linked as evidence here, so I have not added it a second time.";
-      }
-      switch (outcome.reason) {
-        case "no_active_research":
-          return "There is no research finding to add right now — run research first.";
-        case "no_focal_object":
-          return "There is no object currently in focus to link evidence to.";
-        case "failed":
-          return "The evidence could not be saved just now. Nothing was added.";
-      }
-    })();
+    const consequenceSummary =
+      "It supports that deposit disputes occur at meaningfully different rates across agency sizes in the scripted scenario. It does not establish anything about a real agency's own dispute rate, and the two demonstration sources disagree on the overall figure.";
+    const text = `Adding this as evidence — it will show on the canvas once this finishes. ${consequenceSummary}`;
 
     hooks.emit({ type: "block", kind: "plain" });
     if (!(await this.stream(text, hooks, signal))) return interrupted();
-    return { assistantText: text, operations: [] };
+    return {
+      assistantText: text,
+      operations: [
+        {
+          name: "add_evidence",
+          candidate: { consequenceSummary, direction: "unclear" },
+        },
+      ],
+    };
   }
 
   /** Streams text, returning false if the turn was stopped part-way. */

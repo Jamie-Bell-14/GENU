@@ -1,5 +1,6 @@
 import type { StagedOperation } from "@/lib/ai/discovery-engine";
 import {
+  AddEvidenceSchema,
   RecordAssumptionSchema,
   UpdateProjectModelSchema,
   ProposeConnectedChangeSchema,
@@ -73,6 +74,16 @@ export interface OperationContext {
    * transit through the provider.
    */
   userMessage: string;
+  /**
+   * The research receipt this turn's client says it is looking at, if any
+   * (T10 review round 1, P0-1) — an opaque reference into
+   * `research_findings`, never trusted content: `complete_turn` re-reads the
+   * actual result, and the object it was researched from, from that table by
+   * this id. The model never supplies this; it names only the consequence
+   * text (docs/AI_SYSTEM.md §10). Absent for any turn that never mentioned
+   * one, which is most of them.
+   */
+  activeFindingId?: string | null;
 }
 
 /**
@@ -84,6 +95,7 @@ export type TurnCommitter = (input: {
   assistantText: string;
   fields: unknown[];
   assumptions: unknown[];
+  evidence: unknown[];
 }) => Promise<CompleteTurnRecord>;
 
 function normalise(value: string): string {
@@ -152,10 +164,26 @@ interface AssumptionRow {
   source_excerpt: string | null;
 }
 
+/**
+ * A staged "Add as evidence" proposal (T10 review round 2, P0-B). Names a
+ * receipt and a direction, never a target — the target is the receipt's own
+ * recorded focal object, resolved inside `complete_turn` itself.
+ */
+interface EvidenceRow {
+  slot: number;
+  receipt_id: string;
+  consequence_summary: string;
+  direction: "supports" | "contradicts" | "unclear";
+}
+
 /** Refusal codes the database reports, in words a person can act on. */
 const REFUSAL_MESSAGES: Record<string, string> = {
   user_owned_field:
     "A field the person stated themselves cannot be replaced automatically.",
+  no_active_research: "There was no research finding this could be added from.",
+  no_focal_object:
+    "The research this came from was not run against any object.",
+  already_linked: "This finding was already added as evidence.",
 };
 
 /**
@@ -176,6 +204,7 @@ export async function commitTurn(
   const outcomes: OperationOutcome[] = [];
   const fields: FieldRow[] = [];
   const assumptions: AssumptionRow[] = [];
+  const evidence: EvidenceRow[] = [];
   /** Which outcome slots the transaction decides, so it can rewrite them. */
   const writeSlots: number[] = [];
 
@@ -262,6 +291,37 @@ export async function commitTurn(
         break;
       }
 
+      case "add_evidence": {
+        /*
+          Staged like any other write (T10 review round 2, P0-B): whether it
+          actually links is decided when the turn completes, so a Stop or a
+          lost connection afterwards never leaves an evidence row real while
+          the turn's own failure message claims nothing changed — there is no
+          separate "it already happened" fact to contradict, because nothing
+          has happened here yet.
+        */
+        const parsed = AddEvidenceSchema.safeParse(operation.candidate);
+        if (!parsed.success) {
+          outcomes.push(reject(tool, parsed.error.issues[0].message));
+          break;
+        }
+        if (!context.activeFindingId) {
+          // No receipt to resolve at all — nothing for `complete_turn` to
+          // look up, so this is refused here rather than sent to it.
+          outcomes.push(reject(tool, "no_active_research"));
+          break;
+        }
+        evidence.push({
+          slot,
+          receipt_id: context.activeFindingId,
+          consequence_summary: parsed.data.consequenceSummary,
+          direction: parsed.data.direction,
+        });
+        writeSlots.push(slot);
+        outcomes.push({ applied: true, kind: tool, count: 1 });
+        break;
+      }
+
       case "suggest_actions":
       case "recommend_canvas_scene":
         /*
@@ -280,7 +340,7 @@ export async function commitTurn(
     state are part of this transaction too, so there is no path on which a turn
     ends without one.
   */
-  const record = await commit({ assistantText, fields, assumptions });
+  const record = await commit({ assistantText, fields, assumptions, evidence });
 
   if (record.outcome !== "completed") {
     /*

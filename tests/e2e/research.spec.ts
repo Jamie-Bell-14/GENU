@@ -114,7 +114,7 @@ test("Step 5 edge case: an unavailable source is reported, not hidden", async ({
   ).toBeVisible();
 });
 
-test("Step 6: adding evidence links it and states an honest consequence", async ({
+test("Step 6: adding evidence proposes an honest consequence, staged rather than claimed", async ({
   page,
 }) => {
   await send(page, "Research this");
@@ -124,17 +124,23 @@ test("Step 6: adding evidence links it and states an honest consequence", async 
   await page.getByRole("button", { name: "Send" }).click();
 
   const conversation = page.getByRole("region", { name: "Conversation" });
-  await expect(conversation.getByText(/I added the evidence/i)).toBeVisible();
+  // Present-progressive, not a past-tense claim this turn cannot yet back —
+  // whether it actually links is decided when the turn completes, the same
+  // as any other staged project-truth write (T10 review round 2, P0-B).
+  await expect(conversation.getByText(/^I added the evidence/i)).toHaveCount(0);
+  await expect(
+    conversation.getByText(/Adding this as evidence/i),
+  ).toBeVisible();
   // Honest about what it does not support, not only what it does.
   await expect(conversation.getByText(/does not establish/i)).toBeVisible();
 });
 
 /*
-  Idempotency for "add as evidence twice" is a database property (the
-  `add_evidence_link` RPC's own conflict handling on `evidence` and
-  `project_relationships`) and is proved directly against Postgres in
+  Idempotency for "add as evidence twice" and the relationship/assumption
+  semantics `direction` drives are database properties (`complete_turn`'s own
+  staged-evidence handling) and are proved directly against Postgres in
   supabase/tests/evidence-rls.test.ts. This dev route persists nothing at all
-  (see its module doc), so it cannot honestly simulate a second call finding
-  an existing row — it always reports "linked", which would make an e2e
-  assertion here test the dev harness rather than the product.
+  (see its module doc) and never commits a staged operation, so it cannot
+  honestly simulate any of that — doing so here would test the dev harness
+  rather than the product.
 */

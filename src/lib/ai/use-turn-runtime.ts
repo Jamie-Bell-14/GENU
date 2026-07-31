@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { TurnStatus } from "@/lib/services/turn-snapshot";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
+import { resolveActions } from "./contextual-actions";
 import {
   turnReducer,
   INITIAL_TURN_STATE,
@@ -89,15 +91,31 @@ export function useTurnRuntime({
   projectId,
   initialMessages = [],
   initialActivity = [],
+  initialResearch = null,
 }: Readonly<{
   projectId: string;
   initialMessages?: Message[];
   initialActivity?: ActivityLine[];
+  /**
+   * A research receipt still current as of the last reload (T10 review
+   * round 2, P0-A) — seeded once, the same way `initialMessages` is,
+   * rather than through a dispatched action: this is what a fresh mount
+   * already knows, not an event that happened during this session.
+   */
+  initialResearch?: {
+    finding: ResearchFinding;
+    unavailableSources: { source: ResearchSource; reason: string }[];
+  } | null;
 }>): TurnRuntime {
   const [state, dispatch] = useReducer(turnReducer, {
     ...INITIAL_TURN_STATE,
     messages: initialMessages,
     activityLog: initialActivity,
+    activeResearch: initialResearch?.finding ?? null,
+    unavailableSources: initialResearch?.unavailableSources ?? [],
+    // The action a hydrated receipt actually enables — the only contextual
+    // action a fresh mount can honestly offer without a turn having run.
+    actions: initialResearch ? resolveActions(["add_as_evidence"]) : [],
   });
   const [draft, setDraft] = useState("");
   const [directionPending, setDirectionPending] = useState(false);

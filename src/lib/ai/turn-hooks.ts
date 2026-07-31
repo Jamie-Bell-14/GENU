@@ -9,14 +9,11 @@ import type {
   ResearchFinding,
   ResearchHandle,
   ResearchProvider,
+  ResearchSource,
   ResearchTask,
 } from "@/lib/research/types";
 import type { ActivityReporter } from "./activity-reporter";
-import type {
-  AddEvidenceOutcome,
-  ResearchOutcome,
-  TurnHooks,
-} from "./discovery-engine";
+import type { ResearchOutcome, TurnHooks } from "./discovery-engine";
 import type { TurnEvent } from "./turn-events";
 
 /**
@@ -45,52 +42,21 @@ export interface TurnPorts {
   /** The slice's one research provider (T10), supplied so a host can choose it. */
   researchProvider: ResearchProvider;
   /**
-   * The object "Add as evidence" links to, and the object a research scene
-   * recommendation focuses on. Read from the application's own project scope,
-   * never from anything the model names (docs/AI_SYSTEM.md §10).
-   */
-  focalObjectId: string | null;
-  /**
-   * The research receipt id this turn's client says it is looking at, if any
-   * (T10 review round 1, P0-1) — an opaque reference into `research_findings`,
-   * never trusted content: `linkEvidence` re-reads the actual result from that
-   * table by this id, inside its own transaction, rather than accepting
-   * anything else the client supplies about it.
-   */
-  activeFindingId: string | null;
-  /**
    * Persists the exact result a research pass produced, before it is shown —
    * so a finding the client can see always has a receipt "Add as evidence"
-   * can later resolve (T10 review round 1, P0-1). Returns the receipt id, or
-   * `null` if it could not be recorded.
+   * can later resolve (T10 review round 1, P0-1). Carries the object research
+   * was actually run against, and the unavailable sources and applied
+   * steering that were part of the displayed result (T10 review round 2,
+   * P0-A) — the receipt is the *only* record of what was researched and how
+   * once the session that ran it is gone. Returns the receipt id, or `null`
+   * if it could not be recorded.
    */
-  recordResearchFinding(finding: ResearchFinding): Promise<string | null>;
-  /**
-   * Creates (or reuses) the evidence row for a receipt and links it to an
-   * object, atomically (T10 review round 1, P0-2, P0-3) — the only DB-touching
-   * step in the evidence flow, so it is a port like `onSceneAccepted` rather
-   * than logic living in this file.
-   */
-  linkEvidence(input: {
-    receiptId: string;
-    objectId: string;
-    consequenceSummary: string;
-  }): Promise<
-    | "linked"
-    | "already_linked"
-    | "no_active_research"
-    | "no_focal_object"
-    | "not_running"
-    | "unavailable"
-  >;
-  /**
-   * Re-reads project truth and tells the canvas, exactly like
-   * `finishTurn`'s own `publishProjectModel` — called directly here because a
-   * successful evidence link is its own immediately-committed, independently
-   * true change, not something waiting on the turn's own completion (T10
-   * review round 1, P0-2).
-   */
-  publishProjectModel(): Promise<void>;
+  recordResearchFinding(input: {
+    finding: ResearchFinding;
+    focalObjectId: string | null;
+    unavailableSources: { source: ResearchSource; reason: string }[];
+    appliedDirections: string[];
+  }): Promise<string | null>;
 }
 
 /**
@@ -142,36 +108,6 @@ export function createTurnHooks(ports: TurnPorts): TurnHooks {
     directionApplied: ports.onDirectionApplied,
 
     runResearch: (task, signal) => runResearch(ports, task, signal),
-
-    async addEvidence({ consequenceSummary }): Promise<AddEvidenceOutcome> {
-      if (!ports.activeFindingId) {
-        return { ok: false, reason: "no_active_research" };
-      }
-      if (!ports.focalObjectId) {
-        return { ok: false, reason: "no_focal_object" };
-      }
-      const outcome = await ports.linkEvidence({
-        receiptId: ports.activeFindingId,
-        objectId: ports.focalObjectId,
-        consequenceSummary,
-      });
-      switch (outcome) {
-        case "linked":
-          // Independently true the moment it committed — the canvas is told
-          // now, not deferred to the turn's own (possibly later-failing) end.
-          await ports.publishProjectModel();
-          return { ok: true, linked: true };
-        case "already_linked":
-          return { ok: true, linked: false };
-        case "no_active_research":
-          return { ok: false, reason: "no_active_research" };
-        case "no_focal_object":
-          return { ok: false, reason: "no_focal_object" };
-        case "not_running":
-        case "unavailable":
-          return { ok: false, reason: "failed" };
-      }
-    },
   };
 }
 
@@ -197,6 +133,20 @@ function runResearch(
     let lastFindingTitle = "";
     let findingReceipt: Promise<string | null> | null = null;
     let settled = false;
+    /*
+      This pass's own record of what it actually did (T10 review round 2,
+      P0-A) — carried into the receipt so a source that failed, or a
+      direction that genuinely took effect, is not only ever a fact of this
+      session's transient state.
+    */
+    const unavailableSources: { source: ResearchSource; reason: string }[] = [];
+    const appliedDirections: string[] = [];
+    /*
+      A direction the provider said `applies_next_step` for: not yet
+      genuinely in effect, so not yet announced — only the *next* step
+      boundary can honestly say it took hold (T10 review round 2, P0-D).
+    */
+    let pendingNextStepNote: string | null = null;
 
     const settle = (outcome: ResearchOutcome) => {
       if (settled) return;
@@ -231,19 +181,46 @@ function runResearch(
       switch (event.type) {
         case "step":
           void ports.reporter.step(event.step, async () => {
+            /*
+              A direction deferred at the previous step boundary is honestly
+              in effect now, at the next one — this is the one place that
+              promise can be kept.
+            */
+            if (pendingNextStepNote) {
+              const note = pendingNextStepNote;
+              pendingNextStepNote = null;
+              appliedDirections.push(note);
+              ports.onDirectionApplied(note);
+            }
             if (handle) {
               const note = await ports.takeDirection({ final: false });
               if (note) {
                 const outcome = ports.researchProvider.steer(handle, note);
-                /*
-                  `direction_applied` is only ever true when the provider's
-                  own answer says the direction is genuinely in effect —
-                  `requires_restart` means the provider did nothing with it,
-                  and announcing "applied" regardless would tell the user a
-                  direction changed the run when it did not.
-                */
-                if (outcome !== "requires_restart") {
-                  ports.onDirectionApplied(note);
+                switch (outcome) {
+                  case "applied_now":
+                    // Genuinely in effect now — the only case this is true.
+                    appliedDirections.push(note);
+                    ports.onDirectionApplied(note);
+                    break;
+                  case "applies_next_step":
+                    // Not yet true: announced at the next step boundary above.
+                    pendingNextStepNote = note;
+                    break;
+                  case "requires_restart":
+                    /*
+                      The direction endpoint already told the user this would
+                      be applied — silence here would leave that promise
+                      standing unfulfilled forever. The provider's own answer
+                      says it did nothing with this text, so that is what is
+                      said back (T10 review round 2, P0-D).
+                    */
+                    ports.emit({
+                      type: "direction_rejected",
+                      note,
+                      reason:
+                        "This direction cannot be applied to the research already running. Send it again to start a new research pass with it.",
+                    });
+                    break;
                 }
               }
             }
@@ -254,6 +231,10 @@ function runResearch(
           ports.emit({ type: "research_source", source: event.source });
           break;
         case "failed_source":
+          unavailableSources.push({
+            source: event.source,
+            reason: event.reason,
+          });
           ports.emit({
             type: "research_failed_source",
             source: event.source,
@@ -272,7 +253,12 @@ function runResearch(
             anything durable actually backs it.
           */
           findingReceipt = ports
-            .recordResearchFinding(event.finding)
+            .recordResearchFinding({
+              finding: event.finding,
+              focalObjectId: task.focalObjectId,
+              unavailableSources,
+              appliedDirections,
+            })
             .then((receiptId) => {
               if (receiptId) {
                 ports.emit({
@@ -303,6 +289,12 @@ function runResearch(
       settle({ ok: false, reason: "stopped" });
       return;
     }
+
+    // A new pass supersedes whatever the last one left behind (T10 review
+    // round 2, P0-D) — before anything else, so nothing stale from an
+    // earlier pass survives into this one even if this pass never produces
+    // a finding of its own.
+    ports.emit({ type: "research_started" });
 
     handle = ports.researchProvider.start(task, onEvent);
     if (signal?.aborted) onAbort();

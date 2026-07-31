@@ -145,28 +145,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         errorCode,
       });
 
-    /*
-      Evidence-linking is not staged (see its own module doc in
-      `turn-hooks.ts`): it commits immediately, atomically, independent of
-      this turn's own outcome. So a failure reached *after* it succeeded must
-      not repeat the generic "nothing in your project was changed" claim —
-      that would be false, and specifically the false claim T10 review round
-      1 (P0-2) flagged. `fail` is the one place every failure path passes
-      through, so the correction lives here rather than in each message.
-    */
-    let evidenceLinked = false;
-
     const fail = (error: SafeError): TurnResult => {
-      hooks.emit({
-        type: "turn_failed",
-        turnId: input.turnId,
-        error: evidenceLinked
-          ? {
-              ...error,
-              userMessage: `${error.userMessage} The evidence you asked to add earlier in this turn has already been saved.`,
-            }
-          : error,
-      });
+      hooks.emit({ type: "turn_failed", turnId: input.turnId, error });
       report("failed", error.code);
       // No operations: staged work is discarded with the turn.
       return { assistantText: "", operations: [] };
@@ -604,20 +584,6 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             : outcome.reason === "stopped"
               ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
               : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added.";
-        } else if (validation.tool === "add_evidence") {
-          const outcome = await hooks.addEvidence(
-            validation.value as { consequenceSummary: string },
-          );
-          if (outcome.ok) evidenceLinked = true;
-          content = outcome.ok
-            ? outcome.linked
-              ? "Evidence linked."
-              : "Already linked earlier from the same finding; not duplicated. Tell the person it is already there rather than that you just added it."
-            : outcome.reason === "no_active_research"
-              ? "Nothing was linked: there is no research finding from this turn to add. Say so; do not claim it was added."
-              : outcome.reason === "no_focal_object"
-                ? "Nothing was linked: there is no object currently in focus. Say so; do not claim it was added."
-                : "Nothing was linked: the write failed. Say so; do not claim it was added.";
         } else {
           staged.push({ name: validation.tool, candidate: use.input });
         }

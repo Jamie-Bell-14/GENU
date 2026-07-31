@@ -1,15 +1,18 @@
 /**
- * Evidence, its receipt and its canonical link (T10 review round 1,
- * P0-1/P0-2/P0-3; SECURITY_STANDARDS §6/§7.1/§11.2).
+ * Evidence, its receipt and its canonical link (T10 review rounds 1 & 2;
+ * SECURITY_STANDARDS §6/§7.1/§11.2).
  *
  * The headline properties under test: `research_findings` and `evidence` are
  * both system-authored (no insert grant for `authenticated`, and invisible
- * across projects); `add_evidence_link` is the only way an `evidence` row and
- * its `project_relationships` link can ever come to exist, that pair is
- * all-or-none, a foreign/unknown/stale receipt or object is rejected
- * uniformly, a repeat call is idempotent, and an 'open' assumption's status
- * moves to 'supported' on a genuine new link but never further and never for
- * an already-resolved assumption.
+ * across projects); "Add as evidence" is staged into `complete_turn`'s own
+ * transaction, so a committed add and the turn's own answer are all-or-none
+ * and exactly as durable and recoverable as any other write it makes
+ * (T10 review round 2, P0-B); the target is always the receipt's own stored
+ * focal object, never a caller-supplied one (P0-A); a foreign/unknown/stale
+ * receipt or a receipt with no focal object is rejected uniformly; a repeat
+ * across turns is idempotent; and the relationship written — and whether an
+ * assumption's status moves, and which way — follows the caller's own
+ * determined `direction`, never an unconditional claim (P0-C).
  */
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -90,38 +93,83 @@ async function closeRun(turnId: string, state: "completed" | "failed") {
 async function recordFinding(
   projectId: string,
   turnId: string,
-  overrides: Partial<{ title: string }> = {},
+  focalObjectId: string | null,
+  overrides: Partial<{
+    title: string;
+    unavailableSources: unknown[];
+    appliedDirections: string[];
+  }> = {},
 ): Promise<string> {
   await asTrustedWriter();
   const { rows } = await db.query(
     `insert into research_findings
-       (project_id, turn_id, title, key_finding, why_it_matters,
+       (project_id, turn_id, focal_object_id, unavailable_sources,
+        applied_directions, title, key_finding, why_it_matters,
         visualisation, sources, methodology, limitations, retrieved_at,
         is_demo, conflicting)
-     values ($1, $2, $3, 'Key finding.', 'Why it matters.',
+     values ($1, $2, $3, $4::jsonb, $5::jsonb, $6, 'Key finding.',
+             'Why it matters.',
              '{"kind":"bar","unit":"%","series":[]}'::jsonb,
              '[{"id":"s1","name":"Demo source","url":null,"retrievedAt":""}]'::jsonb,
              'Method.', 'Limits.', now(), true, false)
      returning id`,
-    [projectId, turnId, overrides.title ?? "Deposit disputes"],
+    [
+      projectId,
+      turnId,
+      focalObjectId,
+      JSON.stringify(overrides.unavailableSources ?? []),
+      JSON.stringify(overrides.appliedDirections ?? []),
+      overrides.title ?? "Deposit disputes",
+    ],
   );
   return rows[0].id;
 }
 
-async function linkEvidence(
+interface CompleteResult {
+  outcome: string;
+  written?: Record<string, number>;
+  refused?: Record<string, string[]>;
+}
+
+/** Stages one "Add as evidence" proposal into `complete_turn`, as `commitTurn` does. */
+async function completeTurnWithEvidence(
   projectId: string,
   turnId: string,
-  actorId: string,
   receiptId: string,
-  objectId: string,
-  consequenceSummary = "Supports the object.",
-): Promise<string> {
+  options: {
+    consequenceSummary?: string;
+    direction?: "supports" | "contradicts" | "unclear";
+    actorId?: string;
+  } = {},
+): Promise<CompleteResult> {
   await asTrustedWriter();
+  const evidence = [
+    {
+      slot: 0,
+      receipt_id: receiptId,
+      consequence_summary: options.consequenceSummary ?? "Supports the object.",
+      direction: options.direction ?? "supports",
+    },
+  ];
   const { rows } = await db.query(
-    "select public.add_evidence_link($1, $2, $3, $4, $5, $6) as outcome",
-    [projectId, turnId, actorId, receiptId, objectId, consequenceSummary],
+    `select public.complete_turn(
+       p_project_id => $1,
+       p_turn_id => $2,
+       p_actor_id => $3,
+       p_assistant_text => $4,
+       p_fields => '[]'::jsonb,
+       p_assumptions => '[]'::jsonb,
+       p_evidence => $5::jsonb
+     ) as result`,
+    [
+      projectId,
+      turnId,
+      options.actorId ?? USER_A,
+      "Adding this as evidence.",
+      JSON.stringify(evidence),
+    ],
   );
-  return rows[0].outcome as string;
+  return rows[0].result as CompleteResult;
 }
 
 beforeAll(async () => {
@@ -192,7 +240,7 @@ describe.skipIf(skip)("research_findings", () => {
 
   it("hides receipts from other users", async () => {
     const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
+    const receiptId = await recordFinding(projectA, turnId, fieldA);
 
     await impersonate(USER_B);
     expect(
@@ -210,195 +258,346 @@ describe.skipIf(skip)("research_findings", () => {
       /permission denied/,
     );
   });
+
+  it("stores the focal object, unavailable sources and applied steering the pass actually produced", async () => {
+    const turnId = await openRun(projectA);
+    const unavailable = [
+      {
+        source: { id: "s2", name: "Other", url: null, retrievedAt: "" },
+        reason: "unavailable",
+      },
+    ];
+    const receiptId = await recordFinding(projectA, turnId, fieldA, {
+      title: "Provenance check",
+      unavailableSources: unavailable,
+      appliedDirections: ["Focus on England"],
+    });
+
+    await impersonate(USER_A);
+    const { rows } = await db.query(
+      "select focal_object_id, unavailable_sources, applied_directions from research_findings where id = $1",
+      [receiptId],
+    );
+    expect(rows[0].focal_object_id).toBe(fieldA);
+    expect(rows[0].unavailable_sources).toEqual(unavailable);
+    expect(rows[0].applied_directions).toEqual(["Focus on England"]);
+  });
+
+  it("sets the focal object to null when its target is later deleted, rather than orphaning the receipt", async () => {
+    await impersonate(USER_A);
+    const temporaryField = await addField(projectA, "temporary_focus");
+    const turnId = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, turnId, temporaryField, {
+      title: "Deleted target check",
+    });
+
+    await impersonate(USER_A);
+    await db.query("delete from project_fields where id = $1", [
+      temporaryField,
+    ]);
+
+    const { rows } = await db.query(
+      "select focal_object_id from research_findings where id = $1",
+      [receiptId],
+    );
+    expect(rows[0].focal_object_id).toBeNull();
+  });
 });
 
-describe.skipIf(skip)("add_evidence_link", () => {
-  it("is not callable by a browser session", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
+describe.skipIf(skip)(
+  "complete_turn: add_evidence (T10 review round 2, P0-B/P0-C)",
+  () => {
+    it("creates the evidence row and its relationship together, targeting the receipt's own focal object", async () => {
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, fieldA);
 
-    await impersonate(USER_A);
-    await expect(
-      db.query(
-        "select public.add_evidence_link($1, $2, auth.uid(), $3, $4, 'x')",
-        [projectA, turnId, receiptId, fieldA],
-      ),
-    ).rejects.toThrow(/permission denied/);
-  });
-
-  it("creates the evidence row and its relationship together, and reports linked", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
-
-    const outcome = await linkEvidence(
-      projectA,
-      turnId,
-      USER_A,
-      receiptId,
-      fieldA,
-      "Supports the field; does not support the rest.",
-    );
-    expect(outcome).toBe("linked");
-
-    await impersonate(USER_A);
-    const evidence = await db.query(
-      "select id, project_id, source_receipt_id from evidence where source_receipt_id = $1",
-      [receiptId],
-    );
-    expect(evidence.rowCount).toBe(1);
-    const evidenceId = evidence.rows[0].id;
-
-    const relationship = await db.query(
-      `select relation, origin, support, note from project_relationships
-       where from_object_id = $1 and to_object_id = $2`,
-      [evidenceId, fieldA],
-    );
-    expect(relationship.rows[0]).toMatchObject({
-      relation: "supports",
-      origin: "researched",
-      support: "some_evidence",
-      note: "Supports the field; does not support the rest.",
-    });
-  });
-
-  it("is idempotent: relinking the same receipt to the same object reuses both rows", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
-
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
-    ).toBe("linked");
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
-    ).toBe("already_linked");
-
-    await impersonate(USER_A);
-    const evidenceCount = await db.query(
-      "select count(*)::int as n from evidence where source_receipt_id = $1",
-      [receiptId],
-    );
-    expect(evidenceCount.rows[0].n).toBe(1);
-    const linkCount = await db.query(
-      `select count(*)::int as n from project_relationships r
-       join evidence e on e.id = r.from_object_id
-       where e.source_receipt_id = $1
-         and r.to_object_id = $2
-         and r.relation = 'supports'`,
-      [receiptId, fieldA],
-    );
-    expect(linkCount.rows[0].n).toBe(1);
-  });
-
-  it("rejects a receipt id from a different project as no_active_research", async () => {
-    const turnIdB = await openRun(projectB);
-    const receiptIdB = await recordFinding(projectB, turnIdB);
-
-    const turnIdA = await openRun(projectA);
-    expect(
-      await linkEvidence(projectA, turnIdA, USER_A, receiptIdB, fieldA),
-    ).toBe("no_active_research");
-  });
-
-  it("rejects an unknown receipt id as no_active_research", async () => {
-    const turnId = await openRun(projectA);
-    expect(
-      await linkEvidence(
+      const result = await completeTurnWithEvidence(
         projectA,
         turnId,
-        USER_A,
-        "99999999-0000-4000-8000-000000000099",
-        fieldA,
-      ),
-    ).toBe("no_active_research");
-  });
+        receiptId,
+        {
+          consequenceSummary: "Supports the field; does not support the rest.",
+          direction: "supports",
+        },
+      );
+      expect(result.outcome).toBe("completed");
+      expect(result.written).toEqual({ "0": 1 });
 
-  it("rejects an object from a different project as no_focal_object", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
+      await impersonate(USER_A);
+      const evidence = await db.query(
+        "select id, project_id, source_receipt_id from evidence where source_receipt_id = $1",
+        [receiptId],
+      );
+      expect(evidence.rowCount).toBe(1);
+      const evidenceId = evidence.rows[0].id;
 
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldB),
-    ).toBe("no_focal_object");
-  });
-
-  it("refuses a turn that has already finished", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
-    await closeRun(turnId, "completed");
-
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
-    ).toBe("not_running");
-  });
-
-  it("refuses a turn whose lease has already lapsed", async () => {
-    const turnId = await openRun(projectA, { expired: true });
-    const receiptId = await recordFinding(projectA, turnId);
-
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA),
-    ).toBe("not_running");
-  });
-
-  it("moves an open assumption to supported on a genuine new link", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId, {
-      title: "Assumption evidence",
+      const relationship = await db.query(
+        `select relation, origin, support, note from project_relationships
+       where from_object_id = $1 and to_object_id = $2`,
+        [evidenceId, fieldA],
+      );
+      expect(relationship.rows[0]).toMatchObject({
+        relation: "supports",
+        origin: "researched",
+        support: "some_evidence",
+        note: "Supports the field; does not support the rest.",
+      });
     });
-    await impersonate(USER_A);
-    const assumptionId = (
-      await db.query(
-        `insert into assumptions (project_id, statement, status, origin)
+
+    it("is idempotent across turns: relinking the same receipt reuses both rows and refuses as already_linked", async () => {
+      const firstTurn = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, firstTurn, fieldA, {
+        title: "Idempotency check",
+      });
+      const first = await completeTurnWithEvidence(
+        projectA,
+        firstTurn,
+        receiptId,
+      );
+      expect(first.written).toEqual({ "0": 1 });
+
+      // "Add as evidence" a second time is a genuinely new turn — the run above
+      // is already closed by `complete_turn` itself.
+      const secondTurn = await openRun(projectA);
+      const second = await completeTurnWithEvidence(
+        projectA,
+        secondTurn,
+        receiptId,
+      );
+      expect(second.written ?? {}).toEqual({});
+      expect(second.refused?.["0"]).toEqual(["already_linked"]);
+
+      await impersonate(USER_A);
+      const evidenceCount = await db.query(
+        "select count(*)::int as n from evidence where source_receipt_id = $1",
+        [receiptId],
+      );
+      expect(evidenceCount.rows[0].n).toBe(1);
+    });
+
+    it("rejects a receipt id from a different project as no_active_research", async () => {
+      const turnIdB = await openRun(projectB);
+      const receiptIdB = await recordFinding(projectB, turnIdB, fieldB);
+
+      const turnIdA = await openRun(projectA);
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnIdA,
+        receiptIdB,
+      );
+      expect(result.refused?.["0"]).toEqual(["no_active_research"]);
+    });
+
+    it("rejects an unknown receipt id as no_active_research", async () => {
+      const turnId = await openRun(projectA);
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        "99999999-0000-4000-8000-000000000099",
+      );
+      expect(result.refused?.["0"]).toEqual(["no_active_research"]);
+    });
+
+    it("rejects a receipt whose research ran with no object in focus, as no_focal_object", async () => {
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, null, {
+        title: "No focus check",
+      });
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+      );
+      expect(result.refused?.["0"]).toEqual(["no_focal_object"]);
+    });
+
+    it("refuses when the turn is not running, exactly as any other staged write would", async () => {
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, fieldA, {
+        title: "Not running check",
+      });
+      await closeRun(turnId, "completed");
+
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+      );
+      expect(result.outcome).toBe("not_running");
+    });
+
+    it("writes a neutral relation and never moves an assumption's status when direction is unclear", async () => {
+      await impersonate(USER_A);
+      const assumptionId = (
+        await db.query(
+          `insert into assumptions (project_id, statement, status, origin)
+         values ($1, 'An assumption of unclear bearing', 'open', 'ai_inferred')
+         returning id`,
+          [projectA],
+        )
+      ).rows[0].id;
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
+        title: "Unclear direction check",
+      });
+
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+        {
+          direction: "unclear",
+        },
+      );
+      expect(result.written).toEqual({ "0": 1 });
+
+      await impersonate(USER_A);
+      const evidenceId = (
+        await db.query("select id from evidence where source_receipt_id = $1", [
+          receiptId,
+        ])
+      ).rows[0].id;
+      const relationship = await db.query(
+        `select relation, support from project_relationships
+       where from_object_id = $1 and to_object_id = $2`,
+        [evidenceId, assumptionId],
+      );
+      // Neutral by construction — never a claim this RPC did not genuinely
+      // determine (T10 review round 2, P0-C).
+      expect(relationship.rows[0]).toMatchObject({
+        relation: "affects",
+        support: "hypothesis",
+      });
+      const status = await db.query(
+        "select status from assumptions where id = $1",
+        [assumptionId],
+      );
+      expect(status.rows[0].status).toBe("open");
+    });
+
+    it("moves an open assumption to supported when direction is supports", async () => {
+      await impersonate(USER_A);
+      const assumptionId = (
+        await db.query(
+          `insert into assumptions (project_id, statement, status, origin)
          values ($1, 'Smaller agencies feel this most', 'open', 'ai_inferred')
          returning id`,
-        [projectA],
-      )
-    ).rows[0].id;
+          [projectA],
+        )
+      ).rows[0].id;
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
+        title: "Supports direction check",
+      });
 
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, assumptionId),
-    ).toBe("linked");
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+        {
+          direction: "supports",
+        },
+      );
+      expect(result.written).toEqual({ "0": 1 });
 
-    await impersonate(USER_A);
-    const status = await db.query(
-      "select status from assumptions where id = $1",
-      [assumptionId],
-    );
-    expect(status.rows[0].status).toBe("supported");
-  });
-
-  it("never overwrites an assumption that is not open", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId, {
-      title: "Resolved assumption evidence",
+      await impersonate(USER_A);
+      const status = await db.query(
+        "select status from assumptions where id = $1",
+        [assumptionId],
+      );
+      expect(status.rows[0].status).toBe("supported");
     });
-    await impersonate(USER_A);
-    const assumptionId = (
-      await db.query(
-        `insert into assumptions (project_id, statement, status, origin)
+
+    it("moves an open assumption to weakened when direction is contradicts", async () => {
+      // The scenario the review named directly: a finding that weakens or
+      // contradicts a target must never be recorded as though it supported it.
+      await impersonate(USER_A);
+      const assumptionId = (
+        await db.query(
+          `insert into assumptions (project_id, statement, status, origin)
+         values ($1, 'Smaller agencies experience this more intensely', 'open', 'ai_inferred')
+         returning id`,
+          [projectA],
+        )
+      ).rows[0].id;
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
+        title: "Contradicts direction check",
+      });
+
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+        {
+          direction: "contradicts",
+          consequenceSummary:
+            "Contradicts the claim that smaller agencies experience this more intensely — the scripted finding shows the opposite pattern.",
+        },
+      );
+      expect(result.written).toEqual({ "0": 1 });
+
+      await impersonate(USER_A);
+      const evidenceId = (
+        await db.query("select id from evidence where source_receipt_id = $1", [
+          receiptId,
+        ])
+      ).rows[0].id;
+      const relationship = await db.query(
+        `select relation, support from project_relationships
+       where from_object_id = $1 and to_object_id = $2`,
+        [evidenceId, assumptionId],
+      );
+      expect(relationship.rows[0]).toMatchObject({
+        relation: "contradicts",
+        support: "hypothesis",
+      });
+      const status = await db.query(
+        "select status from assumptions where id = $1",
+        [assumptionId],
+      );
+      expect(status.rows[0].status).toBe("weakened");
+    });
+
+    it("never overwrites an assumption that is not open", async () => {
+      await impersonate(USER_A);
+      const assumptionId = (
+        await db.query(
+          `insert into assumptions (project_id, statement, status, origin)
          values ($1, 'Already invalidated', 'invalidated', 'ai_inferred')
          returning id`,
-        [projectA],
-      )
-    ).rows[0].id;
+          [projectA],
+        )
+      ).rows[0].id;
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
+        title: "Resolved assumption check",
+      });
 
-    expect(
-      await linkEvidence(projectA, turnId, USER_A, receiptId, assumptionId),
-    ).toBe("linked");
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+        {
+          direction: "supports",
+        },
+      );
+      expect(result.written).toEqual({ "0": 1 });
 
-    await impersonate(USER_A);
-    const status = await db.query(
-      "select status from assumptions where id = $1",
-      [assumptionId],
-    );
-    expect(status.rows[0].status).toBe("invalidated");
-  });
-});
+      await impersonate(USER_A);
+      const status = await db.query(
+        "select status from assumptions where id = $1",
+        [assumptionId],
+      );
+      expect(status.rows[0].status).toBe("invalidated");
+    });
+  },
+);
 
 describe.skipIf(skip)("evidence", () => {
   it("is not directly writable by the authenticated role", async () => {
     const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
+    const receiptId = await recordFinding(projectA, turnId, fieldA);
 
     await impersonate(USER_A);
     await expect(
@@ -414,8 +613,8 @@ describe.skipIf(skip)("evidence", () => {
 
   it("has no update or delete grant for the authenticated role", async () => {
     const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
-    await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA);
+    const receiptId = await recordFinding(projectA, turnId, fieldA);
+    await completeTurnWithEvidence(projectA, turnId, receiptId);
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select id from evidence where source_receipt_id = $1",
@@ -435,8 +634,8 @@ describe.skipIf(skip)("evidence", () => {
 
   it("hides evidence from other users", async () => {
     const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId);
-    await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA);
+    const receiptId = await recordFinding(projectA, turnId, fieldA);
+    await completeTurnWithEvidence(projectA, turnId, receiptId);
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select id from evidence where source_receipt_id = $1",
@@ -460,10 +659,10 @@ describe.skipIf(skip)("evidence", () => {
 
   it("cascades deletion from the project object registry", async () => {
     const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId, {
+    const receiptId = await recordFinding(projectA, turnId, fieldA, {
       title: "Cascade check",
     });
-    await linkEvidence(projectA, turnId, USER_A, receiptId, fieldA);
+    await completeTurnWithEvidence(projectA, turnId, receiptId);
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select id from evidence where source_receipt_id = $1",
@@ -471,10 +670,10 @@ describe.skipIf(skip)("evidence", () => {
     );
     const evidenceId = rows[0].id;
 
-    // `evidence` itself has no delete grant (only `add_evidence_link` writes
-    // it) — deleting the registry row is what an owner actually can do, and
-    // is exactly the path `evidence_object_fk ... on delete cascade` exists
-    // to make safe.
+    // `evidence` itself has no delete grant (only `complete_turn` writes it)
+    // — deleting the registry row is what an owner actually can do, and is
+    // exactly the path `evidence_object_fk ... on delete cascade` exists to
+    // make safe.
     await db.query("delete from project_objects where id = $1", [evidenceId]);
 
     const remaining = await db.query("select 1 from evidence where id = $1", [

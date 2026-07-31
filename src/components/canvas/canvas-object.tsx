@@ -52,6 +52,7 @@ export function CanvasObjectCard({
   onEdit?: EditSubmit;
 }>) {
   const [editing, setEditing] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const canEdit = Boolean(onEdit && object.editable);
   const editButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocus = useRef(false);
@@ -130,6 +131,64 @@ export function CanvasObjectCard({
           <p className="text-fg-secondary mt-0.5 text-xs break-words">
             {object.recommendedValidation}
           </p>
+        </div>
+      )}
+
+      {/* The evidence object's own durable provenance, inspectable after a
+          reload rather than only for as long as the research view that
+          produced it survives (T10 review round 2, P0-C, Step 6's
+          "source is accessible"). */}
+      {object.evidenceProvenance && (
+        <div className="mt-2">
+          <Button
+            variant="ghost"
+            size="xs"
+            aria-expanded={sourcesOpen}
+            onClick={() => setSourcesOpen((open) => !open)}
+          >
+            {sourcesOpen ? "Hide sources" : "Inspect sources"}
+          </Button>
+          {sourcesOpen && (
+            <dl className="border-edge-subtle bg-surface-secondary mt-1 rounded-md border p-2.5 text-xs">
+              {object.evidenceProvenance.conflicting && (
+                <p className="text-state-warning mb-1.5 font-medium">
+                  The sources behind this evidence disagree.
+                </p>
+              )}
+              <div>
+                <dt className="text-fg-secondary">Sources</dt>
+                <dd className="text-fg-primary mt-0.5">
+                  <ul className="list-disc pl-4">
+                    {object.evidenceProvenance.sources.map((source) => (
+                      <li key={source.id} className="break-words">
+                        {source.name}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+              <div className="mt-1.5">
+                <dt className="text-fg-secondary">Retrieved</dt>
+                <dd className="text-fg-primary mt-0.5">
+                  {new Date(
+                    object.evidenceProvenance.retrievedAt,
+                  ).toLocaleString("en-GB")}
+                </dd>
+              </div>
+              <div className="mt-1.5">
+                <dt className="text-fg-secondary">Method</dt>
+                <dd className="text-fg-primary mt-0.5">
+                  {object.evidenceProvenance.methodology}
+                </dd>
+              </div>
+              <div className="mt-1.5">
+                <dt className="text-fg-secondary">Limitations</dt>
+                <dd className="text-fg-primary mt-0.5">
+                  {object.evidenceProvenance.limitations}
+                </dd>
+              </div>
+            </dl>
+          )}
         </div>
       )}
 

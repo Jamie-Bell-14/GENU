@@ -6,7 +6,6 @@ import {
 } from "./activity-steps";
 import {
   ScriptedDiscoveryEngine,
-  type AddEvidenceOutcome,
   type ResearchOutcome,
   type TurnHooks,
 } from "./discovery-engine";
@@ -22,7 +21,6 @@ function harness(
   direction: string | null = null,
   options: {
     researchOutcome?: ResearchOutcome;
-    addEvidenceOutcome?: AddEvidenceOutcome;
   } = {},
 ) {
   const events: EngineEvent[] = [];
@@ -30,7 +28,6 @@ function harness(
   const candidates: unknown[] = [];
   const appliedDirections: string[] = [];
   const researchCalls: ResearchTask[] = [];
-  const addEvidenceCalls: { consequenceSummary: string }[] = [];
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
@@ -60,10 +57,6 @@ function harness(
         options.researchOutcome ?? { ok: true, findingTitle: "Test finding" }
       );
     },
-    addEvidence: async (evidenceInput) => {
-      addEvidenceCalls.push(evidenceInput);
-      return options.addEvidenceOutcome ?? { ok: true, linked: true };
-    },
   };
   return {
     events,
@@ -71,7 +64,6 @@ function harness(
     candidates,
     appliedDirections,
     researchCalls,
-    addEvidenceCalls,
     hooks,
   };
 }
@@ -312,41 +304,30 @@ describe("ScriptedDiscoveryEngine", () => {
     });
   });
 
-  describe("add as evidence (T10)", () => {
-    it("calls addEvidence on 'Add as evidence' and reports success honestly", async () => {
-      const { addEvidenceCalls, hooks } = harness(null, {
-        addEvidenceOutcome: { ok: true, linked: true },
-      });
+  describe("add as evidence (T10 review round 2, P0-B/P0-C)", () => {
+    it("stages add_evidence rather than claiming it happened", async () => {
+      const { hooks } = harness();
       const result = await new ScriptedDiscoveryEngine().runTurn(
         { ...input, userMessage: "Add as evidence" },
         hooks,
       );
-      expect(addEvidenceCalls).toHaveLength(1);
-      expect(result.assistantText).toMatch(/added/i);
-      expect(result.assistantText).toMatch(/does not/i);
-    });
-
-    it("says a repeat is already linked rather than claiming a new add", async () => {
-      const { hooks } = harness(null, {
-        addEvidenceOutcome: { ok: true, linked: false },
-      });
-      const result = await new ScriptedDiscoveryEngine().runTurn(
-        { ...input, userMessage: "Add as evidence" },
-        hooks,
-      );
-      expect(result.assistantText).toMatch(/already linked/i);
-    });
-
-    it("never claims evidence was added when there is nothing to link", async () => {
-      const { hooks } = harness(null, {
-        addEvidenceOutcome: { ok: false, reason: "no_active_research" },
-      });
-      const result = await new ScriptedDiscoveryEngine().runTurn(
-        { ...input, userMessage: "Add as evidence" },
-        hooks,
-      );
+      // Staged like any other project-truth write: whether it actually
+      // links is decided when the turn completes, not by this engine.
+      expect(result.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: {
+            consequenceSummary: expect.any(String),
+            // This engine cannot judge whether the scripted finding
+            // supports or contradicts an arbitrary, unknown target object,
+            // so it honestly proposes "unclear" rather than guess.
+            direction: "unclear",
+          },
+        },
+      ]);
+      // Present-progressive, not a past-tense claim the turn cannot yet back.
       expect(result.assistantText).not.toMatch(/^i added/i);
-      expect(result.assistantText).toMatch(/no research finding/i);
+      expect(result.assistantText).toMatch(/does not/i);
     });
   });
 });

@@ -68,11 +68,13 @@ export function Composer({
             (DESIGN.md §9.3). */}
         {state.direction && (
           <p className="text-fg-tertiary text-xs">
-            {state.direction.applied
-              ? "Your direction was picked up by this turn."
-              : streaming
-                ? DIRECTION_APPLICATION_MESSAGES[state.direction.application]
-                : "Your direction was recorded, but this turn had already passed its last step."}
+            {state.direction.rejectedReason
+              ? state.direction.rejectedReason
+              : state.direction.applied
+                ? "Your direction was picked up by this turn."
+                : streaming
+                  ? DIRECTION_APPLICATION_MESSAGES[state.direction.application]
+                  : "Your direction was recorded, but this turn had already passed its last step."}
           </p>
         )}
 

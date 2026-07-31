@@ -19,6 +19,15 @@
   own project's rows; every insert goes through the elevated trusted-writer,
   which is what makes "the server proves this project produced this result"
   actually true rather than merely conventional.
+
+  Revised after T10 review round 2 (P0-A): the receipt now also carries the
+  object research was actually run against (`focal_object_id`) and the
+  unavailable-source outcomes and applied steering that were part of the
+  displayed result. Without the first, "Add as evidence" had nothing but a
+  *later* turn's freshly recomputed default focus to link against — which is
+  not necessarily the object this research concerned at all. Without the
+  second and third, that part of what the user saw simply vanished from the
+  durable record the moment the session state holding it was gone.
 */
 create table public.research_findings (
   id uuid primary key default gen_random_uuid(),
@@ -43,11 +52,46 @@ create table public.research_findings (
   retrieved_at timestamptz not null,
   is_demo boolean not null,
   conflicting boolean not null,
+  /*
+    The object this pass was actually run against, so a later "Add as
+    evidence" links to what was researched rather than whatever object
+    happens to be the default focus by the time that later turn runs
+    (T10 review round 2, P0-A). Nullable: research with no object in focus
+    (an empty project) produces a receipt nothing can honestly be added
+    against. `on delete set null` rather than cascading the receipt away —
+    the receipt is a record of what happened and outlives the object; it
+    simply becomes un-addable once its target is gone.
+  */
+  focal_object_id uuid,
+  -- Sources this pass reported unavailable, in the same shape streamed to
+  -- the client, so that part of what the user saw is not lost the moment
+  -- session state holding it is (T10 review round 2, P0-A).
+  unavailable_sources jsonb not null default '[]'::jsonb
+    check (jsonb_typeof(unavailable_sources) = 'array' and pg_column_size(unavailable_sources) <= 8192),
+  -- Steering notes the provider actually applied to this pass (never ones it
+  -- reported `requires_restart` for), so which direction affected the result
+  -- stays identifiable after the fact.
+  applied_directions jsonb not null default '[]'::jsonb
+    check (jsonb_typeof(applied_directions) = 'array' and pg_column_size(applied_directions) <= 4096),
   created_at timestamptz not null default now()
 );
 
 create index research_findings_project_idx
   on public.research_findings (project_id);
+
+alter table public.research_findings
+  add constraint research_findings_focal_fk
+    foreign key (focal_object_id, project_id)
+    references public.project_objects (id, project_id)
+    /*
+      Column-specific SET NULL (Postgres 15+): only `focal_object_id` is
+      cleared when its target is deleted. A plain `on delete set null` on a
+      composite key nulls *every* referencing column, including
+      `project_id` — which is `not null` here, so that would have raised
+      rather than cleared the reference, discovered by
+      supabase/tests/evidence-rls.test.ts.
+    */
+    on delete set null (focal_object_id);
 
 alter table public.research_findings enable row level security;
 

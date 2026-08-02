@@ -294,6 +294,13 @@ export async function loadLatestResearchReceipt(
   projectId: string,
 ): Promise<{
   finding: ResearchFinding;
+  /**
+   * The turn that produced this receipt, threaded through to
+   * `useTurnRuntime` so a hydrated receipt is retired by the same rule a
+   * live one is (T10 review round 3, P0-2): the moment any turn *other*
+   * than this one completes, not merely on the next reload.
+   */
+  turnId: string;
   unavailableSources: { source: ResearchSource; reason: string }[];
 } | null> {
   const [message, finding] = await Promise.all([
@@ -340,6 +347,7 @@ export async function loadLatestResearchReceipt(
       isDemo: true,
       conflicting: latestFinding.conflicting,
     },
+    turnId: latestFinding.turn_id,
     unavailableSources: (latestFinding.unavailable_sources ?? []) as {
       source: ResearchSource;
       reason: string;

@@ -82,6 +82,7 @@ export function WorkspaceShell({
    */
   initialResearch?: {
     finding: ResearchFinding;
+    turnId: string;
     unavailableSources: { source: ResearchSource; reason: string }[];
   } | null;
   onEditObject?: EditSubmit;

@@ -184,6 +184,22 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   no_focal_object:
     "The research this came from was not run against any object.",
   already_linked: "This finding was already added as evidence.",
+  /*
+   * The receipt's own research pass never completed (T10 review round 3,
+   * P0-2) — most often because it was recorded mid-turn and something later
+   * in that same turn failed. The finding shown was real, but nothing that
+   * turn produced was ever settled.
+   */
+  research_incomplete:
+    "The research this came from did not finish, so it was not added.",
+  /*
+   * A later, completed research pass has since superseded this receipt
+   * (T10 review round 3, P0-2) — the same currency rule reload hydration
+   * already applies, enforced here so a stale receipt cannot be submitted
+   * directly either.
+   */
+  research_superseded:
+    "Newer research has since replaced this finding, so it was not added.",
 };
 
 /**

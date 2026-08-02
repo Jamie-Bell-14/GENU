@@ -181,6 +181,16 @@ export type TurnEvent =
   /** Emitted when the running turn actually picked the direction up. */
   | { type: "direction_applied"; note: string }
   /**
+   * A staged "Add as evidence" proposal was not written when the turn
+   * completed (T10 review round 3, P0-2) — the receipt was reused, its own
+   * research pass never finished, or a later pass has since superseded it.
+   * The assistant's own reply speaks in staged, present-progressive terms
+   * (see `STAGED` in `anthropic-engine.ts`) precisely because the outcome is
+   * not yet known when it is written; this is that outcome, once it is,
+   * surfaced durably rather than left recoverable only from audit data.
+   */
+  | { type: "evidence_refused"; reason: string }
+  /**
    * Carries the failing turn's own id (issue #13, T10 exit gate) so the
    * reducer can clear only *that* turn's queued scene recommendation — never
    * a different turn's, whether older or newer.
@@ -214,6 +224,12 @@ export type EngineEvent = Exclude<
   | { type: "research_finding" }
   | { type: "research_started" }
   | { type: "direction_rejected" }
+  /*
+   * Only the host knows what `complete_turn` actually did with a staged
+   * "Add as evidence" proposal — the engine is never told (see `STAGED`),
+   * so it cannot be the one to announce a refusal either.
+   */
+  | { type: "evidence_refused" }
 >;
 
 export interface Message {
@@ -296,6 +312,17 @@ export interface TurnState {
    */
   activeResearch: ResearchFinding | null;
   /**
+   * The turn that produced `activeResearch`, so its currency can be checked
+   * the same way reload hydration already checks it (T10 review round 3,
+   * P0-2; see `loadLatestResearchReceipt` in `project-model-store.ts`): a
+   * receipt stays addable only while the turn that produced it is still the
+   * most recent thing that happened. Set whenever `activeResearch` is —
+   * including for a receipt seeded from reload hydration, which starts
+   * current by construction and is retired the same way a live one is: the
+   * moment any *other* turn completes.
+   */
+  activeResearchTurnId: string | null;
+  /**
    * Sources research has reported unavailable this session (T10 edge case),
    * oldest first. Kept for the same reason `activityLog` is: a source that
    * failed is as real an event as one that succeeded, and the research view
@@ -303,6 +330,13 @@ export interface TurnState {
    * finding's own limitations text.
    */
   unavailableSources: { source: ResearchSource; reason: string }[];
+  /**
+   * Why a staged "Add as evidence" proposal was not written, once
+   * `complete_turn` has actually decided that (T10 review round 3, P0-2).
+   * Cleared on the next message so an old refusal cannot linger against a
+   * conversation that has moved on.
+   */
+  evidenceOutcome: { refused: true; reason: string } | null;
   /**
    * The project model as last re-read by the server during this session; null
    * until a turn changes something, when the server-rendered props still stand.
@@ -360,7 +394,9 @@ export const INITIAL_TURN_STATE: TurnState = {
   actions: [],
   recommendedScene: null,
   activeResearch: null,
+  activeResearchTurnId: null,
   unavailableSources: [],
+  evidenceOutcome: null,
   projectModel: null,
   direction: null,
   error: null,
@@ -470,6 +506,9 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         direction: null,
         error: null,
         stopped: false,
+        // A refusal belongs to the turn that staged it; a new message means
+        // the conversation has moved on from asking about that outcome.
+        evidenceOutcome: null,
         /*
           `recoveries` is deliberately not cleared. An unresolved turn — one
           the server may still be finishing — stays recoverable while the user
@@ -702,7 +741,12 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             evidence", and its unavailable-source list belongs to *that*
             pass, not this one.
           */
-          return { ...state, activeResearch: null, unavailableSources: [] };
+          return {
+            ...state,
+            activeResearch: null,
+            activeResearchTurnId: null,
+            unavailableSources: [],
+          };
 
         case "research_source":
           // Reported to the activity/history surfaces only.
@@ -724,8 +768,16 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             finding they informed), so `unavailableSources` is already this
             pass's own list by the time this fires — replacing it wholesale
             here would either duplicate or drop nothing, so it is left as is.
+
+            Stamped with the turn producing it (T10 review round 3, P0-2), so
+            currency can later be checked against exactly that turn rather
+            than assumed from being "the most recent thing in state".
           */
-          return { ...state, activeResearch: action.event.finding };
+          return {
+            ...state,
+            activeResearch: action.event.finding,
+            activeResearchTurnId: state.streaming?.turnId ?? null,
+          };
 
         case "direction_rejected":
           return state.direction
@@ -738,6 +790,12 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
                 },
               }
             : state;
+
+        case "evidence_refused":
+          return {
+            ...state,
+            evidenceOutcome: { refused: true, reason: action.event.reason },
+          };
 
         case "project_model_updated":
           /*
@@ -788,6 +846,29 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
               state.recommendedScene?.turnId === action.event.turnId
                 ? null
                 : state.recommendedScene,
+            /*
+              A receipt whose *own* turn fails after producing a finding
+              (T10 review round 3, P0-2) is retired here rather than left
+              addable: no assistant message is ever stored for a failed
+              turn, so a reload at this exact point would already show no
+              current receipt (`loadLatestResearchReceipt`) — live state
+              matching that is the same rule, not a special case of it. A
+              different turn failing leaves this receipt exactly as it was:
+              that turn stored no message either, so the most recent one is
+              still this receipt's own.
+            */
+            activeResearch:
+              state.activeResearchTurnId === action.event.turnId
+                ? null
+                : state.activeResearch,
+            activeResearchTurnId:
+              state.activeResearchTurnId === action.event.turnId
+                ? null
+                : state.activeResearchTurnId,
+            unavailableSources:
+              state.activeResearchTurnId === action.event.turnId
+                ? []
+                : state.unavailableSources,
             status: "idle",
           };
 
@@ -804,6 +885,18 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             heading: state.streaming.heading,
             createdAt: new Date().toISOString(),
           };
+          /*
+            A receipt from an *earlier* turn stops being current the moment
+            any other turn completes (T10 review round 3, P0-2) — the same
+            rule reload hydration already applies: once the conversation has
+            a newer stored message, that message is what the conversation is
+            now about, whether or not it concerned the research at all. The
+            turn that produced the receipt is exempt from its own rule: this
+            is the completion that makes it addable in the first place.
+          */
+          const retiringReceipt =
+            state.activeResearchTurnId !== null &&
+            state.activeResearchTurnId !== state.streaming.turnId;
           return {
             ...state,
             messages: completed.content
@@ -813,6 +906,11 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             // Temporary activity fades; the result and the retrievable history
             // remain (UI acceptance §7).
             activity: NO_ACTIVITY,
+            activeResearch: retiringReceipt ? null : state.activeResearch,
+            activeResearchTurnId: retiringReceipt
+              ? null
+              : state.activeResearchTurnId,
+            unavailableSources: retiringReceipt ? [] : state.unavailableSources,
             status: "idle",
           };
         }

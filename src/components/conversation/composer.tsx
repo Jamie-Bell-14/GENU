@@ -78,6 +78,17 @@ export function Composer({
           </p>
         )}
 
+        {/* A staged "Add as evidence" proposal that `complete_turn` did not
+            write, once that outcome is actually known (T10 review round 3,
+            P0-2) — the assistant's own reply necessarily spoke in staged
+            terms, so this is what corrects it rather than leaving the
+            refusal recoverable only from audit data. */}
+        {state.evidenceOutcome?.refused && (
+          <p className="text-fg-tertiary text-xs">
+            {state.evidenceOutcome.reason}
+          </p>
+        )}
+
         {state.actions.length > 0 && (
           <div
             className="flex flex-wrap gap-2"

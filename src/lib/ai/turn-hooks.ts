@@ -147,6 +147,24 @@ function runResearch(
       boundary can honestly say it took hold (T10 review round 2, P0-D).
     */
     let pendingNextStepNote: string | null = null;
+    /*
+      Every step's boundary work (flushing a deferred note, reading and
+      relaying new direction), chained so it always runs in the order its
+      steps actually happened — never in the order their *database* reads
+      happen to resolve (T10 review round 3, P0-3).
+
+      The provider is not back-pressured by this work: its `execute` loop
+      times its own steps independently and does not await `onEvent`, so a
+      slow `takeDirection()` read cannot be assumed to finish before the next
+      provider event arrives. Chaining every step's boundary work onto the
+      one before it — rather than letting each step race the provider's own
+      timing — is what keeps a later step's boundary from starting before an
+      earlier one has actually decided what happened to its own direction,
+      regardless of how long any one read takes. `finding`, `done` and
+      `failed` each await this same chain before reading `appliedDirections`
+      or settling, so none of them can observe a boundary still in flight.
+    */
+    let boundaryQueue: Promise<void> = Promise.resolve();
 
     const settle = (outcome: ResearchOutcome) => {
       if (settled) return;
@@ -159,6 +177,26 @@ function runResearch(
       new Promise<void>((resolve) => {
         awaitingNext = resolve;
       });
+
+    /*
+      Resolves a direction still waiting for a step that never came — the
+      pass ended (a finding, `done` or `failed`) before the *next* boundary
+      this note needed could exist to honestly say it took hold
+      (T10 review round 3, P0-3). Without this, a direction accepted right at
+      the pass's last step could be told "will be applied at the next step"
+      and then never hear anything else again.
+    */
+    function rejectStrandedDirection() {
+      if (!pendingNextStepNote) return;
+      const note = pendingNextStepNote;
+      pendingNextStepNote = null;
+      ports.emit({
+        type: "direction_rejected",
+        note,
+        reason:
+          "This research finished before your direction reached a step that could apply it.",
+      });
+    }
 
     /*
       Stopping mid-run never produces another provider event (the mock
@@ -179,11 +217,16 @@ function runResearch(
       resume?.();
 
       switch (event.type) {
-        case "step":
-          void ports.reporter.step(event.step, async () => {
+        case "step": {
+          /*
+            Queued onto the chain immediately, in the order steps actually
+            happen — not run inline — so a slower earlier boundary can never
+            be overtaken by a faster later one (T10 review round 3, P0-3).
+          */
+          boundaryQueue = boundaryQueue.then(async () => {
             /*
               A direction deferred at the previous step boundary is honestly
-              in effect now, at the next one — this is the one place that
+              in effect now, at this one — this is the one place that
               promise can be kept.
             */
             if (pendingNextStepNote) {
@@ -203,7 +246,8 @@ function runResearch(
                     ports.onDirectionApplied(note);
                     break;
                   case "applies_next_step":
-                    // Not yet true: announced at the next step boundary above.
+                    // Not yet true: announced at the next step boundary above,
+                    // or rejected outright if no next step ever comes.
                     pendingNextStepNote = note;
                     break;
                   case "requires_restart":
@@ -224,9 +268,17 @@ function runResearch(
                 }
               }
             }
-            await waitForNextEvent();
           });
+          /*
+            Reported *around* the work the step conceptually spans, so its
+            duration reflects how long the provider actually spent — not the
+            boundary chain above, which is a correctness mechanism, not a
+            presentation one, and must not gate this UI-facing promise or a
+            slow read would visibly stall the activity line.
+          */
+          void ports.reporter.step(event.step, () => waitForNextEvent());
           break;
+        }
         case "source":
           ports.emit({ type: "research_source", source: event.source });
           break;
@@ -244,20 +296,27 @@ function runResearch(
         case "finding":
           lastFindingTitle = event.finding.title;
           /*
+            Waits for every step boundary queued so far to actually resolve
+            before reading `appliedDirections` or deciding whether a deferred
+            note ever got a real step to land at (T10 review round 3, P0-3) —
+            otherwise a slow final `takeDirection()` read could still be
+            in flight when the receipt is built, and the direction it
+            eventually resolves to would silently never reach it.
+
             Persisted before it is shown (T10 review round 1, P0-1): a
             finding the client can see must always have a receipt "Add as
             evidence" can later resolve. `done` below waits for this rather
-            than racing it — the provider emits the two back to back with no
-            delay in between, and settling "ok" before the receipt exists
-            would let the engine promise a finding is on the canvas before
-            anything durable actually backs it.
+            than racing it.
           */
-          findingReceipt = ports
-            .recordResearchFinding({
-              finding: event.finding,
-              focalObjectId: task.focalObjectId,
-              unavailableSources,
-              appliedDirections,
+          findingReceipt = boundaryQueue
+            .then(() => {
+              rejectStrandedDirection();
+              return ports.recordResearchFinding({
+                finding: event.finding,
+                focalObjectId: task.focalObjectId,
+                unavailableSources,
+                appliedDirections,
+              });
             })
             .then((receiptId) => {
               if (receiptId) {
@@ -280,7 +339,10 @@ function runResearch(
           })();
           break;
         case "failed":
-          settle({ ok: false, reason: "unavailable" });
+          void boundaryQueue.then(() => {
+            rejectStrandedDirection();
+            settle({ ok: false, reason: "unavailable" });
+          });
           break;
       }
     };

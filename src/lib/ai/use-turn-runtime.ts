@@ -104,6 +104,9 @@ export function useTurnRuntime({
    */
   initialResearch?: {
     finding: ResearchFinding;
+    /** The turn that produced it (T10 review round 3, P0-2) — see
+     *  `TurnState.activeResearchTurnId`'s own doc comment. */
+    turnId: string;
     unavailableSources: { source: ResearchSource; reason: string }[];
   } | null;
 }>): TurnRuntime {
@@ -112,6 +115,7 @@ export function useTurnRuntime({
     messages: initialMessages,
     activityLog: initialActivity,
     activeResearch: initialResearch?.finding ?? null,
+    activeResearchTurnId: initialResearch?.turnId ?? null,
     unavailableSources: initialResearch?.unavailableSources ?? [],
     // The action a hydrated receipt actually enables — the only contextual
     // action a fresh mount can honestly offer without a turn having run.

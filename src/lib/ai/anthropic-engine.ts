@@ -29,6 +29,7 @@ import {
   DISCOVERY_PROMPT_VERSION,
   DISCOVERY_SYSTEM_PROMPT,
 } from "./prompts/discovery";
+import type { AddEvidence } from "./tools/discovery-tools";
 import { DISCOVERY_TOOLS, validateToolInput } from "./tools/discovery-tools";
 import type { SafeError } from "./turn-events";
 
@@ -224,12 +225,26 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       more trustworthy than a chat message. Leaving it undelimited put
       user-authored text outside the regions the system prompt declares as data.
     */
+    /*
+      Sent verbatim rather than through `assembleContext`'s budget: without
+      it, an `add_evidence` call this turn makes has nothing to genuinely
+      compare and must be refused down to `unclear` regardless of what the
+      model returns (T10 review round 3, P0-1) — trimming it silently would
+      turn an honest turn into a wrongly-ungrounded one for a reason nobody
+      could see.
+    */
+    const groundingText =
+      context.researchGrounding?.grounded === true
+        ? context.researchGrounding.text
+        : null;
+
     messages.push({
       role: "user",
       content: [
         assembled.snapshot
           ? asUntrusted("project_context", assembled.snapshot)
           : "",
+        groundingText ? asUntrusted("research", groundingText) : "",
         asUntrusted("user_message", input.userMessage),
       ]
         .filter(Boolean)
@@ -584,6 +599,24 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             : outcome.reason === "stopped"
               ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
               : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added.";
+        } else if (validation.tool === "add_evidence") {
+          /*
+            The model's `direction` is only ever trusted when this request
+            genuinely carried both sides of the comparison it is judging —
+            the exact receipt and the target's own stored text
+            (`groundingText` above, T10 review round 3, P0-1). Without that,
+            `supports`/`contradicts` would be an assertion made from a title
+            alone; overriding to `unclear` here, rather than trusting
+            whatever the model returned, is what keeps that assertion from
+            ever reaching the database ungrounded.
+          */
+          const value = validation.value as AddEvidence;
+          staged.push({
+            name: "add_evidence",
+            candidate: groundingText
+              ? value
+              : { ...value, direction: "unclear" as const },
+          });
         } else {
           staged.push({ name: validation.tool, candidate: use.input });
         }

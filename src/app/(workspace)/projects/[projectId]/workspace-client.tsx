@@ -33,6 +33,7 @@ export function WorkspaceClient({
   canvasRelationships: ProjectRelationship[];
   initialResearch: {
     finding: ResearchFinding;
+    turnId: string;
     unavailableSources: { source: ResearchSource; reason: string }[];
   } | null;
 }>) {

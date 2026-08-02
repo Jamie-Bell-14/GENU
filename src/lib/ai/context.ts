@@ -49,6 +49,21 @@ export interface ProjectContext {
   /** Relationship ids a scene may name; nothing else is nameable. */
   relationshipIds: string[];
   focalObjectId: string | null;
+  /**
+   * The exact research receipt and its recorded target, when this turn's
+   * client named one (T10 review round 3, P0-1) — never present just because
+   * the project happens to have research history; only when the request
+   * itself carried an `activeFindingId`.
+   *
+   * `grounded: false` covers every case where the comparison the model is
+   * about to be asked to judge cannot honestly be grounded: the receipt was
+   * unreadable, it named no target, or the target's own content could not be
+   * read. A turn whose `add_evidence` call arrives without `grounded: true`
+   * present must not trust whatever `direction` the model returns — see
+   * `anthropic-engine.ts`, which overrides it to `unclear` in exactly that
+   * case rather than let an ungrounded assertion reach the database.
+   */
+  researchGrounding?: { grounded: true; text: string } | { grounded: false };
 }
 
 /**

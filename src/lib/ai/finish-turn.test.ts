@@ -102,6 +102,77 @@ describe("finishing a turn", () => {
     expect(ports.auditOperation).toHaveBeenCalledWith(outcomes.outcomes[1]);
   });
 
+  /*
+    A refused "Add as evidence" gets a durable, user-visible outcome, not
+    only an audit row (T10 review round 3, P0-2) — the assistant's own reply
+    necessarily spoke in staged, present-progressive terms and could not
+    have known this refusal was coming.
+  */
+  it("surfaces a refused add_evidence proposal as its own event", async () => {
+    const outcomes = completed({
+      changed: false,
+      outcomes: [
+        {
+          applied: false,
+          kind: "add_evidence",
+          reason: "rejected",
+          issue: "This finding was already added as evidence.",
+        },
+      ],
+    });
+    const { events, ports } = setup({
+      completeTurn: vi.fn(async () => outcomes),
+    });
+    await finishTurn(ports, "The answer.");
+
+    expect(events).toContainEqual({
+      type: "evidence_refused",
+      reason: "This finding was already added as evidence.",
+    });
+  });
+
+  it("does not surface a deferred operation as a refusal", async () => {
+    // `propose_connected_change`/`suggest_checkpoint` are understood but
+    // deliberately not applied at this stage of the build — that is not a
+    // refusal and must not be reported as one.
+    const outcomes = completed({
+      changed: false,
+      outcomes: [
+        { applied: false, kind: "suggest_checkpoint", reason: "deferred" },
+      ],
+    });
+    const { events, ports } = setup({
+      completeTurn: vi.fn(async () => outcomes),
+    });
+    await finishTurn(ports, "The answer.");
+
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: "evidence_refused" }),
+    );
+  });
+
+  it("does not surface a refused field write as an evidence event", async () => {
+    const outcomes = completed({
+      changed: false,
+      outcomes: [
+        {
+          applied: false,
+          kind: "update_project_model",
+          reason: "rejected",
+          issue: "user_owned_field",
+        },
+      ],
+    });
+    const { events, ports } = setup({
+      completeTurn: vi.fn(async () => outcomes),
+    });
+    await finishTurn(ports, "The answer.");
+
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: "evidence_refused" }),
+    );
+  });
+
   it("never says done, publishes or audits when the commit did not happen", async () => {
     /*
       Nothing was stored — not the answer, not one field — so the turn is closed

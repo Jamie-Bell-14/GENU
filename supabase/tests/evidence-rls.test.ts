@@ -411,6 +411,127 @@ describe.skipIf(skip)(
       expect(result.refused?.["0"]).toEqual(["no_focal_object"]);
     });
 
+    it("rejects a receipt whose own research pass later failed, as research_incomplete (T10 review round 3, P0-2)", async () => {
+      // The exact scenario the review named: the finding was recorded
+      // (`research_findings` is written before it is even shown), but
+      // something later in that same turn failed, so the turn itself never
+      // completed.
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, researchTurn, fieldA, {
+        title: "Incomplete turn check",
+      });
+      await closeRun(researchTurn, "failed");
+
+      const addTurn = await openRun(projectA);
+      const result = await completeTurnWithEvidence(
+        projectA,
+        addTurn,
+        receiptId,
+      );
+      expect(result.refused?.["0"]).toEqual(["research_incomplete"]);
+
+      await impersonate(USER_A);
+      const evidenceCount = await db.query(
+        "select count(*)::int as n from evidence where source_receipt_id = $1",
+        [receiptId],
+      );
+      expect(evidenceCount.rows[0].n).toBe(0);
+    });
+
+    it("rejects a receipt superseded by a later, completed research pass, as research_superseded (T10 review round 3, P0-2)", async () => {
+      const firstResearchTurn = await openRun(projectA);
+      const firstReceiptId = await recordFinding(
+        projectA,
+        firstResearchTurn,
+        fieldA,
+        { title: "Superseded pass" },
+      );
+      await closeRun(firstResearchTurn, "completed");
+
+      // A second, later pass completes and supersedes the first — the same
+      // currency rule reload hydration already applies
+      // (`loadLatestResearchReceipt`), enforced here so a stale receipt
+      // cannot be submitted directly either.
+      const secondResearchTurn = await openRun(projectA);
+      const secondReceiptId = await recordFinding(
+        projectA,
+        secondResearchTurn,
+        fieldA,
+        { title: "Superseding pass" },
+      );
+      await closeRun(secondResearchTurn, "completed");
+
+      const addTurn = await openRun(projectA);
+      const result = await completeTurnWithEvidence(
+        projectA,
+        addTurn,
+        firstReceiptId,
+      );
+      expect(result.refused?.["0"]).toEqual(["research_superseded"]);
+
+      await impersonate(USER_A);
+      const evidenceCount = await db.query(
+        "select count(*)::int as n from evidence where source_receipt_id = $1",
+        [firstReceiptId],
+      );
+      expect(evidenceCount.rows[0].n).toBe(0);
+      // The second, current receipt is unaffected and still addable.
+      void secondReceiptId;
+    });
+
+    it("still accepts the latest completed pass's own receipt", async () => {
+      const firstResearchTurn = await openRun(projectA);
+      const firstReceiptId = await recordFinding(
+        projectA,
+        firstResearchTurn,
+        fieldA,
+        { title: "Earlier pass" },
+      );
+      await closeRun(firstResearchTurn, "completed");
+
+      const secondResearchTurn = await openRun(projectA);
+      const secondReceiptId = await recordFinding(
+        projectA,
+        secondResearchTurn,
+        fieldA,
+        { title: "Latest pass" },
+      );
+      await closeRun(secondResearchTurn, "completed");
+
+      const addTurn = await openRun(projectA);
+      const result = await completeTurnWithEvidence(
+        projectA,
+        addTurn,
+        secondReceiptId,
+      );
+      expect(result.written).toEqual({ "0": 1 });
+
+      await impersonate(USER_A);
+      const evidenceCount = await db.query(
+        "select count(*)::int as n from evidence where source_receipt_id = $1",
+        [firstReceiptId],
+      );
+      expect(evidenceCount.rows[0].n).toBe(0);
+    });
+
+    it("accepts a receipt from this very turn's own research, before that turn has itself been marked completed", async () => {
+      // The live engine can run `start_research` and `add_evidence` in the
+      // same turn (two tool rounds, one turn) — that turn's own `turn_runs`
+      // row is still `running` until the very end of this same
+      // transaction, so the currency check above must not refuse its own
+      // in-flight turn (T10 review round 3, P0-2).
+      const turnId = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, turnId, fieldA, {
+        title: "Same-turn research and add",
+      });
+      const result = await completeTurnWithEvidence(
+        projectA,
+        turnId,
+        receiptId,
+      );
+      expect(result.written).toEqual({ "0": 1 });
+    });
+
     it("refuses when the turn is not running, exactly as any other staged write would", async () => {
       const turnId = await openRun(projectA);
       const receiptId = await recordFinding(projectA, turnId, fieldA, {

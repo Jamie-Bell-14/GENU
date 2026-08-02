@@ -318,6 +318,131 @@ describe("AnthropicDiscoveryEngine", () => {
     });
   });
 
+  describe("add_evidence direction is grounded, not asserted (T10 review round 3, P0-1)", () => {
+    const addEvidenceTurn = (direction: string): StubTurn => ({
+      blocks: [
+        {
+          type: "tool_use",
+          id: "t1",
+          name: "add_evidence",
+          input: {
+            consequenceSummary: "It bears on the target in some way.",
+            direction,
+          },
+        },
+      ],
+      stopReason: "tool_use",
+    });
+
+    it("sends the exact receipt and target content the model is asked to compare", async () => {
+      const { hooks } = harness();
+      const requests: unknown[] = [];
+      const stub = stubClient(
+        [
+          addEvidenceTurn("supports"),
+          { blocks: [text("Added.")], stopReason: "end_turn" },
+        ],
+        (params) => requests.push(params),
+      );
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          recentMessages: [],
+          researchGrounding: {
+            grounded: true,
+            text: "Key finding: dispute rates differ by agency size.",
+          },
+        }),
+      });
+      await engine.runTurn(input, hooks);
+
+      const firstRequest = requests[0] as {
+        messages: { content: unknown }[];
+      };
+      const sent = JSON.stringify(firstRequest.messages);
+      expect(sent).toContain("dispute rates differ by agency size");
+    });
+
+    it("trusts the model's direction once both sides of the comparison were sent", async () => {
+      const { hooks } = harness();
+      const stub = stubClient([
+        addEvidenceTurn("contradicts"),
+        { blocks: [text("Added.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          recentMessages: [],
+          researchGrounding: { grounded: true, text: "Grounding text." },
+        }),
+      });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(turn.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: expect.objectContaining({ direction: "contradicts" }),
+        },
+      ]);
+    });
+
+    it("overrides an ungrounded direction to unclear rather than trust it", async () => {
+      const { hooks } = harness();
+      const stub = stubClient([
+        addEvidenceTurn("supports"),
+        { blocks: [text("Added.")], stopReason: "end_turn" },
+      ]);
+      // No `buildContext` at all — the same as a turn whose receipt or
+      // target could not be resolved (`emptyContext`, load-context.ts).
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(turn.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: expect.objectContaining({ direction: "unclear" }),
+        },
+      ]);
+    });
+
+    it("overrides to unclear when grounding was attempted but could not be resolved", async () => {
+      const { hooks } = harness();
+      const stub = stubClient([
+        addEvidenceTurn("supports"),
+        { blocks: [text("Added.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          recentMessages: [],
+          // The receipt named no target, or the target's own content could
+          // not be read — either way, nothing to genuinely compare.
+          researchGrounding: { grounded: false },
+        }),
+      });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(turn.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: expect.objectContaining({ direction: "unclear" }),
+        },
+      ]);
+    });
+  });
+
   it("retries once on invalid output, then fails without proposing anything", async () => {
     const { events, hooks } = harness();
     const invalid = {

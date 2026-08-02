@@ -769,6 +769,134 @@ describe("research (T10)", () => {
     });
   });
 
+  describe("a receipt stays current only while its own turn is the latest thing that happened (T10 review round 3, P0-2)", () => {
+    function turnStarted(state: TurnState, turnId: string): TurnState {
+      return turnReducer(state, {
+        type: "event",
+        event: { type: "turn_started", turnId },
+      });
+    }
+
+    function doneFor(state: TurnState): TurnState {
+      return turnReducer(state, { type: "event", event: { type: "done" } });
+    }
+
+    it("stamps the finding with the turn that produced it", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      expect(state.activeResearchTurnId).toBe(TURN);
+    });
+
+    it("does not retire the receipt when its own turn completes", () => {
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const state = doneFor(withFinding);
+      // This is the completion that makes the receipt addable at all.
+      expect(state.activeResearch).toEqual(testFinding);
+      expect(state.activeResearchTurnId).toBe(TURN);
+    });
+
+    it("retires the receipt once a later, unrelated turn completes", () => {
+      const withFinding = doneFor(
+        turnReducer(streamStarted(send()), {
+          type: "event",
+          event: { type: "research_finding", finding: testFinding },
+        }),
+      );
+      // A second, unrelated turn runs to completion — the same rule reload
+      // hydration already applies (`loadLatestResearchReceipt`): the most
+      // recent message is no longer this receipt's own.
+      const nextTurnStarted = turnStarted(withFinding, "t2");
+      const state = doneFor(nextTurnStarted);
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.activeResearchTurnId).toBeNull();
+      expect(state.unavailableSources).toEqual([]);
+    });
+
+    it("retires the receipt when its own turn fails after producing it", () => {
+      // The exact scenario the review flagged: research emits a finding
+      // mid-turn, then something later in that *same* turn fails. No
+      // assistant message is ever stored for a failed turn, so a reload at
+      // this point would already show no current receipt.
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const state = turnReducer(withFinding, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: TURN,
+          error: {
+            code: "model_output_invalid",
+            userMessage: "Something later in the turn failed.",
+            recoverable: true,
+          },
+        },
+      });
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.activeResearchTurnId).toBeNull();
+    });
+
+    it("leaves the receipt in place when a different, later turn fails", () => {
+      const withFinding = doneFor(
+        turnReducer(streamStarted(send()), {
+          type: "event",
+          event: { type: "research_finding", finding: testFinding },
+        }),
+      );
+      const nextTurnStarted = turnStarted(withFinding, "t2");
+      const state = turnReducer(nextTurnStarted, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: "t2",
+          error: {
+            code: "engine_unavailable",
+            userMessage: "Unrelated failure.",
+            recoverable: true,
+          },
+        },
+      });
+
+      // A failed turn stores no message, so the most recent one is still
+      // this receipt's own — exactly what reload would still show.
+      expect(state.activeResearch).toEqual(testFinding);
+      expect(state.activeResearchTurnId).toBe(TURN);
+    });
+  });
+
+  describe("evidence_refused (T10 review round 3, P0-2)", () => {
+    it("surfaces why a staged add-as-evidence proposal was not written", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "evidence_refused",
+          reason: "This finding was already added as evidence.",
+        },
+      });
+      expect(state.evidenceOutcome).toEqual({
+        refused: true,
+        reason: "This finding was already added as evidence.",
+      });
+    });
+
+    it("clears once the conversation moves on to a new message", () => {
+      const withOutcome = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "evidence_refused", reason: "Refused." },
+      });
+      const state = send(withOutcome);
+      expect(state.evidenceOutcome).toBeNull();
+    });
+  });
+
   describe("direction_rejected (T10 review round 2, P0-D)", () => {
     it("corrects the earlier promise once the provider says it cannot apply", () => {
       const withDirection = turnReducer(streamStarted(send()), {

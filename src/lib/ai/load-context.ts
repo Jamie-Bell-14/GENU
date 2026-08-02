@@ -7,6 +7,112 @@ import type {
 } from "./context";
 import { RECENT_MESSAGE_LIMIT } from "./context";
 
+/** Bounds how much of a stored field/assumption's own text is quoted back. */
+const GROUNDING_TEXT_MAX = 2_000;
+
+function clip(value: string): string {
+  return value.length > GROUNDING_TEXT_MAX
+    ? `${value.slice(0, GROUNDING_TEXT_MAX)}…`
+    : value;
+}
+
+interface ResearchFindingGroundingRow {
+  title: string;
+  key_finding: string;
+  why_it_matters: string;
+  methodology: string;
+  limitations: string;
+  conflicting: boolean;
+  focal_object_id: string | null;
+}
+
+/**
+ * Reads the exact receipt and its recorded target's own stored content, so a
+ * later "Add as evidence" turn can ask the live model to judge `direction`
+ * from a real comparison rather than a title alone (T10 review round 3, P0-1).
+ *
+ * Only called when the request itself named a receipt. Every failure to
+ * ground — an unreadable receipt, a receipt with no recorded target, or a
+ * target whose own content could not be read — returns `{ grounded: false }`
+ * rather than throwing, so a turn whose grounding cannot be assembled still
+ * runs; `anthropic-engine.ts` is what refuses to trust an ungrounded
+ * `direction` once it sees that flag.
+ */
+export async function loadResearchGrounding(
+  supabase: SupabaseClient,
+  projectId: string,
+  receiptId: string,
+): Promise<{ grounded: true; text: string } | { grounded: false }> {
+  const { data: findingRow } = await supabase
+    .from("research_findings")
+    .select(
+      "title, key_finding, why_it_matters, methodology, limitations, conflicting, focal_object_id",
+    )
+    .eq("id", receiptId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  const finding = findingRow as ResearchFindingGroundingRow | null;
+  if (!finding || !finding.focal_object_id) return { grounded: false };
+
+  const { data: objectRow } = await supabase
+    .from("project_objects")
+    .select("kind")
+    .eq("id", finding.focal_object_id)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  const kind = (objectRow as { kind: string } | null)?.kind;
+
+  let targetText: string | null = null;
+  if (kind === "field") {
+    const { data } = await supabase
+      .from("project_fields")
+      .select("label, value")
+      .eq("id", finding.focal_object_id)
+      .eq("project_id", projectId)
+      .maybeSingle();
+    const field = data as { label: string; value: string } | null;
+    if (field) targetText = `${field.label}: ${clip(field.value)}`;
+  } else if (kind === "assumption") {
+    const { data } = await supabase
+      .from("assumptions")
+      .select("statement, why_it_matters")
+      .eq("id", finding.focal_object_id)
+      .eq("project_id", projectId)
+      .maybeSingle();
+    const assumption = data as {
+      statement: string;
+      why_it_matters: string | null;
+    } | null;
+    if (assumption) {
+      targetText = assumption.why_it_matters
+        ? `${clip(assumption.statement)} — ${clip(assumption.why_it_matters)}`
+        : clip(assumption.statement);
+    }
+  }
+
+  // No stored text could be resolved for this target — a field/assumption
+  // that no longer exists, or a target kind (evidence, decision, document)
+  // this comparison is not defined for in this slice.
+  if (!targetText) return { grounded: false };
+
+  const text = [
+    "The exact research finding you may be asked to add as evidence:",
+    `Title: ${clip(finding.title)}`,
+    `Key finding: ${clip(finding.key_finding)}`,
+    `Why it matters: ${clip(finding.why_it_matters)}`,
+    `Methodology: ${clip(finding.methodology)}`,
+    `Limitations: ${clip(finding.limitations)}`,
+    `Sources disagree with each other: ${finding.conflicting ? "yes" : "no"}`,
+    "",
+    "The object this research was run against, in its own stored words:",
+    targetText,
+    "",
+    "Judge add_evidence's `direction` only from a real comparison between the finding above and this object's own text. Send `unclear` rather than guess.",
+  ].join("\n");
+
+  return { grounded: true, text };
+}
+
 /**
  * Reads the project context one turn is allowed to see.
  *

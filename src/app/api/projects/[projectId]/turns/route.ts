@@ -2,7 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { finishTurn } from "@/lib/ai/finish-turn";
 import { withLeaseHeartbeat } from "@/lib/ai/lease-heartbeat";
-import { loadProjectContext, type LoadedContext } from "@/lib/ai/load-context";
+import {
+  loadProjectContext,
+  loadResearchGrounding,
+  type LoadedContext,
+} from "@/lib/ai/load-context";
 import { selectDiscoveryEngine } from "@/lib/ai/select-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
@@ -305,6 +309,21 @@ export async function POST(
               // Correlated by turn, not by "whichever message is newest".
               turnId,
             );
+            /*
+              Only assembled when the client actually named a receipt: most
+              turns have nothing to ground and reading it every time would be
+              a wasted round trip that also has to fail closed for no reason
+              (T10 review round 3, P0-1). The result travels alongside the
+              rest of `loadedContext` because it feeds the same request the
+              engine assembles, not a second, separately-budgeted one.
+            */
+            if (parsed.data.activeFindingId) {
+              loadedContext.researchGrounding = await loadResearchGrounding(
+                supabase,
+                projectId,
+                parsed.data.activeFindingId,
+              );
+            }
             return scope;
           },
           // A partial or failed read is not "project model read": what is in

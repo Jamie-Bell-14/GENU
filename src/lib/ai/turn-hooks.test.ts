@@ -524,6 +524,114 @@ describe("research receipts (T10 review round 2, P0-A)", () => {
   });
 });
 
+/** A `takeDirection` whose resolution the test controls, so it can be held
+ *  open past the provider's own timing (T10 review round 3, P0-3). */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+describe("the event bridge does not outrun its own async step (T10 review round 3, P0-3)", () => {
+  it("resolves a direction accepted at the final step even when finding/done arrive before takeDirection() does", async () => {
+    const { provider, push, steerCalls } = fakeProvider("applies_next_step");
+    const onDirectionApplied = vi.fn();
+    const held = deferred<string | null>();
+    const recordResearchFinding = vi.fn(async () => "receipt-1");
+    const { events, hooks } = setup({
+      researchProvider: provider,
+      takeDirection: () => held.promise,
+      onDirectionApplied,
+      recordResearchFinding,
+    });
+
+    const outcome = hooks.runResearch({ topic: "t", focalObjectId: OBJECT_A });
+    // The final step's boundary work starts — and stalls on takeDirection().
+    push({ type: "step", step: "checking_source_context" });
+    await flush();
+
+    // The provider's own timing is not gated by that stalled read at all:
+    // finding and done both arrive while it is still pending.
+    push({ type: "finding", finding: FINDING });
+    push({ type: "done" });
+    await flush();
+    // Nothing has settled yet — the boundary work the receipt depends on has
+    // not resolved, so there is no finding to race ahead of.
+    expect(recordResearchFinding).not.toHaveBeenCalled();
+
+    // The read finally resolves, well after the pass conceptually ended.
+    held.resolve("Focus on newer sources");
+
+    await expect(outcome).resolves.toEqual({
+      ok: true,
+      findingTitle: "Test finding",
+    });
+
+    // The provider really was asked — this is not a direction silently
+    // dropped — but it arrived with no next step left to apply it to.
+    expect(steerCalls).toEqual(["Focus on newer sources"]);
+    // Never falsely announced as applied: the provider's own outcome
+    // (`applies_next_step`) never got a next step to become true at.
+    expect(onDirectionApplied).not.toHaveBeenCalled();
+    // The promise made when the direction was accepted is explicitly
+    // corrected, not left to stand unfulfilled forever.
+    expect(events).toContainEqual({
+      type: "direction_rejected",
+      note: "Focus on newer sources",
+      reason: expect.any(String),
+    });
+    // The durable receipt reflects reality: this direction never took
+    // effect, so it must not appear in what the receipt records as applied.
+    expect(recordResearchFinding).toHaveBeenCalledWith(
+      expect.objectContaining({ appliedDirections: [] }),
+    );
+  });
+
+  it("still applies a direction honestly when a later step's read resolves out of order", async () => {
+    // Two steps, each reading direction; the *first* read is held open
+    // longer than the second one takes to resolve, so nothing but the
+    // serialising queue keeps their effects from being interleaved.
+    const { provider, push, steerCalls } = fakeProvider("applied_now");
+    const onDirectionApplied = vi.fn();
+    const first = deferred<string | null>();
+    let call = 0;
+    const { hooks } = setup({
+      researchProvider: provider,
+      takeDirection: () => {
+        call += 1;
+        return call === 1 ? first.promise : Promise.resolve("Second note");
+      },
+      onDirectionApplied,
+    });
+
+    const outcome = hooks.runResearch({ topic: "t", focalObjectId: OBJECT_A });
+    push({ type: "step", step: "searching_sources" });
+    await flush();
+    push({ type: "step", step: "reviewing_sources" });
+    await flush();
+    // The second step's own boundary work has not been reached: the first
+    // is still pending, and the queue has not moved past it.
+    expect(steerCalls).toEqual([]);
+
+    first.resolve("First note");
+    await flush();
+
+    push({ type: "finding", finding: FINDING });
+    push({ type: "done" });
+    await outcome;
+
+    // Both directions were genuinely applied, in the order their own steps
+    // actually happened — never interleaved or dropped.
+    expect(steerCalls).toEqual(["First note", "Second note"]);
+    expect(onDirectionApplied.mock.calls.map((call) => call[0])).toEqual([
+      "First note",
+      "Second note",
+    ]);
+  });
+});
+
 describe("addEvidence is staged, not a hook (T10 review round 2, P0-B)", () => {
   it("no longer exposes an addEvidence call on TurnHooks", () => {
     const { hooks } = setup();

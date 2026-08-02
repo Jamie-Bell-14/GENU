@@ -319,7 +319,12 @@ export interface TurnState {
    * most recent thing that happened. Set whenever `activeResearch` is —
    * including for a receipt seeded from reload hydration, which starts
    * current by construction and is retired the same way a live one is: the
-   * moment any *other* turn completes.
+   * moment any *other* turn is accepted (T10 review round 5 — retirement
+   * happens on `turn_identified`, as soon as the server has genuinely
+   * stored a new turn's message, not only once that turn later completes;
+   * a later turn that is accepted and then itself fails, is stopped, or
+   * expires unfinished still retires this receipt, since the conversation
+   * has already moved on).
    */
   activeResearchTurnId: string | null;
   /**
@@ -644,7 +649,23 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
     case "direction_failed":
       return { ...state, error: action.error };
 
-    case "turn_identified":
+    case "turn_identified": {
+      /*
+        A later turn has genuinely been accepted (T10 review round 5):
+        `start_turn` stores the user's message the instant a turn is
+        accepted, and the server sets the `x-turn-id` response header — the
+        one thing this action is dispatched from — only once that stored
+        message actually exists (see `route.ts`: a refused send returns a
+        plain JSON error with no such header, which dispatches
+        `send_refused` instead and never reaches here). That acceptance
+        alone is what retires an older receipt, regardless of whether this
+        new turn goes on to succeed, fail, be stopped, or expire unfinished
+        — every one of those still means the conversation has moved past
+        the receipt's own turn, and none of them is undone by how this new
+        turn ends. Preserved only when the send itself was refused, since
+        `turn_identified` then never fires at all.
+      */
+      const retiringReceipt = state.activeResearchTurnId !== null;
       return {
         ...state,
         messages: state.messages.map((message) =>
@@ -652,7 +673,13 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             ? { ...message, turnId: action.turnId }
             : message,
         ),
+        activeResearch: retiringReceipt ? null : state.activeResearch,
+        activeResearchTurnId: retiringReceipt
+          ? null
+          : state.activeResearchTurnId,
+        unavailableSources: retiringReceipt ? [] : state.unavailableSources,
       };
+    }
 
     case "dismiss_recovery":
       return {
@@ -852,10 +879,16 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
               addable: no assistant message is ever stored for a failed
               turn, so a reload at this exact point would already show no
               current receipt (`loadLatestResearchReceipt`) — live state
-              matching that is the same rule, not a special case of it. A
-              different turn failing leaves this receipt exactly as it was:
-              that turn stored no message either, so the most recent one is
-              still this receipt's own.
+              matching that is the same rule, not a special case of it.
+
+              A *different* turn failing is not handled here at all (T10
+              review round 5): retirement for any other, later turn now
+              happens the moment that turn is accepted (`turn_identified`),
+              well before it could reach `turn_failed` — so by the time a
+              different turn's failure arrives, `activeResearchTurnId` is
+              already either null or this same failing turn's own id. The
+              equality check below is consequently only ever true for this
+              turn's own receipt.
             */
             activeResearch:
               state.activeResearchTurnId === action.event.turnId
@@ -886,17 +919,15 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             createdAt: new Date().toISOString(),
           };
           /*
-            A receipt from an *earlier* turn stops being current the moment
-            any other turn completes (T10 review round 3, P0-2) — the same
-            rule reload hydration already applies: once the conversation has
-            a newer stored message, that message is what the conversation is
-            now about, whether or not it concerned the research at all. The
-            turn that produced the receipt is exempt from its own rule: this
-            is the completion that makes it addable in the first place.
+            A receipt from an *earlier* turn no longer needs retiring here
+            (T10 review round 5): that already happened the moment this
+            turn was accepted (`turn_identified`), well before it could
+            reach `done`. So if `activeResearchTurnId` is set at all by now,
+            it is this same completing turn's own — set by its own
+            `research_finding` earlier in this same stream — and stays,
+            exactly as it should: this completion is what makes it addable
+            in the first place.
           */
-          const retiringReceipt =
-            state.activeResearchTurnId !== null &&
-            state.activeResearchTurnId !== state.streaming.turnId;
           return {
             ...state,
             messages: completed.content
@@ -906,11 +937,6 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             // Temporary activity fades; the result and the retrievable history
             // remain (UI acceptance §7).
             activity: NO_ACTIVITY,
-            activeResearch: retiringReceipt ? null : state.activeResearch,
-            activeResearchTurnId: retiringReceipt
-              ? null
-              : state.activeResearchTurnId,
-            unavailableSources: retiringReceipt ? [] : state.unavailableSources,
             status: "idle",
           };
         }

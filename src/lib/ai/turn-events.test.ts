@@ -46,6 +46,21 @@ function streamStarted(state: TurnState): TurnState {
   });
 }
 
+/**
+ * The server has genuinely accepted a turn (T10 review round 5): in
+ * production this fires from the `x-turn-id` response header, which is
+ * only ever set once `start_turn` has actually stored the user's message —
+ * never on a refused send. Dispatched against `userMessage.id` here since
+ * that is the only message these tests ever send.
+ */
+function turnIdentified(state: TurnState, turnId: string): TurnState {
+  return turnReducer(state, {
+    type: "turn_identified",
+    messageId: userMessage.id,
+    turnId,
+  });
+}
+
 describe("turnReducer", () => {
   it("appends the user message and marks the turn as sending", () => {
     const state = send();
@@ -770,13 +785,6 @@ describe("research (T10)", () => {
   });
 
   describe("a receipt stays current only while its own turn is the latest thing that happened (T10 review round 3, P0-2)", () => {
-    function turnStarted(state: TurnState, turnId: string): TurnState {
-      return turnReducer(state, {
-        type: "event",
-        event: { type: "turn_started", turnId },
-      });
-    }
-
     function doneFor(state: TurnState): TurnState {
       return turnReducer(state, { type: "event", event: { type: "done" } });
     }
@@ -800,22 +808,52 @@ describe("research (T10)", () => {
       expect(state.activeResearchTurnId).toBe(TURN);
     });
 
-    it("retires the receipt once a later, unrelated turn completes", () => {
+    it("retires the receipt the moment a later turn is accepted, before that turn does anything else", () => {
+      // T10 review round 5: retirement happens on `turn_identified` — the
+      // server genuinely accepting a new turn — not on that turn's later
+      // completion. `loadLatestResearchReceipt`'s reload rule already
+      // agrees: the most recent *stored* message decides currency, and a
+      // new turn's message is stored (via `start_turn`) the instant it is
+      // accepted, well before any assistant answer exists.
       const withFinding = doneFor(
         turnReducer(streamStarted(send()), {
           type: "event",
           event: { type: "research_finding", finding: testFinding },
         }),
       );
-      // A second, unrelated turn runs to completion — the same rule reload
-      // hydration already applies (`loadLatestResearchReceipt`): the most
-      // recent message is no longer this receipt's own.
-      const nextTurnStarted = turnStarted(withFinding, "t2");
-      const state = doneFor(nextTurnStarted);
+      const state = turnIdentified(withFinding, "t2");
 
       expect(state.activeResearch).toBeNull();
       expect(state.activeResearchTurnId).toBeNull();
       expect(state.unavailableSources).toEqual([]);
+    });
+
+    it("stays retired regardless of how the later turn that retired it goes on to end", () => {
+      // Accepted, then fails, is stopped, or expires unfinished — none of
+      // that is undone: the conversation already moved on the moment the
+      // later turn was accepted (T10 review round 5).
+      const withFinding = doneFor(
+        turnReducer(streamStarted(send()), {
+          type: "event",
+          event: { type: "research_finding", finding: testFinding },
+        }),
+      );
+      const retired = turnIdentified(withFinding, "t2");
+      const state = turnReducer(retired, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: "t2",
+          error: {
+            code: "engine_unavailable",
+            userMessage: "Unrelated failure.",
+            recoverable: true,
+          },
+        },
+      });
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.activeResearchTurnId).toBeNull();
     });
 
     it("retires the receipt when its own turn fails after producing it", () => {
@@ -844,29 +882,27 @@ describe("research (T10)", () => {
       expect(state.activeResearchTurnId).toBeNull();
     });
 
-    it("leaves the receipt in place when a different, later turn fails", () => {
+    it("preserves the receipt when a send is refused and no later turn is ever accepted", () => {
+      // T10 review round 5's other required distinction: a refusal stores
+      // nothing, so `turn_identified` never fires for it at all (in
+      // production, `route.ts`'s `errorResponse` carries no `x-turn-id`
+      // header) — this must not read as "a later turn happened".
       const withFinding = doneFor(
         turnReducer(streamStarted(send()), {
           type: "event",
           event: { type: "research_finding", finding: testFinding },
         }),
       );
-      const nextTurnStarted = turnStarted(withFinding, "t2");
-      const state = turnReducer(nextTurnStarted, {
-        type: "event",
-        event: {
-          type: "turn_failed",
-          turnId: "t2",
-          error: {
-            code: "engine_unavailable",
-            userMessage: "Unrelated failure.",
-            recoverable: true,
-          },
+      const state = turnReducer(withFinding, {
+        type: "send_refused",
+        messageId: "m2",
+        error: {
+          code: "engine_unavailable",
+          userMessage: "The message could not be sent.",
+          recoverable: true,
         },
       });
 
-      // A failed turn stores no message, so the most recent one is still
-      // this receipt's own — exactly what reload would still show.
       expect(state.activeResearch).toEqual(testFinding);
       expect(state.activeResearchTurnId).toBe(TURN);
     });

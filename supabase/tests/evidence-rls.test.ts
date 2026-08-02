@@ -59,7 +59,15 @@ async function addField(projectId: string, key: string): Promise<string> {
   return rows[0].id;
 }
 
-/** Opens a running turn for the project, closing whatever was left running. */
+/**
+ * Opens a running turn for the project, closing whatever was left running —
+ * and, like the real `start_turn`, stores the user's message the instant the
+ * turn is accepted (T10 review round 5). A turn that is opened and then
+ * fails or is closed without ever reaching `complete_turn` therefore leaves
+ * exactly what production leaves: a `role = 'user'` message for that turn,
+ * never an assistant one. Tests that need a turn with no message at all
+ * (nothing accepted) do not call this helper.
+ */
 async function openRun(
   projectId: string,
   options: { expired?: boolean } = {},
@@ -72,6 +80,17 @@ async function openRun(
      where project_id = $1 and state = 'running'`,
     [projectId],
   );
+  // No role has an insert grant on `messages` outside the `start_turn` /
+  // `complete_turn` definer functions (by design — see
+  // 20260728130000_messages.sql), so this raw insert runs as the
+  // connection's own superuser rather than as `service_role`.
+  await db.query("reset role");
+  await db.query(
+    `insert into messages (project_id, turn_id, role, content)
+     values ($1, $2, 'user', 'User message.')`,
+    [projectId, turnId],
+  );
+  await asTrustedWriter();
   await db.query(
     `insert into turn_runs (turn_id, project_id, lease_expires_at)
      values ($1, $2, now() + ($3 || ' minutes')::interval)`,
@@ -462,20 +481,28 @@ describe.skipIf(skip)(
 
     /*
       Currency is now one rule, the same one reload hydration already uses
-      (T10 review round 4, P0-2): a receipt is current only if the most
-      recent message in the project *other than this turn's own* belongs to
-      the receipt's own turn. The tests below construct that adjacency
-      directly through `complete_turn` itself (`completeTurnPlain`), the same
-      function that stores every real turn's message, rather than flipping
-      `turn_runs.state` on its own — a state no real turn ever leaves
-      without also storing a message.
+      (T10 review round 4, P0-2; made role-aware in round 5): a receipt is
+      current only if the most recent message in the project *other than
+      this turn's own* is both the receipt's own turn and that turn's
+      *assistant* answer. The tests below construct that adjacency directly
+      through `complete_turn` itself (`completeTurnPlain`), the same
+      function that stores every real turn's assistant message, rather than
+      flipping `turn_runs.state` on its own — a state no real turn ever
+      leaves without also storing one.
     */
 
-    it("rejects a receipt whose own research pass never stored a message, as research_incomplete", async () => {
-      // The exact scenario the review named: the finding was recorded
-      // (`research_findings` is written before it is even shown), but
-      // something later in that same turn failed, so the turn itself never
-      // stored a message and is not the project's most recent one.
+    it("rejects a receipt whose own research turn was accepted and then failed with only its user message stored, as research_incomplete", async () => {
+      /*
+        T10 review round 5's exact scenario: `start_turn` stores the user's
+        message the instant a turn is accepted — before any research runs or
+        any assistant answer exists (`openRun` now reproduces this, matching
+        production). The finding is recorded (`research_findings` is written
+        before it is even shown), but the turn then fails before reaching
+        `complete_turn`, so it never stores an assistant message. Round 4's
+        turn_id-only check would have read the stored *user* message as
+        proof this turn "completed" and wrongly treated the receipt as
+        current; requiring role = 'assistant' is what catches this.
+      */
       const researchTurn = await openRun(projectA);
       const receiptId = await recordFinding(projectA, researchTurn, fieldA, {
         title: "Incomplete turn check",

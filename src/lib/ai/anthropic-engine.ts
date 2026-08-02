@@ -579,8 +579,18 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
           /*
             The scene is queued here, by the host, rather than left to a
             second model tool call the response might never make — the tool
-            result below says the finding is on the canvas, so that has to be
-            true by the time it is said, not merely likely.
+            result below has to describe what queuing actually does, not what
+            a second call might later achieve.
+
+            Queuing is not showing (T10 review round 6, P0): `recommendScene`
+            only offers the recommendation — `docs/ADAPTIVE_CANVAS_MVP.md`
+            requires that a non-urgent scene update never move content under
+            the user, so `LivingCanvas` holds the current scene and presents
+            "Show it" / "Stay here" rather than applying it. The tool result
+            must say the view is ready and selectable, never that it is
+            already visible — telling the model otherwise would have it skip
+            explaining the finding on the false assumption the user is
+            already looking at it.
           */
           if (outcome.ok && focalObjectId) {
             await hooks.recommendScene({
@@ -595,7 +605,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             });
           }
           content = outcome.ok
-            ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. The full finding is already on the canvas; do not restate its detail, only react to it and offer to add it as evidence if that follows.`
+            ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. A validated research view is ready on the canvas; the person can select "Show it" to open it — do not claim it is already visible. Briefly state the conclusion and offer to add it as evidence if that follows, without restating the full research detail.`
             : outcome.reason === "stopped"
               ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
               : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added.";

@@ -319,6 +319,17 @@ export function useTurnRuntime({
     [],
   );
 
+  /*
+    Read once, outside the callback body, so it can sit in `send`'s own
+    dependency array (T10 review round 6, P1): `useCallback`'s memoised
+    closure otherwise keeps whichever `state.activeResearch` was current the
+    last time its dependencies actually changed, not the one current when
+    `send` is finally called. Composing a message while research is still
+    running, then leaving the draft untouched once the finding lands, is
+    exactly the sequence that reused the stale memoised closure without this.
+  */
+  const activeResearchId = state.activeResearch?.id ?? null;
+
   const send = useCallback(async () => {
     const message = draft.trim();
     // Guard against rapid double-submits racing the state update, and against
@@ -380,12 +391,15 @@ export function useTurnRuntime({
         method: "POST",
         headers: { "content-type": "application/json" },
         // `activeFindingId` tells the server which research finding this
-        // session is looking at (T10, `src/lib/research/types.ts`): nothing
-        // about a research run persists server-side between turns, so
-        // "Add as evidence" would otherwise have nothing to link.
+        // session is looking at (T10, `src/lib/research/types.ts`): the
+        // server holds the receipt itself (`research_findings`) and
+        // re-hydrates it on reload, but not which one *this* client last
+        // saw, so the client still has to name it — an opaque reference,
+        // not project truth, and one whose currency the server still
+        // re-checks against its own record before trusting it.
         body: JSON.stringify({
           message,
-          activeFindingId: state.activeResearch?.id ?? null,
+          activeFindingId: activeResearchId,
         }),
         signal: controller.signal,
       });
@@ -474,7 +488,7 @@ export function useTurnRuntime({
       abortRef.current = null;
       stoppedRef.current = false;
     }
-  }, [catchUp, draft, turnsEndpoint]);
+  }, [activeResearchId, catchUp, draft, turnsEndpoint]);
 
   const stop = useCallback(() => {
     stoppedRef.current = true;

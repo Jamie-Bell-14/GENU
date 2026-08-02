@@ -316,6 +316,65 @@ describe("AnthropicDiscoveryEngine", () => {
 
       expect(scenes).toHaveLength(0);
     });
+
+    /*
+      T10 review round 6, P0: `recommendScene` only *queues* the
+      recommendation — `docs/ADAPTIVE_CANVAS_MVP.md` requires that a
+      non-urgent scene update never move content under the user, so
+      `LivingCanvas` holds the current scene and offers "Show it" / "Stay
+      here" rather than applying it. The tool result the model actually
+      receives on its *next* request — not merely the scene candidate handed
+      to `recommendScene` — must say the view is ready and selectable, never
+      that it is already visible; telling the model otherwise invites it to
+      skip explaining the finding on the false assumption the user is
+      already looking at it.
+    */
+    it("tells the model the research view is ready and selectable, never that it is already visible", async () => {
+      const { scenes, hooks } = harness();
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      // Exactly one recommendation is queued — the existing guarantee this
+      // does not depend on a second model tool call.
+      expect(scenes).toHaveLength(1);
+
+      expect(stub.requests).toHaveLength(2);
+      const nextRequest = stub.requests[1] as {
+        messages: { role: string; content: unknown }[];
+      };
+      const toolResultTurn = nextRequest.messages.at(-1) as {
+        role: string;
+        content: { type: string; tool_use_id: string; content: string }[];
+      };
+      const toolResult = toolResultTurn.content.find(
+        (block) => block.tool_use_id === "t1",
+      );
+
+      expect(toolResult?.content).toBeDefined();
+      // The false claim round 6 flagged — never asserted, only negated below.
+      expect(toolResult?.content).not.toMatch(/already on the canvas/i);
+      expect(toolResult?.content).toMatch(/ready.*select/i);
+      expect(toolResult?.content).toMatch(
+        /do not claim it is already visible/i,
+      );
+      // Still allowed to react and offer the evidence action briefly —
+      // this is not a ban on all explanation, only on the false premise.
+      expect(toolResult?.content).toMatch(/offer to add it as evidence/i);
+    });
   });
 
   describe("add_evidence direction is grounded, not asserted (T10 review round 3, P0-1)", () => {

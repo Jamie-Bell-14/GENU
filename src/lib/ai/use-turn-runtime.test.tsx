@@ -1055,6 +1055,209 @@ describe("adding direction", () => {
   });
 });
 
+describe("send uses the receipt current when it is called (T10 review round 6, P1)", () => {
+  const testFinding = {
+    id: "finding-1",
+    title: "Deposit disputes are common",
+    keyFinding: "Roughly 1 in 6.",
+    whyItMatters: "It matters.",
+    visualisation: { kind: "bar" as const, unit: "%", series: [] },
+    sources: [],
+    methodology: "Method.",
+    limitations: "Limits.",
+    retrievedAt: "2026-07-30T00:00:00.000Z",
+    isDemo: true as const,
+    conflicting: false,
+  };
+
+  /**
+   * A stream the test feeds one frame at a time, so an assertion (or a
+   * `setDraft`) can run at an exact point between two SSE events rather than
+   * racing however fast the reader loop happens to drain a fixed buffer.
+   */
+  function gatedStream(turnId: string) {
+    const encoder = new TextEncoder();
+    const queue: unknown[] = [];
+    let waiter: (() => void) | null = null;
+    let ended = false;
+    const response = {
+      ok: true,
+      headers: new Headers({ "x-turn-id": turnId }),
+      body: {
+        getReader: () => ({
+          async read() {
+            while (queue.length === 0 && !ended) {
+              await new Promise<void>((resolve) => {
+                waiter = resolve;
+              });
+            }
+            if (queue.length === 0) return { done: true, value: undefined };
+            const event = queue.shift();
+            return { done: false, value: encoder.encode(sse(event)) };
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response;
+    return {
+      response,
+      push(event: unknown) {
+        queue.push(event);
+        waiter?.();
+        waiter = null;
+      },
+      end() {
+        ended = true;
+        waiter?.();
+        waiter = null;
+      },
+    };
+  }
+
+  it("submits the receipt current at send time, not the one captured when send's callback was last memoised", async () => {
+    /*
+      The exact repro (T10 review round 6): the composer already holds the
+      next message while this turn's research is still running and no
+      finding yet exists — that is when `send`'s memoised closure last got
+      recreated, over `draft`, if nothing else about it changes again. The
+      finding then arrives without the draft changing a second time, so the
+      only thing that can pick up the new receipt id for the *next* call to
+      `send` is `send` itself being recreated — which requires the receipt
+      id in its own dependency array, not merely `draft`.
+    */
+    const stream = gatedStream(TURN);
+    const fetchMock = vi.fn().mockResolvedValueOnce(stream.response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("Look into deposit disputes"));
+    let sentA: Promise<void>;
+    act(() => {
+      sentA = result.current.send();
+    });
+
+    act(() => stream.push({ type: "turn_started", turnId: TURN }));
+    await waitFor(() => expect(result.current.state.status).toBe("streaming"));
+    expect(result.current.state.activeResearch).toBeNull();
+
+    // The next message, composed while research is still in flight.
+    act(() => result.current.setDraft("Add the finding as evidence"));
+
+    // The finding arrives; the draft is not touched again after this.
+    act(() => stream.push({ type: "research_finding", finding: testFinding }));
+    await waitFor(() =>
+      expect(result.current.state.activeResearch).toEqual(testFinding),
+    );
+
+    act(() =>
+      stream.push({ type: "assistant_delta", text: "Here is what I found." }),
+    );
+    act(() => stream.push({ type: "done" }));
+    act(() => stream.end());
+    await act(async () => {
+      await sentA;
+    });
+    expect(result.current.draft).toBe("Add the finding as evidence");
+
+    const TURN_NEXT = "eeeeeeee-0000-4000-8000-000000000009";
+    fetchMock.mockResolvedValueOnce(
+      streamingResponse([
+        sse({ type: "turn_started", turnId: TURN_NEXT }),
+        sse({ type: "done" }),
+      ]),
+    );
+
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `/api/projects/${PROJECT}/turns`,
+      expect.objectContaining({
+        body: JSON.stringify({
+          message: "Add the finding as evidence",
+          activeFindingId: "finding-1",
+        }),
+      }),
+    );
+  });
+
+  it("sends null once a later turn has retired the receipt, even though that later turn then itself fails", async () => {
+    const streamA = gatedStream(TURN);
+    const fetchMock = vi.fn().mockResolvedValueOnce(streamA.response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderRuntime();
+    act(() => result.current.setDraft("Look into deposit disputes"));
+    let sentA: Promise<void>;
+    act(() => {
+      sentA = result.current.send();
+    });
+    act(() => streamA.push({ type: "turn_started", turnId: TURN }));
+    act(() => streamA.push({ type: "research_finding", finding: testFinding }));
+    await waitFor(() =>
+      expect(result.current.state.activeResearch).toEqual(testFinding),
+    );
+    act(() => streamA.push({ type: "done" }));
+    act(() => streamA.end());
+    await act(async () => {
+      await sentA;
+    });
+    expect(result.current.state.activeResearch).toEqual(testFinding);
+
+    // A later, unrelated turn is genuinely accepted (the `x-turn-id` header
+    // is set) and then loses its connection before resolving — acceptance
+    // alone must retire the earlier receipt, regardless of this turn's own
+    // eventual outcome.
+    const TURN_B = "eeeeeeee-0000-4000-8000-000000000002";
+    const responseB = {
+      ok: true,
+      headers: new Headers({ "x-turn-id": TURN_B }),
+      body: {
+        getReader: () => ({
+          async read(): Promise<never> {
+            throw new TypeError("network error");
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response;
+    fetchMock.mockResolvedValueOnce(responseB).mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "failed", activity: [], message: null }),
+    } as unknown as Response);
+
+    act(() => result.current.setDraft("An unrelated follow-up"));
+    await act(async () => {
+      await result.current.send();
+    });
+    expect(result.current.state.activeResearch).toBeNull();
+
+    // A further, unrelated send must not resurrect the retired receipt.
+    const TURN_C = "eeeeeeee-0000-4000-8000-000000000003";
+    fetchMock.mockResolvedValueOnce(
+      streamingResponse([
+        sse({ type: "turn_started", turnId: TURN_C }),
+        sse({ type: "done" }),
+      ]),
+    );
+    act(() => result.current.setDraft("Yet another message"));
+    await act(async () => {
+      await result.current.send();
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `/api/projects/${PROJECT}/turns`,
+      expect.objectContaining({
+        body: JSON.stringify({
+          message: "Yet another message",
+          activeFindingId: null,
+        }),
+      }),
+    );
+  });
+});
+
 describe("a refused send", () => {
   /*
     The duplicate-message defect, from the client's end. The server used to save

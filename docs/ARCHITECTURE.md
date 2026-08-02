@@ -88,10 +88,21 @@ research_findings  (id, project_id, turn_id, focal_object_id, unavailable_source
                     -- the exact, post-steering result one research pass produced,
                     -- and the object it concerned; system-authored only
                     -- (T10 review round 1, P0-1; round 2, P0-A). A receipt is
-                    -- current, and so addable, only while its own turn has
-                    -- completed and no later completed pass supersedes it —
+                    -- current, and so addable, only while the latest message
+                    -- in the project *other than the add turn's own* is both
+                    -- the receipt's own turn and that turn's assistant answer
+                    -- (role = 'assistant', not merely a stored message) —
                     -- enforced inside complete_turn() itself, the same rule
-                    -- reload hydration applies (round 3, P0-2)
+                    -- reload hydration applies (round 3, P0-2; made
+                    -- role-aware in round 5). Any later accepted turn retires
+                    -- it, unrelated or not, and it stays retired even if that
+                    -- later turn then fails, is stopped or expires unfinished
+                    -- (round 5) — a genuinely refused send that stores no
+                    -- turn/message does not. This is a deliberate product
+                    -- trade-off, not an incidental strictness: the T10
+                    -- receipt is a narrow, immediate follow-up action, not a
+                    -- historical catalogue to reselect from once the
+                    -- conversation has moved on.
 evidence           (id, project_id, title, summary, source_name, source_url,
                     retrieved_at, methodology, limitations,
                     kind user_stated|secondary_research|customer_reported|observed|commitment,

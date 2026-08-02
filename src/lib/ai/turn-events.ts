@@ -183,7 +183,9 @@ export type TurnEvent =
   /**
    * A staged "Add as evidence" proposal was not written when the turn
    * completed (T10 review round 3, P0-2) — the receipt was reused, its own
-   * research pass never finished, or a later pass has since superseded it.
+   * research turn never produced an answer, or a later turn has since
+   * superseded it (not necessarily a research pass — any turn accepted since,
+   * round 5).
    * The assistant's own reply speaks in staged, present-progressive terms
    * (see `STAGED` in `anthropic-engine.ts`) precisely because the outcome is
    * not yet known when it is written; this is that outcome, once it is,
@@ -305,10 +307,14 @@ export interface TurnState {
   /**
    * The research finding this session's most recent research produced, if
    * any (T10). Deliberately not cleared when its turn ends: "Add as evidence"
-   * is a *later* turn's action, and this is the only record of which finding
-   * that later turn concerns — the server holds nothing between turns (see
-   * `src/lib/research/types.ts`). Reloading the page loses it, the same
-   * limitation an unaccepted scene recommendation already has.
+   * is a *later* turn's action, and this is this client's own record of which
+   * finding that later turn concerns while it composes the request (T10
+   * review round 6, P1) — the server durably holds the receipt itself
+   * (`research_findings`) and re-hydrates the eligible one on reload
+   * (`loadLatestResearchReceipt`), but not which one *this* client last saw,
+   * so the request still has to name it. The server independently re-checks
+   * the named receipt's own currency before trusting it (`complete_turn`),
+   * so a stale value sent here is refused, not silently accepted.
    */
   activeResearch: ResearchFinding | null;
   /**

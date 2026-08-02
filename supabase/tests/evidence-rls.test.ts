@@ -89,6 +89,38 @@ async function closeRun(turnId: string, state: "completed" | "failed") {
   );
 }
 
+/**
+ * Completes a turn exactly as `complete_turn` does in production for a plain
+ * turn that stages no project-truth writes: the assistant's message is
+ * stored and the run is marked completed, together (T10 review round 4,
+ * P0-2). Currency is now defined entirely by message adjacency
+ * (`complete_turn`'s own evidence-refusal check), so a synthetic "this turn
+ * completed" that used `closeRun` alone — flipping `turn_runs.state` without
+ * ever storing a message — no longer represents what a completed turn
+ * actually leaves behind, and tests using it to simulate a completed
+ * research or unrelated turn were exercising a state production never
+ * produces.
+ */
+async function completeTurnPlain(
+  projectId: string,
+  turnId: string,
+  assistantText = "Turn complete.",
+): Promise<void> {
+  await asTrustedWriter();
+  await db.query(
+    `select public.complete_turn(
+       p_project_id => $1,
+       p_turn_id => $2,
+       p_actor_id => $3,
+       p_assistant_text => $4,
+       p_fields => '[]'::jsonb,
+       p_assumptions => '[]'::jsonb,
+       p_evidence => '[]'::jsonb
+     )`,
+    [projectId, turnId, USER_A, assistantText],
+  );
+}
+
 /** Records a receipt exactly as `recordResearchFinding` does. */
 async function recordFinding(
   projectId: string,
@@ -308,12 +340,17 @@ describe.skipIf(skip)(
   "complete_turn: add_evidence (T10 review round 2, P0-B/P0-C)",
   () => {
     it("creates the evidence row and its relationship together, targeting the receipt's own focal object", async () => {
-      const turnId = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, turnId, fieldA);
+      // Same-turn research + add is not supported (T10 review round 4,
+      // P0-1) — the receipt's own turn completes first, exactly as the
+      // application always does before its own next turn can add it.
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, researchTurn, fieldA);
+      await completeTurnPlain(projectA, researchTurn);
 
+      const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
         projectA,
-        turnId,
+        addTurn,
         receiptId,
         {
           consequenceSummary: "Supports the field; does not support the rest.",
@@ -345,23 +382,32 @@ describe.skipIf(skip)(
     });
 
     it("is idempotent across turns: relinking the same receipt reuses both rows and refuses as already_linked", async () => {
-      const firstTurn = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, firstTurn, fieldA, {
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, researchTurn, fieldA, {
         title: "Idempotency check",
       });
+      await completeTurnPlain(projectA, researchTurn);
+
+      const firstAddTurn = await openRun(projectA);
       const first = await completeTurnWithEvidence(
         projectA,
-        firstTurn,
+        firstAddTurn,
         receiptId,
       );
       expect(first.written).toEqual({ "0": 1 });
 
-      // "Add as evidence" a second time is a genuinely new turn — the run above
-      // is already closed by `complete_turn` itself.
-      const secondTurn = await openRun(projectA);
+      /*
+        A genuine retry: the same receipt named again from a new turn. This
+        must read as "already done" (already_linked) even though, by the
+        currency rule alone, `firstAddTurn`'s own completion has since made
+        `researchTurn` no longer the project's most recent *other* turn —
+        idempotency is checked before currency for exactly this reason (see
+        the migration's own comment).
+      */
+      const secondAddTurn = await openRun(projectA);
       const second = await completeTurnWithEvidence(
         projectA,
-        secondTurn,
+        secondAddTurn,
         receiptId,
       );
       expect(second.written ?? {}).toEqual({});
@@ -399,23 +445,37 @@ describe.skipIf(skip)(
     });
 
     it("rejects a receipt whose research ran with no object in focus, as no_focal_object", async () => {
-      const turnId = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, turnId, null, {
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, researchTurn, null, {
         title: "No focus check",
       });
+      await completeTurnPlain(projectA, researchTurn);
+
+      const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
         projectA,
-        turnId,
+        addTurn,
         receiptId,
       );
       expect(result.refused?.["0"]).toEqual(["no_focal_object"]);
     });
 
-    it("rejects a receipt whose own research pass later failed, as research_incomplete (T10 review round 3, P0-2)", async () => {
+    /*
+      Currency is now one rule, the same one reload hydration already uses
+      (T10 review round 4, P0-2): a receipt is current only if the most
+      recent message in the project *other than this turn's own* belongs to
+      the receipt's own turn. The tests below construct that adjacency
+      directly through `complete_turn` itself (`completeTurnPlain`), the same
+      function that stores every real turn's message, rather than flipping
+      `turn_runs.state` on its own — a state no real turn ever leaves
+      without also storing a message.
+    */
+
+    it("rejects a receipt whose own research pass never stored a message, as research_incomplete", async () => {
       // The exact scenario the review named: the finding was recorded
       // (`research_findings` is written before it is even shown), but
       // something later in that same turn failed, so the turn itself never
-      // completed.
+      // stored a message and is not the project's most recent one.
       const researchTurn = await openRun(projectA);
       const receiptId = await recordFinding(projectA, researchTurn, fieldA, {
         title: "Incomplete turn check",
@@ -438,7 +498,7 @@ describe.skipIf(skip)(
       expect(evidenceCount.rows[0].n).toBe(0);
     });
 
-    it("rejects a receipt superseded by a later, completed research pass, as research_superseded (T10 review round 3, P0-2)", async () => {
+    it("rejects a receipt superseded by a later, completed research pass, as research_superseded", async () => {
       const firstResearchTurn = await openRun(projectA);
       const firstReceiptId = await recordFinding(
         projectA,
@@ -446,7 +506,7 @@ describe.skipIf(skip)(
         fieldA,
         { title: "Superseded pass" },
       );
-      await closeRun(firstResearchTurn, "completed");
+      await completeTurnPlain(projectA, firstResearchTurn);
 
       // A second, later pass completes and supersedes the first — the same
       // currency rule reload hydration already applies
@@ -459,7 +519,7 @@ describe.skipIf(skip)(
         fieldA,
         { title: "Superseding pass" },
       );
-      await closeRun(secondResearchTurn, "completed");
+      await completeTurnPlain(projectA, secondResearchTurn);
 
       const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
@@ -479,6 +539,33 @@ describe.skipIf(skip)(
       void secondReceiptId;
     });
 
+    /*
+      The exact gap round 4 found: round 3's check only ever looked at
+      *research* history, so an unrelated turn — one that never touched
+      research at all — completing afterwards did not retire an older
+      receipt at the write boundary, even though both live client state and
+      a reload would already say it was no longer current.
+    */
+    it("rejects a receipt once an unrelated, non-research turn has since completed", async () => {
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(projectA, researchTurn, fieldA, {
+        title: "Retired by an unrelated turn",
+      });
+      await completeTurnPlain(projectA, researchTurn);
+
+      // An ordinary conversational turn, nothing to do with research.
+      const unrelatedTurn = await openRun(projectA);
+      await completeTurnPlain(projectA, unrelatedTurn, "Unrelated reply.");
+
+      const addTurn = await openRun(projectA);
+      const result = await completeTurnWithEvidence(
+        projectA,
+        addTurn,
+        receiptId,
+      );
+      expect(result.refused?.["0"]).toEqual(["research_superseded"]);
+    });
+
     it("still accepts the latest completed pass's own receipt", async () => {
       const firstResearchTurn = await openRun(projectA);
       const firstReceiptId = await recordFinding(
@@ -487,7 +574,7 @@ describe.skipIf(skip)(
         fieldA,
         { title: "Earlier pass" },
       );
-      await closeRun(firstResearchTurn, "completed");
+      await completeTurnPlain(projectA, firstResearchTurn);
 
       const secondResearchTurn = await openRun(projectA);
       const secondReceiptId = await recordFinding(
@@ -496,7 +583,7 @@ describe.skipIf(skip)(
         fieldA,
         { title: "Latest pass" },
       );
-      await closeRun(secondResearchTurn, "completed");
+      await completeTurnPlain(projectA, secondResearchTurn);
 
       const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
@@ -514,12 +601,15 @@ describe.skipIf(skip)(
       expect(evidenceCount.rows[0].n).toBe(0);
     });
 
-    it("accepts a receipt from this very turn's own research, before that turn has itself been marked completed", async () => {
-      // The live engine can run `start_research` and `add_evidence` in the
-      // same turn (two tool rounds, one turn) — that turn's own `turn_runs`
-      // row is still `running` until the very end of this same
-      // transaction, so the currency check above must not refuse its own
-      // in-flight turn (T10 review round 3, P0-2).
+    /*
+      Round 4, P0-1: same-turn "Research this" → "Add as evidence" is not
+      supported at all. The application never attempts it (`route.ts` clears
+      the request's `activeFindingId` whenever this turn ran its own
+      research, so the operation is refused before it ever names a receipt
+      here) — this proves the database independently refuses it too, so a
+      caller bypassing that application-side guard cannot succeed either.
+    */
+    it("refuses a receipt naming this very turn's own still-running research, as research_not_yet_complete", async () => {
       const turnId = await openRun(projectA);
       const receiptId = await recordFinding(projectA, turnId, fieldA, {
         title: "Same-turn research and add",
@@ -529,7 +619,14 @@ describe.skipIf(skip)(
         turnId,
         receiptId,
       );
-      expect(result.written).toEqual({ "0": 1 });
+      expect(result.refused?.["0"]).toEqual(["research_not_yet_complete"]);
+
+      await impersonate(USER_A);
+      const evidenceCount = await db.query(
+        "select count(*)::int as n from evidence where source_receipt_id = $1",
+        [receiptId],
+      );
+      expect(evidenceCount.rows[0].n).toBe(0);
     });
 
     it("refuses when the turn is not running, exactly as any other staged write would", async () => {
@@ -557,14 +654,21 @@ describe.skipIf(skip)(
           [projectA],
         )
       ).rows[0].id;
-      const turnId = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
-        title: "Unclear direction check",
-      });
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(
+        projectA,
+        researchTurn,
+        assumptionId,
+        {
+          title: "Unclear direction check",
+        },
+      );
+      await completeTurnPlain(projectA, researchTurn);
 
+      const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
         projectA,
-        turnId,
+        addTurn,
         receiptId,
         {
           direction: "unclear",
@@ -606,14 +710,21 @@ describe.skipIf(skip)(
           [projectA],
         )
       ).rows[0].id;
-      const turnId = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
-        title: "Supports direction check",
-      });
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(
+        projectA,
+        researchTurn,
+        assumptionId,
+        {
+          title: "Supports direction check",
+        },
+      );
+      await completeTurnPlain(projectA, researchTurn);
 
+      const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
         projectA,
-        turnId,
+        addTurn,
         receiptId,
         {
           direction: "supports",
@@ -641,14 +752,21 @@ describe.skipIf(skip)(
           [projectA],
         )
       ).rows[0].id;
-      const turnId = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
-        title: "Contradicts direction check",
-      });
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(
+        projectA,
+        researchTurn,
+        assumptionId,
+        {
+          title: "Contradicts direction check",
+        },
+      );
+      await completeTurnPlain(projectA, researchTurn);
 
+      const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
         projectA,
-        turnId,
+        addTurn,
         receiptId,
         {
           direction: "contradicts",
@@ -690,14 +808,21 @@ describe.skipIf(skip)(
           [projectA],
         )
       ).rows[0].id;
-      const turnId = await openRun(projectA);
-      const receiptId = await recordFinding(projectA, turnId, assumptionId, {
-        title: "Resolved assumption check",
-      });
+      const researchTurn = await openRun(projectA);
+      const receiptId = await recordFinding(
+        projectA,
+        researchTurn,
+        assumptionId,
+        {
+          title: "Resolved assumption check",
+        },
+      );
+      await completeTurnPlain(projectA, researchTurn);
 
+      const addTurn = await openRun(projectA);
       const result = await completeTurnWithEvidence(
         projectA,
-        turnId,
+        addTurn,
         receiptId,
         {
           direction: "supports",
@@ -733,9 +858,11 @@ describe.skipIf(skip)("evidence", () => {
   });
 
   it("has no update or delete grant for the authenticated role", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId, fieldA);
-    await completeTurnWithEvidence(projectA, turnId, receiptId);
+    const researchTurn = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, researchTurn, fieldA);
+    await completeTurnPlain(projectA, researchTurn);
+    const addTurn = await openRun(projectA);
+    await completeTurnWithEvidence(projectA, addTurn, receiptId);
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select id from evidence where source_receipt_id = $1",
@@ -754,9 +881,11 @@ describe.skipIf(skip)("evidence", () => {
   });
 
   it("hides evidence from other users", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId, fieldA);
-    await completeTurnWithEvidence(projectA, turnId, receiptId);
+    const researchTurn = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, researchTurn, fieldA);
+    await completeTurnPlain(projectA, researchTurn);
+    const addTurn = await openRun(projectA);
+    await completeTurnWithEvidence(projectA, addTurn, receiptId);
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select id from evidence where source_receipt_id = $1",
@@ -779,11 +908,13 @@ describe.skipIf(skip)("evidence", () => {
   });
 
   it("cascades deletion from the project object registry", async () => {
-    const turnId = await openRun(projectA);
-    const receiptId = await recordFinding(projectA, turnId, fieldA, {
+    const researchTurn = await openRun(projectA);
+    const receiptId = await recordFinding(projectA, researchTurn, fieldA, {
       title: "Cascade check",
     });
-    await completeTurnWithEvidence(projectA, turnId, receiptId);
+    await completeTurnPlain(projectA, researchTurn);
+    const addTurn = await openRun(projectA);
+    await completeTurnWithEvidence(projectA, addTurn, receiptId);
     await impersonate(USER_A);
     const { rows } = await db.query(
       "select id from evidence where source_receipt_id = $1",

@@ -230,7 +230,22 @@ export async function POST(
         cannot finalise stays eligible for direction and recoverable until its
         lease expires.
       */
+      /*
+        Whether *this* turn ran its own research pass (T10 review round 4,
+        P0-1). The request's `activeFindingId` names whatever receipt the
+        client was looking at *before* this turn began; if this turn then
+        runs `start_research`, that value stops meaning anything an
+        `add_evidence` call in the same turn may honestly bind to — the new
+        receipt is not addable until a later turn (this turn's own row in
+        `turn_runs` is not `completed` yet when `complete_turn` runs), and
+        the old one is no longer what the conversation is about. Observed
+        here, from the same `research_started` event the client uses to
+        retire its own copy of the previous receipt, rather than adding a
+        second signal that could disagree with it.
+      */
+      let researchRanThisTurn = false;
       const emit = (event: TurnEvent) => {
+        if (event.type === "research_started") researchRanThisTurn = true;
         try {
           controller.enqueue(encodeEvent(event));
         } catch {
@@ -512,7 +527,16 @@ export async function POST(
                       // is checked against text the provider cannot have
                       // rewritten.
                       userMessage: parsed.data.message,
-                      activeFindingId: parsed.data.activeFindingId ?? null,
+                      /*
+                        Cleared whenever this turn ran its own research
+                        (T10 review round 4, P0-1): the request's value
+                        names a receipt from *before* this turn, which an
+                        `add_evidence` call in this same turn must not be
+                        allowed to fall back to once that context is stale.
+                      */
+                      activeFindingId: researchRanThisTurn
+                        ? null
+                        : (parsed.data.activeFindingId ?? null),
                     },
                     result.operations,
                     assistantText,

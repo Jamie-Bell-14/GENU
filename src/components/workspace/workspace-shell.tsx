@@ -63,6 +63,7 @@ export function WorkspaceShell({
   canvasObjects = [],
   canvasRelationships = [],
   initialResearch = null,
+  initialEvidenceOutcome = null,
   onEditObject,
 }: Readonly<{
   projectId: string;
@@ -85,6 +86,13 @@ export function WorkspaceShell({
     turnId: string;
     unavailableSources: { source: ResearchSource; reason: string }[];
   } | null;
+  /**
+   * A refused "Add as evidence" still current as of the last reload
+   * (T10 review round 4, P0-3) — recovered the same way `initialResearch`
+   * is, so the correction survives a reload rather than only the stored,
+   * staged assistant wording.
+   */
+  initialEvidenceOutcome?: { reason: string } | null;
   onEditObject?: EditSubmit;
 }>) {
   /*
@@ -98,6 +106,7 @@ export function WorkspaceShell({
     initialMessages,
     initialActivity,
     initialResearch,
+    initialEvidenceOutcome,
   });
   /*
     The canvas draws from the server-rendered model until a turn changes

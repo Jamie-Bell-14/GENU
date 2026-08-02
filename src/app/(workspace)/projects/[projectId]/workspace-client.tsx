@@ -23,6 +23,7 @@ export function WorkspaceClient({
   canvasObjects,
   canvasRelationships,
   initialResearch,
+  initialEvidenceOutcome,
 }: Readonly<{
   projectId: string;
   projectName: string;
@@ -36,6 +37,9 @@ export function WorkspaceClient({
     turnId: string;
     unavailableSources: { source: ResearchSource; reason: string }[];
   } | null;
+  /** A refused "Add as evidence" still current as of the last reload
+   *  (T10 review round 4, P0-3). */
+  initialEvidenceOutcome: { reason: string } | null;
 }>) {
   const onEditObject = useCallback<EditSubmit>(
     async (object, text) => {
@@ -61,6 +65,7 @@ export function WorkspaceClient({
       canvasObjects={canvasObjects}
       canvasRelationships={canvasRelationships}
       initialResearch={initialResearch}
+      initialEvidenceOutcome={initialEvidenceOutcome}
       onEditObject={onEditObject}
     />
   );

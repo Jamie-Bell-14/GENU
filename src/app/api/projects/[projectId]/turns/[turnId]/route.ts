@@ -73,6 +73,10 @@ export async function GET(
       activity: activity.lines,
       activityUnavailable: activity.failed,
       message: snapshot.message,
+      // Recovered in the same words the live `evidence_refused` stream event
+      // would have shown, rather than leaving that outcome unrecoverable
+      // once its SSE connection is gone (T10 review round 4, P0-3).
+      evidenceRefusedReason: snapshot.evidenceRefusedReason,
     },
     { headers: { "cache-control": "no-store" } },
   );

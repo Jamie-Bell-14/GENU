@@ -176,8 +176,16 @@ interface EvidenceRow {
   direction: "supports" | "contradicts" | "unclear";
 }
 
-/** Refusal codes the database reports, in words a person can act on. */
-const REFUSAL_MESSAGES: Record<string, string> = {
+/**
+ * Refusal codes the database reports, in words a person can act on.
+ *
+ * Exported rather than kept private: the same mapping is what makes a
+ * durably-recorded refusal (`turn_runs.evidence_refused_reason`, T10 review
+ * round 4) read back as the same words the live `evidence_refused` stream
+ * event showed, whether that reading happens moments later over SSE or
+ * after a reload days on — one wording, wherever the outcome is read.
+ */
+export const REFUSAL_MESSAGES: Record<string, string> = {
   user_owned_field:
     "A field the person stated themselves cannot be replaced automatically.",
   no_active_research: "There was no research finding this could be added from.",
@@ -193,13 +201,23 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   research_incomplete:
     "The research this came from did not finish, so it was not added.",
   /*
-   * A later, completed research pass has since superseded this receipt
-   * (T10 review round 3, P0-2) — the same currency rule reload hydration
-   * already applies, enforced here so a stale receipt cannot be submitted
-   * directly either.
+   * A later turn has since become the project's most recent one
+   * (T10 review round 4) — the same currency rule reload hydration already
+   * applies (the latest stored message must be this receipt's own turn's),
+   * enforced here so a stale receipt cannot be submitted directly either.
    */
   research_superseded:
-    "Newer research has since replaced this finding, so it was not added.",
+    "This is no longer the most recent research, so it was not added.",
+  /*
+   * The receipt names *this turn's own*, still-running research
+   * (T10 review round 4) — same-turn "Research this" → "Add as evidence" is
+   * not supported: the application clears the request's own `activeFindingId`
+   * whenever this turn ran research (see `route.ts`), and this is the
+   * database's independent refusal of the same case, reached only if that
+   * application-side guard were ever bypassed.
+   */
+  research_not_yet_complete:
+    "This turn's own research is not finished yet, so it cannot be added until a later turn.",
 };
 
 /**

@@ -65,6 +65,13 @@ interface CatchUpResponse {
    */
   activityUnavailable?: boolean;
   message?: Message | null;
+  /**
+   * The durable evidence-refusal outcome for this turn, if it has one
+   * (T10 review round 4, P0-3) — recovered from `turn_runs` rather than
+   * only ever available on the SSE connection that was open when the turn
+   * committed.
+   */
+  evidenceRefusedReason?: string | null;
 }
 
 function wait(ms: number): Promise<void> {
@@ -92,6 +99,7 @@ export function useTurnRuntime({
   initialMessages = [],
   initialActivity = [],
   initialResearch = null,
+  initialEvidenceOutcome = null,
 }: Readonly<{
   projectId: string;
   initialMessages?: Message[];
@@ -109,6 +117,13 @@ export function useTurnRuntime({
     turnId: string;
     unavailableSources: { source: ResearchSource; reason: string }[];
   } | null;
+  /**
+   * A refused "Add as evidence" still current as of the last reload
+   * (T10 review round 4, P0-3) — seeded the same way `initialResearch` is:
+   * this is what a fresh mount already knows about its most recent turn,
+   * not a live event.
+   */
+  initialEvidenceOutcome?: { reason: string } | null;
 }>): TurnRuntime {
   const [state, dispatch] = useReducer(turnReducer, {
     ...INITIAL_TURN_STATE,
@@ -116,6 +131,9 @@ export function useTurnRuntime({
     activityLog: initialActivity,
     activeResearch: initialResearch?.finding ?? null,
     activeResearchTurnId: initialResearch?.turnId ?? null,
+    evidenceOutcome: initialEvidenceOutcome
+      ? { refused: true, reason: initialEvidenceOutcome.reason }
+      : null,
     unavailableSources: initialResearch?.unavailableSources ?? [],
     // The action a hydrated receipt actually enables — the only contextual
     // action a fresh mount can honestly offer without a turn having run.
@@ -209,6 +227,22 @@ export function useTurnRuntime({
               activityLog,
               message,
             });
+            /*
+              Recovered exactly as the live stream would have shown it
+              (T10 review round 4, P0-3): a connection lost between
+              `complete_turn` committing and the client consuming its
+              `evidence_refused` event must still let catch-up surface the
+              same correction, not only the stored, staged wording.
+            */
+            if (payload.evidenceRefusedReason) {
+              dispatch({
+                type: "event",
+                event: {
+                  type: "evidence_refused",
+                  reason: payload.evidenceRefusedReason,
+                },
+              });
+            }
             return;
           }
 

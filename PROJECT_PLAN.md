@@ -782,7 +782,7 @@ taken at approval:
    (Helvetica Now + rounded companion) is a later decision
 
 Incident-response owner (SECURITY_STANDARDS §20): **Jamie Bell**
-(jamie.bell@zerodeposit.com), recorded 2026-07-28.
+, recorded 2026-07-28.
 
 Still open (owner: Jamie): per-turn/monthly AI cost budget numbers
 (SECURITY_STANDARDS §17), needed by task T9.

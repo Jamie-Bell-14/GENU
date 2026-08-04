@@ -15,8 +15,13 @@ export interface SceneState {
    * A scene recommendation that arrived while the user was reading. It is
    * queued rather than applied so content never moves under the cursor
    * (docs/ADAPTIVE_CANVAS_MVP.md §7).
+   *
+   * Tagged with the turn that produced it (issue #13, T10 exit gate): the
+   * only way `invalidate_queued` can tell "this queued item's own turn just
+   * failed" apart from "some other turn failed", so a stale recommendation
+   * disappears without ever being able to clear a different turn's live one.
    */
-  queued: CanvasScene | null;
+  queued: { scene: CanvasScene; turnId: string } | null;
   lastRejection: SceneRejection | null;
 }
 
@@ -45,9 +50,29 @@ export type SceneAction =
   /** A validated scene the user asked for: applied immediately. */
   | { type: "user_scene"; scene: CanvasScene }
   /** A validated recommendation: queued, never applied under the cursor. */
-  | { type: "recommend_scene"; scene: CanvasScene }
+  | { type: "recommend_scene"; scene: CanvasScene; turnId: string }
   | { type: "accept_queued" }
   | { type: "dismiss_queued" }
+  /**
+   * The turn that produced the currently queued recommendation has failed
+   * (issue #13). Clears `queued` only when its own `turnId` still matches —
+   * the user may already have accepted or dismissed it, or a newer turn's
+   * recommendation may already have replaced it, and neither of those is this
+   * action's to undo.
+   */
+  | { type: "invalidate_queued"; turnId: string }
+  /**
+   * The currently *accepted* research view's backing receipt is gone (T10
+   * review round 10, third correction): a later research pass superseded it
+   * and the accepted `evidence_research` scene has nothing left to draw —
+   * `EvidenceResearchRenderer` would otherwise sit on "Research is
+   * running…" forever, since nothing else ever moves the canvas off a scene
+   * the person already accepted. Scoped to the research purpose itself, so
+   * it can never touch an unrelated current scene: the host is trusted to
+   * fire it only when the backing finding has actually gone, but the guard
+   * here means a caller mistake fails safe rather than clearing real content.
+   */
+  | { type: "retire_stale_research_view"; fallback: CanvasScene | null }
   | { type: "return_to_previous" }
   | { type: "set_view"; view: ViewMode }
   | { type: "scene_rejected"; rejection: SceneRejection };
@@ -86,13 +111,17 @@ export function sceneReducer(
       if (action.scene.transition === "preserve" && state.current) {
         return state;
       }
-      return { ...state, queued: action.scene, lastRejection: null };
+      return {
+        ...state,
+        queued: { scene: action.scene, turnId: action.turnId },
+        lastRejection: null,
+      };
 
     case "accept_queued":
       if (!state.queued) return state;
       return {
         ...state,
-        current: state.queued,
+        current: state.queued.scene,
         history: state.current
           ? push(state.history, state.current)
           : state.history,
@@ -101,6 +130,18 @@ export function sceneReducer(
 
     case "dismiss_queued":
       return { ...state, queued: null };
+
+    case "invalidate_queued":
+      if (state.queued?.turnId !== action.turnId) return state;
+      return { ...state, queued: null };
+
+    case "retire_stale_research_view": {
+      if (state.current?.purpose !== "research_evidence") return state;
+      const previous = state.history.at(-1);
+      return previous
+        ? { ...state, current: previous, history: state.history.slice(0, -1) }
+        : { ...state, current: action.fallback };
+    }
 
     case "return_to_previous": {
       const previous = state.history.at(-1);

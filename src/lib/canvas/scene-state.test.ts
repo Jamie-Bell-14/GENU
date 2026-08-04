@@ -19,8 +19,23 @@ function scene(id: string, transition: CanvasScene["transition"] = "replace") {
   } as CanvasScene;
 }
 
+function researchScene(id: string): CanvasScene {
+  return {
+    renderer: "evidence_research",
+    purpose: "research_evidence",
+    focalObjectId: id,
+    visibleObjectIds: [id],
+    visibleRelationshipIds: [],
+    emphasis: "none",
+    reason: `Showing what was found for ${id}`,
+    transition: "replace",
+  };
+}
+
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "aaaaaaaa-0000-4000-8000-000000000002";
+const TURN_A = "dddddddd-0000-4000-8000-000000000001";
+const TURN_B = "dddddddd-0000-4000-8000-000000000002";
 
 describe("sceneReducer", () => {
   it("applies a user-requested scene immediately and records history", () => {
@@ -36,9 +51,14 @@ describe("sceneReducer", () => {
 
   it("queues a recommendation instead of moving content under the cursor", () => {
     let state = initialSceneState(scene(A));
-    state = sceneReducer(state, { type: "recommend_scene", scene: scene(B) });
+    state = sceneReducer(state, {
+      type: "recommend_scene",
+      scene: scene(B),
+      turnId: TURN_A,
+    });
     expect(state.current?.focalObjectId).toBe(A);
-    expect(state.queued?.focalObjectId).toBe(B);
+    expect(state.queued?.scene.focalObjectId).toBe(B);
+    expect(state.queued?.turnId).toBe(TURN_A);
 
     state = sceneReducer(state, { type: "accept_queued" });
     expect(state.current?.focalObjectId).toBe(B);
@@ -47,7 +67,11 @@ describe("sceneReducer", () => {
 
   it("lets the user decline a recommendation and stay where they are", () => {
     let state = initialSceneState(scene(A));
-    state = sceneReducer(state, { type: "recommend_scene", scene: scene(B) });
+    state = sceneReducer(state, {
+      type: "recommend_scene",
+      scene: scene(B),
+      turnId: TURN_A,
+    });
     state = sceneReducer(state, { type: "dismiss_queued" });
     expect(state.queued).toBeNull();
     expect(state.current?.focalObjectId).toBe(A);
@@ -58,8 +82,116 @@ describe("sceneReducer", () => {
     const next = sceneReducer(state, {
       type: "recommend_scene",
       scene: scene(B, "preserve"),
+      turnId: TURN_A,
     });
     expect(next).toBe(state);
+  });
+
+  describe("invalidate_queued (issue #13, T10 exit gate)", () => {
+    it("clears a queued recommendation when its own turn fails", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: scene(B),
+        turnId: TURN_A,
+      });
+      state = sceneReducer(state, {
+        type: "invalidate_queued",
+        turnId: TURN_A,
+      });
+      expect(state.queued).toBeNull();
+      // The current view is untouched — only the queue is invalidated.
+      expect(state.current?.focalObjectId).toBe(A);
+    });
+
+    it("does not clear a newer turn's recommendation when an older turn fails", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: scene(B),
+        turnId: TURN_B,
+      });
+      // TURN_A is not the turn that owns the current queue.
+      state = sceneReducer(state, {
+        type: "invalidate_queued",
+        turnId: TURN_A,
+      });
+      expect(state.queued?.turnId).toBe(TURN_B);
+      expect(state.queued?.scene.focalObjectId).toBe(B);
+    });
+
+    it("is a no-op once the recommendation has already been accepted or dismissed", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: scene(B),
+        turnId: TURN_A,
+      });
+      state = sceneReducer(state, { type: "accept_queued" });
+      const afterAccept = sceneReducer(state, {
+        type: "invalidate_queued",
+        turnId: TURN_A,
+      });
+      expect(afterAccept).toBe(state);
+      expect(afterAccept.current?.focalObjectId).toBe(B);
+    });
+  });
+
+  /*
+    T10 review round 10, third correction: `research_started` retiring
+    `activeResearch` only ever invalidates a still-*queued* recommendation
+    (`invalidate_queued`) — but "Show it" can already have moved that
+    recommendation into `current` before a later pass supersedes it.
+    Without this, `EvidenceResearchRenderer` would sit on "Research is
+    running…" forever once the pass that would have resolved it ends
+    without a finding.
+  */
+  describe("retire_stale_research_view", () => {
+    it("returns to the previous scene when the accepted research view's receipt is gone", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: researchScene(B),
+        turnId: TURN_A,
+      });
+      state = sceneReducer(state, { type: "accept_queued" });
+      expect(state.current?.renderer).toBe("evidence_research");
+
+      state = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: scene(A),
+      });
+      expect(state.current?.focalObjectId).toBe(A);
+      expect(canReturnToPrevious(state)).toBe(false);
+    });
+
+    it("falls back to the application default when there is no history to return to", () => {
+      let state = initialSceneState(researchScene(B));
+      state = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: scene(A),
+      });
+      expect(state.current?.focalObjectId).toBe(A);
+      expect(state.current?.renderer).toBe("problem_exploration");
+    });
+
+    it("clears to empty rather than leave the stale research view up when there is no fallback either", () => {
+      let state = initialSceneState(researchScene(B));
+      state = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: null,
+      });
+      expect(state.current).toBeNull();
+    });
+
+    it("is a no-op when the current scene is not the research view", () => {
+      const state = initialSceneState(scene(A));
+      const after = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: scene(B),
+      });
+      expect(after).toBe(state);
+    });
   });
 
   it("leaves the current view untouched when a scene is rejected", () => {

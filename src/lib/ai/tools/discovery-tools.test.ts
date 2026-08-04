@@ -311,6 +311,70 @@ describe("provider tool definitions", () => {
       "suggest_checkpoint",
       "suggest_actions",
       "recommend_canvas_scene",
+      "start_research",
+      "add_evidence",
     ]);
+  });
+
+  describe("start_research / add_evidence (T10)", () => {
+    it("accepts a short topic and rejects markup smuggled through it", () => {
+      expect(
+        validateToolInput("start_research", { topic: "Deposit disputes" }),
+      ).toMatchObject({
+        ok: true,
+      });
+      expect(
+        validateToolInput("start_research", {
+          topic: "<script>alert(1)</script>",
+        }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("rejects unknown fields on start_research", () => {
+      expect(
+        validateToolInput("start_research", { topic: "x", extra: 1 }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("accepts a bounded consequence summary with a direction, and rejects an empty summary", () => {
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "It supports X but not Y.",
+          direction: "supports",
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "",
+          direction: "supports",
+        }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("requires a direction from the closed vocabulary, never a free-form guess", () => {
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "It supports X.",
+        }),
+      ).toMatchObject({ ok: false });
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "It supports X.",
+          direction: "probably",
+        }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("rejects an add_evidence call naming a finding or object id", () => {
+      // The model may never assert which finding or object this concerns —
+      // only the host derives that (docs/AI_SYSTEM.md §10).
+      expect(
+        validateToolInput("add_evidence", {
+          consequenceSummary: "It supports X.",
+          direction: "supports",
+          objectId: "aaaaaaaa-0000-4000-8000-000000000001",
+        }),
+      ).toMatchObject({ ok: false });
+    });
   });
 });

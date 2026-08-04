@@ -9,9 +9,18 @@ import type { ContextualAction } from "./turn-events";
  * put arbitrary text on a button the user is invited to press — and a button is
  * a promise about what the product will do, which is not the model's to make.
  *
- * An action lives here only when pressing it does something. `research_this`
- * and `compare_segments` are in the spec's suggested list but their flows land
- * in T10 and T11, so they are absent rather than offered as dead controls.
+ * An action lives here only when pressing it does something. `compare_segments`
+ * is in the spec's suggested list but its flow lands in T11, so it is absent
+ * rather than offered as a dead control.
+ *
+ * `research_this` and `add_as_evidence` land in T10. Both resolve to a plain
+ * composer prefill like every action here — the label is sent as the user's
+ * own message, and the engine recognises it (`ScriptedDiscoveryEngine` by
+ * exact text, `AnthropicDiscoveryEngine` by understanding the request) and
+ * calls the matching tool. Neither needed special client wiring: the
+ * distinguishing fact about `add_as_evidence` is *what it must not do* — it
+ * must never bypass the turn to write evidence directly from the client, since
+ * only the host knows which finding this turn's research actually produced.
  */
 export const ACTION_CATALOGUE = {
   explain_reasoning: {
@@ -25,6 +34,14 @@ export const ACTION_CATALOGUE = {
   record_assumption: {
     label: "Record this as an assumption",
     hint: "Keep it on the canvas with its status visible.",
+  },
+  research_this: {
+    label: "Research this",
+    hint: "Run the project's research flow on the current focus. Demonstration data only.",
+  },
+  add_as_evidence: {
+    label: "Add as evidence",
+    hint: "Link this finding to the object it was researched from, with an honest consequence summary.",
   },
 } as const satisfies Record<string, { label: string; hint: string }>;
 

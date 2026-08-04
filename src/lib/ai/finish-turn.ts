@@ -28,6 +28,8 @@ import type { TurnEvent } from "./turn-events";
  * inferred from a streaming integration test.
  */
 export interface FinishTurnPorts {
+  /** The turn this call is finishing, stamped onto any `turn_failed` it emits. */
+  turnId: string;
   /**
    * The single durable operation: the answer, the turn's project-truth writes
    * and its terminal state, committed together.
@@ -72,6 +74,10 @@ export async function finishTurn(
   if (!assistantText) {
     await ports.closeRun("failed");
     await ports.audit("turn_failed", { code: "no_result" });
+    // No emit here: an engine that returns empty text has already emitted its
+    // own `turn_failed` (both engines' `fail`/`interrupted` do this before
+    // returning), and this is that failure's terminal bookkeeping, not a
+    // second occurrence of it.
     return;
   }
 
@@ -93,6 +99,7 @@ export async function finishTurn(
     });
     ports.emit({
       type: "turn_failed",
+      turnId: ports.turnId,
       error: {
         code: "engine_unavailable",
         userMessage:
@@ -111,6 +118,21 @@ export async function finishTurn(
   */
   for (const outcome of result.outcomes) {
     await ports.auditOperation(outcome);
+    /*
+      A refused "Add as evidence" gets a durable, user-visible outcome, not
+      only an audit row (T10 review round 3, P0-2). The assistant's own
+      reply necessarily spoke in staged, present-progressive terms — it
+      could not have known this refusal was coming — so this is the
+      correction, the same way `direction_rejected` corrects an earlier
+      promise the direction endpoint made in good faith.
+    */
+    if (
+      outcome.kind === "add_evidence" &&
+      !outcome.applied &&
+      outcome.reason === "rejected"
+    ) {
+      ports.emit({ type: "evidence_refused", reason: outcome.issue });
+    }
   }
 
   // Only if the project really changed, and only after the commit.

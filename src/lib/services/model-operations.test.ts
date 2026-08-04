@@ -415,6 +415,105 @@ describe("commitTurn", () => {
     expect(stub.sent()?.fields).toEqual([]);
     expect(stub.sent()?.assumptions).toEqual([]);
   });
+
+  describe("add_evidence is staged, not applied immediately (T10 review round 2, P0-B)", () => {
+    it("stages the receipt from context, never a target — the target is the receipt's own", async () => {
+      const stub = stubCommit((writes) => ({
+        outcome: "completed",
+        written: {
+          "0": (writes as unknown as { evidence: unknown[] }).evidence.length,
+        },
+        refused: {},
+      }));
+      const { outcomes, changed } = await commitTurn(
+        stub.commit,
+        { ...ctx, activeFindingId: "receipt-1" },
+        [
+          op("add_evidence", {
+            consequenceSummary: "It supports X but not Y.",
+            direction: "supports",
+          }),
+        ],
+        ANSWER,
+      );
+
+      expect(outcomes).toEqual([
+        { applied: true, kind: "add_evidence", count: 1 },
+      ]);
+      expect(changed).toBe(true);
+      expect(
+        (stub.sent() as unknown as { evidence: unknown[] })?.evidence,
+      ).toEqual([
+        {
+          slot: 0,
+          receipt_id: "receipt-1",
+          consequence_summary: "It supports X but not Y.",
+          direction: "supports",
+        },
+      ]);
+    });
+
+    it("refuses without reaching the database when there is no receipt in context", async () => {
+      const stub = stubCommit();
+      const { outcomes } = await commitTurn(
+        stub.commit,
+        ctx, // no activeFindingId
+        [
+          op("add_evidence", {
+            consequenceSummary: "It supports X.",
+            direction: "supports",
+          }),
+        ],
+        ANSWER,
+      );
+      expect(outcomes[0]).toMatchObject({
+        applied: false,
+        reason: "rejected",
+        issue: "no_active_research",
+      });
+      // Refused here, in TypeScript — never sent to the database at all.
+      expect(
+        (stub.sent() as unknown as { evidence: unknown[] } | undefined)
+          ?.evidence,
+      ).toEqual([]);
+    });
+
+    it("refuses a candidate missing a direction, never defaulting one", async () => {
+      const stub = stubCommit();
+      const { outcomes } = await commitTurn(
+        stub.commit,
+        { ...ctx, activeFindingId: "receipt-1" },
+        [op("add_evidence", { consequenceSummary: "It supports X." })],
+        ANSWER,
+      );
+      expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
+    });
+
+    it("surfaces a database refusal (already linked, no focal object) in words a person can act on", async () => {
+      const stub = stubCommit({
+        outcome: "completed",
+        written: {},
+        refused: { "0": ["already_linked"] },
+      });
+      const { outcomes, changed } = await commitTurn(
+        stub.commit,
+        { ...ctx, activeFindingId: "receipt-1" },
+        [
+          op("add_evidence", {
+            consequenceSummary: "It supports X.",
+            direction: "supports",
+          }),
+        ],
+        ANSWER,
+      );
+      expect(outcomes[0]).toMatchObject({
+        applied: false,
+        reason: "rejected",
+        issue: "This finding was already added as evidence.",
+      });
+      expect(changed).toBe(false);
+    });
+  });
 });
 
 /*

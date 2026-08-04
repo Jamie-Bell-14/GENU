@@ -3,6 +3,7 @@ import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { ScriptedDiscoveryEngine } from "@/lib/ai/discovery-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { TurnEvent } from "@/lib/ai/turn-events";
+import { MockResearchProvider } from "@/lib/research/mock-research-provider";
 import { defaultFocalObjectId } from "@/lib/canvas/problem-map";
 import { DEMO_OBJECTS, DEMO_RELATIONSHIPS } from "@/lib/dev/demo-project";
 import {
@@ -117,6 +118,14 @@ export async function POST(request: NextRequest) {
         // Announced when the engine has actually used it, not when a note
         // merely exists — the same rule as the real route.
         onDirectionApplied: (note) => emit({ type: "direction_applied", note }),
+        turnId,
+        researchProvider: new MockResearchProvider(devChunkDelayMs()),
+        // This route persists nothing (see the module doc above): a receipt
+        // id is fabricated in memory rather than durably recorded, the same
+        // no-op pattern `onSceneAccepted` already uses. "Add as evidence" is
+        // staged like any other write here too, and this route never commits
+        // anything, so there is nothing further to simulate for it.
+        recordResearchFinding: async () => crypto.randomUUID(),
       });
 
       try {

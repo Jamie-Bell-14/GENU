@@ -81,12 +81,38 @@ project_fields     (id, project_id, area problem|customer|value_proposition|mvp_
                     key, value jsonb, origin user_stated|ai_inferred|researched,
                     support unexplored|hypothesis|some_evidence|credible|strongly_evidenced|contradicted,
                     updated_at)                       -- qualitative only, no numeric confidence
+research_findings  (id, project_id, turn_id, focal_object_id, unavailable_sources jsonb,
+                    applied_directions jsonb, title, key_finding, why_it_matters,
+                    visualisation jsonb, sources jsonb, methodology, limitations,
+                    retrieved_at, is_demo boolean, conflicting boolean, created_at)
+                    -- the exact, post-steering result one research pass produced,
+                    -- and the object it concerned; system-authored only
+                    -- (T10 review round 1, P0-1; round 2, P0-A). A receipt is
+                    -- current, and so addable, only while the latest message
+                    -- in the project *other than the add turn's own* is both
+                    -- the receipt's own turn and that turn's assistant answer
+                    -- (role = 'assistant', not merely a stored message) —
+                    -- enforced inside complete_turn() itself, the same rule
+                    -- reload hydration applies (round 3, P0-2; made
+                    -- role-aware in round 5). Any later accepted turn retires
+                    -- it, unrelated or not, and it stays retired even if that
+                    -- later turn then fails, is stopped or expires unfinished
+                    -- (round 5) — a genuinely refused send that stores no
+                    -- turn/message does not. This is a deliberate product
+                    -- trade-off, not an incidental strictness: the T10
+                    -- receipt is a narrow, immediate follow-up action, not a
+                    -- historical catalogue to reselect from once the
+                    -- conversation has moved on.
 evidence           (id, project_id, title, summary, source_name, source_url,
                     retrieved_at, methodology, limitations,
                     kind user_stated|secondary_research|customer_reported|observed|commitment,
                     is_demo boolean NOT NULL,          -- demonstration data is always marked
-                    created_at)
-evidence_links     (id, evidence_id, target_type field|assumption|decision, target_id)
+                    source_receipt_id → research_findings, created_at)
+                    -- registered in project_objects like project_fields/assumptions
+                    -- (T10 review round 1, P0-3); staged into complete_turn() like any
+                    -- other project-truth write (round 2, P0-B), which also links it via
+                    -- project_relationships (supports|contradicts|affects, round 2, P0-C)
+                    -- rather than a bespoke evidence_links table
 assumptions        (id, project_id, statement, why_it_matters, alternatives jsonb,
                     status open|supported|weakened|invalidated, importance low|material,
                     created_at, updated_at)

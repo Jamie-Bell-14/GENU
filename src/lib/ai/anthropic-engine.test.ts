@@ -105,6 +105,7 @@ function harness(overrides: Partial<TurnHooks> = {}) {
     },
     takeDirection: async () => null,
     directionApplied: (note) => applied.push(note),
+    runResearch: async () => ({ ok: true, findingTitle: "Test finding" }),
     ...overrides,
   };
   return { events, steps, scenes, applied, hooks };
@@ -254,6 +255,537 @@ describe("AnthropicDiscoveryEngine", () => {
     // Scenes have no write path to project truth, so they must not be staged
     // for the host to apply (docs/AI_SYSTEM.md §9.3).
     expect(turn.operations).toEqual([]);
+  });
+
+  describe("start_research (T10)", () => {
+    const focalObjectId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const inputWithFocus = {
+      ...input,
+      context: { objectIds: [focalObjectId], focalObjectId },
+    };
+
+    it("queues the evidence_research scene itself, rather than trusting a second model call", async () => {
+      const { scenes, hooks } = harness();
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        // The model's own response never calls recommend_canvas_scene — the
+        // host must not depend on it doing so.
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      expect(scenes).toHaveLength(1);
+      expect(scenes[0]).toMatchObject({
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId,
+      });
+    });
+
+    it("does not queue a scene when research did not produce a finding", async () => {
+      const { scenes, hooks } = harness({
+        runResearch: async () => ({ ok: false, reason: "unavailable" }),
+      });
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Research could not run.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      expect(scenes).toHaveLength(0);
+    });
+
+    /*
+      T10 review round 6, P0: `recommendScene` only *queues* the
+      recommendation — `docs/ADAPTIVE_CANVAS_MVP.md` requires that a
+      non-urgent scene update never move content under the user, so
+      `LivingCanvas` holds the current scene and offers "Show it" / "Stay
+      here" rather than applying it. The tool result the model actually
+      receives on its *next* request — not merely the scene candidate handed
+      to `recommendScene` — must say the view is ready and selectable, never
+      that it is already visible; telling the model otherwise invites it to
+      skip explaining the finding on the false assumption the user is
+      already looking at it.
+    */
+    it("tells the model the research view is ready and selectable, never that it is already visible", async () => {
+      const { scenes, hooks } = harness();
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      // Exactly one recommendation is queued — the existing guarantee this
+      // does not depend on a second model tool call.
+      expect(scenes).toHaveLength(1);
+
+      expect(stub.requests).toHaveLength(2);
+      const nextRequest = stub.requests[1] as {
+        messages: { role: string; content: unknown }[];
+      };
+      const toolResultTurn = nextRequest.messages.at(-1) as {
+        role: string;
+        content: { type: string; tool_use_id: string; content: string }[];
+      };
+      const toolResult = toolResultTurn.content.find(
+        (block) => block.tool_use_id === "t1",
+      );
+
+      expect(toolResult?.content).toBeDefined();
+      // The false claim round 6 flagged — never asserted, only negated below.
+      expect(toolResult?.content).not.toMatch(/already on the canvas/i);
+      expect(toolResult?.content).toMatch(/ready.*select/i);
+      expect(toolResult?.content).toMatch(
+        /do not claim it is already visible/i,
+      );
+      // Still allowed to react and offer the evidence action briefly —
+      // this is not a ban on all explanation, only on the false premise.
+      expect(toolResult?.content).toMatch(/offer to add it as evidence/i);
+    });
+
+    /*
+      T10 review round 7, P1: a successful pass with no focal object queues
+      no scene at all (the `focalObjectId` guard above `recommendScene`),
+      and its receipt has no target — `complete_turn` refuses it as
+      `no_focal_object`. The round-6 wording only branched on `outcome.ok`,
+      so this path still told the model a view was ready and invited it to
+      offer "Add as evidence" for a receipt the database would refuse.
+      Reachable whenever the model runs `start_research` with nothing in
+      focus — e.g. an empty/new project — via the plain `input` fixture,
+      which carries no `context`.
+
+      Round 8, P1: the receipt's target is fixed at the moment it is
+      recorded and currency retires it the instant any later turn is
+      accepted, so establishing or selecting a claim afterwards can never
+      make *this* receipt addable — the wording must say to run the
+      research again, not imply this one could become usable later.
+    */
+    it("tells the model no view was queued, not to offer adding as evidence, and to rerun research rather than wait, when nothing was in focus", async () => {
+      const { scenes, hooks } = harness();
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(input, hooks);
+
+      // No target for a scene, so nothing is queued — the existing
+      // focalObjectId guard, unaffected by this fix.
+      expect(scenes).toHaveLength(0);
+
+      expect(stub.requests).toHaveLength(2);
+      const nextRequest = stub.requests[1] as {
+        messages: { role: string; content: unknown }[];
+      };
+      const toolResultTurn = nextRequest.messages.at(-1) as {
+        role: string;
+        content: { type: string; tool_use_id: string; content: string }[];
+      };
+      const toolResult = toolResultTurn.content.find(
+        (block) => block.tool_use_id === "t1",
+      );
+
+      expect(toolResult?.content).toBeDefined();
+      expect(toolResult?.content).not.toMatch(/ready.*select/i);
+      expect(toolResult?.content).not.toMatch(
+        /already (on the canvas|visible)/i,
+      );
+      expect(toolResult?.content).toMatch(
+        /do not offer to add it as evidence/i,
+      );
+      expect(toolResult?.content).toMatch(/no project object was in focus/i);
+      // Round 8, P1: never implies this same receipt could become addable
+      // once a target exists — that would be untrue, since currency retires
+      // it the moment any later turn is accepted. The honest next step is a
+      // fresh pass.
+      expect(toolResult?.content).not.toMatch(/cannot yet be added/i);
+      expect(toolResult?.content).toMatch(/run the research again/i);
+    });
+  });
+
+  /*
+    T10 review round 9, P1: a closed action id only proves the model named a
+    real action, not that pressing the resulting button can succeed. The
+    round-6/7/8 fixes made the `start_research` tool result honest about
+    whether a scene was queued and whether an add is even possible — but the
+    application still trusted any model-supplied `suggest_actions` call
+    containing `add_as_evidence` outright, validated only against the closed
+    action-id catalogue. A model could suggest it without having run
+    research at all, after a no-focus pass, or in the same tool-use batch as
+    `start_research` before ever seeing that tool's result. `add_as_evidence`
+    must be withheld from `suggest_actions` unless eligibility was
+    established *before* the round the call arrives in.
+  */
+  describe("add_as_evidence eligibility is application-enforced, not model-trusted (T10 review round 9, P1)", () => {
+    const focalObjectId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const inputWithFocus = {
+      ...input,
+      context: { objectIds: [focalObjectId], focalObjectId },
+    };
+
+    const startResearchBlock = (id: string): Block => ({
+      type: "tool_use",
+      id,
+      name: "start_research",
+      input: { topic: "Deposit disputes" },
+    });
+    const suggestAddAsEvidenceBlock = (id: string): Block => ({
+      type: "tool_use",
+      id,
+      name: "suggest_actions",
+      input: { actionIds: ["add_as_evidence"] },
+    });
+
+    function offeredActionIds(events: EngineEvent[]): string[] {
+      return events
+        .filter((event) => event.type === "actions")
+        .flatMap((event) => event.actions.map((action) => action.id));
+    }
+
+    it("withholds add_as_evidence when the model suggests it after research ran with nothing in focus", async () => {
+      const { events, hooks } = harness();
+      const stub = stubClient([
+        { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+        {
+          blocks: [suggestAddAsEvidenceBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      // Plain `input`, no context — the same no-focus fixture round 7/8 use.
+      await engine.runTurn(input, hooks);
+
+      expect(offeredActionIds(events)).not.toContain("add_as_evidence");
+    });
+
+    it("withholds add_as_evidence from a same-batch suggest_actions call, whichever order the model sent the blocks in", async () => {
+      const suggestBeforeResearch = stubClient([
+        {
+          blocks: [suggestAddAsEvidenceBlock("t1"), startResearchBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const { events: eventsA, hooks: hooksA } = harness();
+      await new AnthropicDiscoveryEngine({
+        client: suggestBeforeResearch.client,
+      }).runTurn(inputWithFocus, hooksA);
+      expect(offeredActionIds(eventsA)).not.toContain("add_as_evidence");
+
+      const researchBeforeSuggest = stubClient([
+        {
+          blocks: [startResearchBlock("t1"), suggestAddAsEvidenceBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const { events: eventsB, hooks: hooksB } = harness();
+      await new AnthropicDiscoveryEngine({
+        client: researchBeforeSuggest.client,
+      }).runTurn(inputWithFocus, hooksB);
+      expect(offeredActionIds(eventsB)).not.toContain("add_as_evidence");
+    });
+
+    it("offers add_as_evidence once a focused research pass has actually completed in an earlier round", async () => {
+      const { events, hooks } = harness();
+      const stub = stubClient([
+        { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+        {
+          blocks: [suggestAddAsEvidenceBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      expect(offeredActionIds(events)).toContain("add_as_evidence");
+    });
+
+    /*
+      T10 review round 10, P1: `researchGrounding` answers a different
+      question than contextual-action eligibility. It says this turn may
+      trust a comparison against the receipt it was sent, for its own
+      `add_evidence` call — not that a button offered for a *later* turn
+      will still work. Even a genuinely grounded prior receipt is retired by
+      this very turn: the client clears `activeResearch` the moment a turn
+      other than the receipt's own is identified, which happens as this turn
+      starts. Seeding eligibility from `groundingText` therefore offered a
+      button the receipt could no longer back by the time this turn's answer
+      reached the person.
+    */
+    describe("eligibility is not inherited from a grounded prior receipt", () => {
+      const groundedBuildContext = () => ({
+        fields: [],
+        objects: [],
+        relationshipIds: [],
+        focalObjectId: null,
+        recentMessages: [],
+        researchGrounding: {
+          grounded: true as const,
+          text: "Key finding: dispute rates differ by agency size.",
+        },
+      });
+
+      it("withholds add_as_evidence when the turn merely re-suggests it, without running fresh research", async () => {
+        const { events, hooks } = harness();
+        const stub = stubClient([
+          {
+            blocks: [suggestAddAsEvidenceBlock("t1")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("As you saw earlier.")], stopReason: "end_turn" },
+        ]);
+        const engine = new AnthropicDiscoveryEngine({
+          client: stub.client,
+          buildContext: groundedBuildContext,
+        });
+        await engine.runTurn(input, hooks);
+
+        expect(offeredActionIds(events)).not.toContain("add_as_evidence");
+      });
+
+      it("withholds add_as_evidence from a same-batch research/suggestion pair, either order, even though the turn started grounded", async () => {
+        const suggestBeforeResearch = stubClient([
+          {
+            blocks: [suggestAddAsEvidenceBlock("t1"), startResearchBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+        ]);
+        const { events: eventsA, hooks: hooksA } = harness();
+        await new AnthropicDiscoveryEngine({
+          client: suggestBeforeResearch.client,
+          buildContext: groundedBuildContext,
+        }).runTurn(inputWithFocus, hooksA);
+        expect(offeredActionIds(eventsA)).not.toContain("add_as_evidence");
+
+        const researchBeforeSuggest = stubClient([
+          {
+            blocks: [startResearchBlock("t1"), suggestAddAsEvidenceBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+        ]);
+        const { events: eventsB, hooks: hooksB } = harness();
+        await new AnthropicDiscoveryEngine({
+          client: researchBeforeSuggest.client,
+          buildContext: groundedBuildContext,
+        }).runTurn(inputWithFocus, hooksB);
+        expect(offeredActionIds(eventsB)).not.toContain("add_as_evidence");
+      });
+
+      it("withholds add_as_evidence when a grounded turn's own fresh research fails to produce a target", async () => {
+        const { events, hooks } = harness({
+          runResearch: async () => ({ ok: false, reason: "unavailable" }),
+        });
+        const stub = stubClient([
+          { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+          {
+            blocks: [suggestAddAsEvidenceBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Research could not run.")], stopReason: "end_turn" },
+        ]);
+        const engine = new AnthropicDiscoveryEngine({
+          client: stub.client,
+          buildContext: groundedBuildContext,
+        });
+        // Plain `input`: nothing in focus for this turn's own fresh pass,
+        // despite the grounded prior receipt.
+        await engine.runTurn(input, hooks);
+
+        expect(offeredActionIds(events)).not.toContain("add_as_evidence");
+      });
+
+      it("allows add_as_evidence once a grounded turn's own fresh research succeeds against a focal object", async () => {
+        const { events, hooks } = harness();
+        const stub = stubClient([
+          { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+          {
+            blocks: [suggestAddAsEvidenceBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+        ]);
+        const engine = new AnthropicDiscoveryEngine({
+          client: stub.client,
+          buildContext: groundedBuildContext,
+        });
+        await engine.runTurn(inputWithFocus, hooks);
+
+        expect(offeredActionIds(events)).toContain("add_as_evidence");
+      });
+    });
+  });
+
+  describe("add_evidence direction is grounded, not asserted (T10 review round 3, P0-1)", () => {
+    const addEvidenceTurn = (direction: string): StubTurn => ({
+      blocks: [
+        {
+          type: "tool_use",
+          id: "t1",
+          name: "add_evidence",
+          input: {
+            consequenceSummary: "It bears on the target in some way.",
+            direction,
+          },
+        },
+      ],
+      stopReason: "tool_use",
+    });
+
+    it("sends the exact receipt and target content the model is asked to compare", async () => {
+      const { hooks } = harness();
+      const requests: unknown[] = [];
+      const stub = stubClient(
+        [
+          addEvidenceTurn("supports"),
+          { blocks: [text("Added.")], stopReason: "end_turn" },
+        ],
+        (params) => requests.push(params),
+      );
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          recentMessages: [],
+          researchGrounding: {
+            grounded: true,
+            text: "Key finding: dispute rates differ by agency size.",
+          },
+        }),
+      });
+      await engine.runTurn(input, hooks);
+
+      const firstRequest = requests[0] as {
+        messages: { content: unknown }[];
+      };
+      const sent = JSON.stringify(firstRequest.messages);
+      expect(sent).toContain("dispute rates differ by agency size");
+    });
+
+    it("trusts the model's direction once both sides of the comparison were sent", async () => {
+      const { hooks } = harness();
+      const stub = stubClient([
+        addEvidenceTurn("contradicts"),
+        { blocks: [text("Added.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          recentMessages: [],
+          researchGrounding: { grounded: true, text: "Grounding text." },
+        }),
+      });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(turn.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: expect.objectContaining({ direction: "contradicts" }),
+        },
+      ]);
+    });
+
+    it("overrides an ungrounded direction to unclear rather than trust it", async () => {
+      const { hooks } = harness();
+      const stub = stubClient([
+        addEvidenceTurn("supports"),
+        { blocks: [text("Added.")], stopReason: "end_turn" },
+      ]);
+      // No `buildContext` at all — the same as a turn whose receipt or
+      // target could not be resolved (`emptyContext`, load-context.ts).
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(turn.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: expect.objectContaining({ direction: "unclear" }),
+        },
+      ]);
+    });
+
+    it("overrides to unclear when grounding was attempted but could not be resolved", async () => {
+      const { hooks } = harness();
+      const stub = stubClient([
+        addEvidenceTurn("supports"),
+        { blocks: [text("Added.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({
+        client: stub.client,
+        buildContext: () => ({
+          fields: [],
+          objects: [],
+          relationshipIds: [],
+          focalObjectId: null,
+          recentMessages: [],
+          // The receipt named no target, or the target's own content could
+          // not be read — either way, nothing to genuinely compare.
+          researchGrounding: { grounded: false },
+        }),
+      });
+      const turn = await engine.runTurn(input, hooks);
+
+      expect(turn.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: expect.objectContaining({ direction: "unclear" }),
+        },
+      ]);
+    });
   });
 
   it("retries once on invalid output, then fails without proposing anything", async () => {
@@ -1018,10 +1550,19 @@ describe("a direction is applied only when the model receives it", () => {
 
     it("does not announce one when the input allowance is spent first", async () => {
       /*
-        The transcript is re-sent every round, so a turn carrying a large project
-        snapshot exhausts its cumulative input allowance after a few rounds. The
-        direction here is handed over at the boundary of a round whose successor
-        never gets to make its request.
+        The transcript is re-sent every round and grows every round — each
+        round's tool call is added to it and never removed — so a turn whose
+        rounds each carry a sizeable payload exhausts its cumulative input
+        allowance after a few of them. The direction here is handed over at
+        the boundary of a round whose successor never gets to make its
+        request.
+
+        The growth is driven by each round's own tool-call content (repeated,
+        accumulating every round) rather than by the one-off project
+        snapshot, which is capped at `MAX_CONTEXT_TOKENS` and so cannot by
+        itself be tuned past that ceiling — a per-round, cumulative cost is
+        what keeps this calibration comfortably clear of small shifts in the
+        system prompt or tool-definition overhead.
       */
       let taken = false;
       let boundaries = 0;
@@ -1036,14 +1577,44 @@ describe("a direction is applied only when the model receives it", () => {
           if (final || taken) return null;
           boundaries += 1;
           // Late enough that the following round is the one that overruns.
-          if (boundaries < 3) return null;
+          if (boundaries < 4) return null;
           taken = true;
           return "Focus on smaller agencies.";
         },
+        runResearch: async () => ({ ok: true, findingTitle: "Test finding" }),
       };
+      /*
+        Schema-valid but large: `propose_connected_change` allows up to 12
+        items with a 2,000-character `before` and `after` each — around
+        48,000 characters, repeated and accumulating every round. One tool
+        call per round keeps this well clear of the separate tool-call-count
+        bound, so the budget check is the only one this can trip.
+      */
+      const bigProposal = {
+        title: "A large proposal",
+        rationale: "z".repeat(500),
+        items: Array.from({ length: 12 }, (_, i) => ({
+          area: "problem",
+          key: `field_${i}`,
+          before: "z".repeat(2_000),
+          after: "z".repeat(2_000),
+        })),
+        remainingUncertainty: "z".repeat(500),
+      };
+      const bigToolRound = (id: string): StubTurn => ({
+        blocks: [
+          {
+            type: "tool_use",
+            id,
+            name: "propose_connected_change",
+            input: bigProposal,
+          },
+        ],
+        stopReason: "tool_use",
+      });
       const stub = stubClient(
         Array.from({ length: MAX_PROVIDER_ROUNDS }, (_, index) =>
-          toolRound(`t${index}`),
+          bigToolRound(`t${index}`),
         ),
       );
       const engine = new AnthropicDiscoveryEngine({
@@ -1053,12 +1624,7 @@ describe("a direction is applied only when the model receives it", () => {
           objects: [],
           relationshipIds: [],
           focalObjectId: null,
-          // Filled to the context budget, so every round re-sends a large
-          // payload and the cumulative input bound is what stops the turn.
-          recentMessages: Array.from({ length: 12 }, (_, index) => ({
-            role: "user" as const,
-            content: `${"z".repeat(20_000)}${index}`,
-          })),
+          recentMessages: [],
         }),
       });
       const turn = await engine.runTurn(input, hooks);

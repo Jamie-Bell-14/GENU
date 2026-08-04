@@ -1,6 +1,7 @@
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { CanvasScene } from "@/lib/canvas/scene";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import {
   activityLabel,
   ACTIVITY_STEPS,
@@ -109,7 +110,8 @@ export interface SafeError {
     | "session_expired"
     | "message_too_long"
     | "turn_interrupted"
-    | "engine_unavailable";
+    | "engine_unavailable"
+    | "research_source_unavailable";
   /** What happened, what remains usable, what to do next (DESIGN.md §16). */
   userMessage: string;
   recoverable: boolean;
@@ -127,8 +129,39 @@ export type TurnEvent =
    * §9.1). It is not in `EngineEvent`, so an engine cannot emit one: only
    * application code that has run `validateScene` against the project's own
    * ids can put a scene on this stream.
+   *
+   * Carries the turn's own id (issue #13, T10 exit gate): a recommendation
+   * queued on the client has to be traceable to the turn that produced it, so
+   * a *different* turn's later failure can never invalidate it.
    */
-  | { type: "scene_recommended"; scene: CanvasScene }
+  | { type: "scene_recommended"; scene: CanvasScene; turnId: string }
+  /**
+   * Research activity for the running turn (docs/ARCHITECTURE.md §9, T10).
+   * Sources and the failed one stream as they are found; the finding replaces
+   * them once research completes. None of this is project truth — it is
+   * ephemeral, pre-evidence content, kept out of `CanvasScene` on purpose
+   * (docs/AI_SYSTEM.md §9: a scene may only name existing project objects).
+   */
+  | { type: "research_source"; source: ResearchSource }
+  | { type: "research_failed_source"; source: ResearchSource; reason: string }
+  | { type: "research_finding"; finding: ResearchFinding }
+  /**
+   * A research pass has begun (T10 review round 2, P0-D). Marks the point at
+   * which whatever the previous pass left behind — its finding, its
+   * unavailable sources — stops being current: a second pass that itself
+   * produces nothing (all sources unavailable, stopped) must not leave a
+   * stale receipt from an earlier pass still answerable to "Add as
+   * evidence".
+   */
+  | { type: "research_started" }
+  /**
+   * A direction the direction endpoint already told the user would be
+   * applied could not actually be honoured by the research in progress
+   * (T10 review round 2, P0-D) — the provider's own answer, not a guess.
+   * Distinct from silence: the promise made when the direction was accepted
+   * has to be corrected, not merely left unconfirmed forever.
+   */
+  | { type: "direction_rejected"; note: string; reason: string }
   /**
    * The project model after a turn's accepted writes, re-read by the
    * application from its own tables.
@@ -147,7 +180,24 @@ export type TurnEvent =
     }
   /** Emitted when the running turn actually picked the direction up. */
   | { type: "direction_applied"; note: string }
-  | { type: "turn_failed"; error: SafeError }
+  /**
+   * A staged "Add as evidence" proposal was not written when the turn
+   * completed (T10 review round 3, P0-2) — the receipt was reused, its own
+   * research turn never produced an answer, or a later turn has since
+   * superseded it (not necessarily a research pass — any turn accepted since,
+   * round 5).
+   * The assistant's own reply speaks in staged, present-progressive terms
+   * (see `STAGED` in `anthropic-engine.ts`) precisely because the outcome is
+   * not yet known when it is written; this is that outcome, once it is,
+   * surfaced durably rather than left recoverable only from audit data.
+   */
+  | { type: "evidence_refused"; reason: string }
+  /**
+   * Carries the failing turn's own id (issue #13, T10 exit gate) so the
+   * reducer can clear only *that* turn's queued scene recommendation — never
+   * a different turn's, whether older or newer.
+   */
+  | { type: "turn_failed"; turnId: string; error: SafeError }
   | { type: "done" };
 
 /**
@@ -165,6 +215,23 @@ export type EngineEvent = Exclude<
   | { type: "scene_recommended" }
   | { type: "direction_applied" }
   | { type: "done" }
+  /*
+   * Research events are emitted by the host's `runResearch` orchestration
+   * (turn-hooks.ts), which alone knows a provider event actually happened —
+   * an engine only ever awaits `hooks.runResearch(...)` and reacts to its
+   * outcome, the same boundary `recommendScene` already draws.
+   */
+  | { type: "research_source" }
+  | { type: "research_failed_source" }
+  | { type: "research_finding" }
+  | { type: "research_started" }
+  | { type: "direction_rejected" }
+  /*
+   * Only the host knows what `complete_turn` actually did with a staged
+   * "Add as evidence" proposal — the engine is never told (see `STAGED`),
+   * so it cannot be the one to announce a refusal either.
+   */
+  | { type: "evidence_refused" }
 >;
 
 export interface Message {
@@ -230,8 +297,57 @@ export interface TurnState {
   /** Everything that happened this session, newest last. Never cleared. */
   activityLog: ActivityLine[];
   actions: ContextualAction[];
-  /** The most recent validated scene recommendation, for the canvas host. */
-  recommendedScene: CanvasScene | null;
+  /**
+   * The most recent validated scene recommendation, for the canvas host, with
+   * the id of the turn that produced it (issue #13: the only way a later
+   * `turn_failed` can be checked against the recommendation it actually
+   * belongs to, rather than clearing whatever happens to be queued).
+   */
+  recommendedScene: { scene: CanvasScene; turnId: string } | null;
+  /**
+   * The research finding this session's most recent research produced, if
+   * any (T10). Deliberately not cleared when its turn ends: "Add as evidence"
+   * is a *later* turn's action, and this is this client's own record of which
+   * finding that later turn concerns while it composes the request (T10
+   * review round 6, P1) — the server durably holds the receipt itself
+   * (`research_findings`) and re-hydrates the eligible one on reload
+   * (`loadLatestResearchReceipt`), but not which one *this* client last saw,
+   * so the request still has to name it. The server independently re-checks
+   * the named receipt's own currency before trusting it (`complete_turn`),
+   * so a stale value sent here is refused, not silently accepted.
+   */
+  activeResearch: ResearchFinding | null;
+  /**
+   * The turn that produced `activeResearch`, so its currency can be checked
+   * the same way reload hydration already checks it (T10 review round 3,
+   * P0-2; see `loadLatestResearchReceipt` in `project-model-store.ts`): a
+   * receipt stays addable only while the turn that produced it is still the
+   * most recent thing that happened. Set whenever `activeResearch` is —
+   * including for a receipt seeded from reload hydration, which starts
+   * current by construction and is retired the same way a live one is: the
+   * moment any *other* turn is accepted (T10 review round 5 — retirement
+   * happens on `turn_identified`, as soon as the server has genuinely
+   * stored a new turn's message, not only once that turn later completes;
+   * a later turn that is accepted and then itself fails, is stopped, or
+   * expires unfinished still retires this receipt, since the conversation
+   * has already moved on).
+   */
+  activeResearchTurnId: string | null;
+  /**
+   * Sources research has reported unavailable this session (T10 edge case),
+   * oldest first. Kept for the same reason `activityLog` is: a source that
+   * failed is as real an event as one that succeeded, and the research view
+   * should be able to show it plainly rather than only alluding to it in a
+   * finding's own limitations text.
+   */
+  unavailableSources: { source: ResearchSource; reason: string }[];
+  /**
+   * Why a staged "Add as evidence" proposal was not written, once
+   * `complete_turn` has actually decided that (T10 review round 3, P0-2).
+   * Cleared on the next message so an old refusal cannot linger against a
+   * conversation that has moved on.
+   */
+  evidenceOutcome: { refused: true; reason: string } | null;
   /**
    * The project model as last re-read by the server during this session; null
    * until a turn changes something, when the server-rendered props still stand.
@@ -249,6 +365,13 @@ export interface TurnState {
     note: string;
     application: DirectionApplication;
     applied: boolean;
+    /**
+     * Set when the research provider itself said this direction could not
+     * be applied to the pass in progress (T10 review round 2, P0-D) — takes
+     * priority over the generic promise text once present, because that
+     * promise did not hold.
+     */
+    rejectedReason?: string;
   } | null;
   error: SafeError | null;
   /**
@@ -281,6 +404,10 @@ export const INITIAL_TURN_STATE: TurnState = {
   activityLog: [],
   actions: [],
   recommendedScene: null,
+  activeResearch: null,
+  activeResearchTurnId: null,
+  unavailableSources: [],
+  evidenceOutcome: null,
   projectModel: null,
   direction: null,
   error: null,
@@ -390,6 +517,9 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
         direction: null,
         error: null,
         stopped: false,
+        // A refusal belongs to the turn that staged it; a new message means
+        // the conversation has moved on from asking about that outcome.
+        evidenceOutcome: null,
         /*
           `recoveries` is deliberately not cleared. An unresolved turn — one
           the server may still be finishing — stays recoverable while the user
@@ -525,7 +655,23 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
     case "direction_failed":
       return { ...state, error: action.error };
 
-    case "turn_identified":
+    case "turn_identified": {
+      /*
+        A later turn has genuinely been accepted (T10 review round 5):
+        `start_turn` stores the user's message the instant a turn is
+        accepted, and the server sets the `x-turn-id` response header — the
+        one thing this action is dispatched from — only once that stored
+        message actually exists (see `route.ts`: a refused send returns a
+        plain JSON error with no such header, which dispatches
+        `send_refused` instead and never reaches here). That acceptance
+        alone is what retires an older receipt, regardless of whether this
+        new turn goes on to succeed, fail, be stopped, or expire unfinished
+        — every one of those still means the conversation has moved past
+        the receipt's own turn, and none of them is undone by how this new
+        turn ends. Preserved only when the send itself was refused, since
+        `turn_identified` then never fires at all.
+      */
+      const retiringReceipt = state.activeResearchTurnId !== null;
       return {
         ...state,
         messages: state.messages.map((message) =>
@@ -533,7 +679,13 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             ? { ...message, turnId: action.turnId }
             : message,
         ),
+        activeResearch: retiringReceipt ? null : state.activeResearch,
+        activeResearchTurnId: retiringReceipt
+          ? null
+          : state.activeResearchTurnId,
+        unavailableSources: retiringReceipt ? [] : state.unavailableSources,
       };
+    }
 
     case "dismiss_recovery":
       return {
@@ -602,8 +754,105 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
 
         case "scene_recommended":
           // Held for the canvas host, which applies its own validation before
-          // rendering. Nothing here touches project truth.
-          return { ...state, recommendedScene: action.event.scene };
+          // rendering. Nothing here touches project truth. Tagged with the
+          // turn that produced it (issue #13), so a later failure can be
+          // checked against the recommendation it actually belongs to.
+          return {
+            ...state,
+            recommendedScene: {
+              scene: action.event.scene,
+              turnId: action.event.turnId,
+            },
+          };
+
+        case "research_started":
+          /*
+            A new pass supersedes the last one, immediately (T10 review
+            round 2, P0-D) — not only once it produces its own finding. A
+            pass that produces nothing (all sources unavailable, stopped)
+            must not leave an earlier pass's finding answerable to "Add as
+            evidence", and its unavailable-source list belongs to *that*
+            pass, not this one.
+
+            Superseding the receipt is not enough on its own (T10 review
+            round 10, P1): a prior pass within the *same* turn can already
+            have produced a validated "Add as evidence" action and a queued
+            evidence_research recommendation before this new pass began. Both
+            are affordances that promise a receipt behind them — leaving them
+            in place here would offer a button and a "Show it" for a receipt
+            this event just retired.
+
+            `add_as_evidence` only ever reaches `actions` from a research
+            pass, so removing it here can never touch an unrelated
+            suggestion. `recommendedScene` is cleared only when it is the
+            research view itself — an unrelated scene the person has not
+            acted on yet is untouched. Clearing it to `null` also drives
+            `LivingCanvas`'s own invalidation: that host treats the prop
+            becoming `null` as its cue to retire its local queued copy
+            (issue #13's `invalidate_queued`), so no second signal is needed.
+          */
+          return {
+            ...state,
+            activeResearch: null,
+            activeResearchTurnId: null,
+            unavailableSources: [],
+            actions: state.actions.filter(
+              (action) => action.id !== "add_as_evidence",
+            ),
+            recommendedScene:
+              state.recommendedScene?.scene.purpose === "research_evidence"
+                ? null
+                : state.recommendedScene,
+          };
+
+        case "research_source":
+          // Reported to the activity/history surfaces only.
+          return state;
+
+        case "research_failed_source":
+          return {
+            ...state,
+            unavailableSources: [
+              ...state.unavailableSources,
+              { source: action.event.source, reason: action.event.reason },
+            ],
+          };
+
+        case "research_finding":
+          /*
+            Any `research_failed_source` for this same pass already arrived
+            before its finding does (the provider reports sources, then the
+            finding they informed), so `unavailableSources` is already this
+            pass's own list by the time this fires — replacing it wholesale
+            here would either duplicate or drop nothing, so it is left as is.
+
+            Stamped with the turn producing it (T10 review round 3, P0-2), so
+            currency can later be checked against exactly that turn rather
+            than assumed from being "the most recent thing in state".
+          */
+          return {
+            ...state,
+            activeResearch: action.event.finding,
+            activeResearchTurnId: state.streaming?.turnId ?? null,
+          };
+
+        case "direction_rejected":
+          return state.direction
+            ? {
+                ...state,
+                direction: {
+                  ...state.direction,
+                  applied: false,
+                  rejectedReason: action.event.reason,
+                },
+              }
+            : state;
+
+        case "evidence_refused":
+          return {
+            ...state,
+            evidenceOutcome: { refused: true, reason: action.event.reason },
+          };
 
         case "project_model_updated":
           /*
@@ -634,13 +883,55 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             streaming: null,
             activity: NO_ACTIVITY,
             /*
-              Actions and scene recommendations are emitted as the turn goes, so
-              a turn that then fails would otherwise leave buttons and a
-              proposed view belonging to work that was abandoned — offering the
-              user next steps for an answer they never received.
+              Actions are emitted as the turn goes, so a turn that then fails
+              would otherwise leave buttons belonging to work that was
+              abandoned — offering the user next steps for an answer they
+              never received.
             */
             actions: [],
-            recommendedScene: null,
+            /*
+              Issue #13 (T10 exit gate): cleared only when it is *this* turn's
+              own recommendation. Without the turn-id check, a stale
+              `turn_failed` — one that reaches the reducer after a newer turn
+              has already recommended its own scene — would wipe out a
+              recommendation that never failed. Scoping the clear to a
+              matching id is what keeps "turn A fails" and "turn B owns the
+              current recommendation" from being able to interfere with each
+              other, whichever order their events arrive in.
+            */
+            recommendedScene:
+              state.recommendedScene?.turnId === action.event.turnId
+                ? null
+                : state.recommendedScene,
+            /*
+              A receipt whose *own* turn fails after producing a finding
+              (T10 review round 3, P0-2) is retired here rather than left
+              addable: no assistant message is ever stored for a failed
+              turn, so a reload at this exact point would already show no
+              current receipt (`loadLatestResearchReceipt`) — live state
+              matching that is the same rule, not a special case of it.
+
+              A *different* turn failing is not handled here at all (T10
+              review round 5): retirement for any other, later turn now
+              happens the moment that turn is accepted (`turn_identified`),
+              well before it could reach `turn_failed` — so by the time a
+              different turn's failure arrives, `activeResearchTurnId` is
+              already either null or this same failing turn's own id. The
+              equality check below is consequently only ever true for this
+              turn's own receipt.
+            */
+            activeResearch:
+              state.activeResearchTurnId === action.event.turnId
+                ? null
+                : state.activeResearch,
+            activeResearchTurnId:
+              state.activeResearchTurnId === action.event.turnId
+                ? null
+                : state.activeResearchTurnId,
+            unavailableSources:
+              state.activeResearchTurnId === action.event.turnId
+                ? []
+                : state.unavailableSources,
             status: "idle",
           };
 
@@ -657,6 +948,16 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             heading: state.streaming.heading,
             createdAt: new Date().toISOString(),
           };
+          /*
+            A receipt from an *earlier* turn no longer needs retiring here
+            (T10 review round 5): that already happened the moment this
+            turn was accepted (`turn_identified`), well before it could
+            reach `done`. So if `activeResearchTurnId` is set at all by now,
+            it is this same completing turn's own — set by its own
+            `research_finding` earlier in this same stream — and stays,
+            exactly as it should: this completion is what makes it addable
+            in the first place.
+          */
           return {
             ...state,
             messages: completed.content

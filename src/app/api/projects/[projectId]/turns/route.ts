@@ -2,7 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createActivityReporter } from "@/lib/ai/activity-reporter";
 import { finishTurn } from "@/lib/ai/finish-turn";
 import { withLeaseHeartbeat } from "@/lib/ai/lease-heartbeat";
-import { loadProjectContext, type LoadedContext } from "@/lib/ai/load-context";
+import {
+  loadProjectContext,
+  loadResearchGrounding,
+  type LoadedContext,
+} from "@/lib/ai/load-context";
 import { selectDiscoveryEngine } from "@/lib/ai/select-engine";
 import { createTurnHooks } from "@/lib/ai/turn-hooks";
 import type { SafeError, TurnEvent } from "@/lib/ai/turn-events";
@@ -13,12 +17,14 @@ import {
 import type { TurnResult } from "@/lib/ai/discovery-engine";
 import { loadTurnScope, scopeIsWhole } from "@/lib/canvas/project-scope";
 import { commitTurn } from "@/lib/services/model-operations";
+import { MockResearchProvider } from "@/lib/research/mock-research-provider";
 import {
   closeTurnRun,
   completeTurnRecord,
   startTurn,
   recordActivity,
   recordAudit,
+  recordResearchFinding,
   renewTurnLease,
   takeDirections,
   DIRECTION_CURSOR_START,
@@ -224,7 +230,22 @@ export async function POST(
         cannot finalise stays eligible for direction and recoverable until its
         lease expires.
       */
+      /*
+        Whether *this* turn ran its own research pass (T10 review round 4,
+        P0-1). The request's `activeFindingId` names whatever receipt the
+        client was looking at *before* this turn began; if this turn then
+        runs `start_research`, that value stops meaning anything an
+        `add_evidence` call in the same turn may honestly bind to — the new
+        receipt is not addable until a later turn (this turn's own row in
+        `turn_runs` is not `completed` yet when `complete_turn` runs), and
+        the old one is no longer what the conversation is about. Observed
+        here, from the same `research_started` event the client uses to
+        retire its own copy of the previous receipt, rather than adding a
+        second signal that could disagree with it.
+      */
+      let researchRanThisTurn = false;
       const emit = (event: TurnEvent) => {
+        if (event.type === "research_started") researchRanThisTurn = true;
         try {
           controller.enqueue(encodeEvent(event));
         } catch {
@@ -303,6 +324,21 @@ export async function POST(
               // Correlated by turn, not by "whichever message is newest".
               turnId,
             );
+            /*
+              Only assembled when the client actually named a receipt: most
+              turns have nothing to ground and reading it every time would be
+              a wasted round trip that also has to fail closed for no reason
+              (T10 review round 3, P0-1). The result travels alongside the
+              rest of `loadedContext` because it feeds the same request the
+              engine assembles, not a second, separately-budgeted one.
+            */
+            if (parsed.data.activeFindingId) {
+              loadedContext.researchGrounding = await loadResearchGrounding(
+                supabase,
+                projectId,
+                parsed.data.activeFindingId,
+              );
+            }
             return scope;
           },
           // A partial or failed read is not "project model read": what is in
@@ -323,10 +359,46 @@ export async function POST(
           });
         }
 
+        /*
+          What the canvas is told the project now holds — re-read from the
+          application's own tables after a write landed, never from anything
+          the model described. Used by `finishTurn` after the turn's own
+          commit, whenever that commit actually changed something — including
+          "Add as evidence", which is staged into that same commit like any
+          other project-truth write (T10 review round 2, P0-B).
+        */
+        const publishProjectModel = async () => {
+          const [objects, relationships] = await Promise.all([
+            loadCanvasObjects(supabase, projectId),
+            loadProjectRelationships(supabase, projectId),
+          ]);
+          emit({
+            type: "project_model_updated",
+            objects: objects.data,
+            relationships: relationships.data,
+          });
+        };
+
         const hooks = createTurnHooks({
           emit,
           scope: turnScope.scope,
           reporter,
+          turnId,
+          researchProvider: new MockResearchProvider(),
+          recordResearchFinding: ({
+            finding,
+            focalObjectId,
+            unavailableSources,
+            appliedDirections,
+          }) =>
+            recordResearchFinding({
+              projectId,
+              turnId,
+              finding,
+              focalObjectId,
+              unavailableSources,
+              appliedDirections,
+            }),
           onSceneAccepted: (scene) =>
             audit("scene_recommended", {
               target: scene.renderer,
@@ -431,6 +503,7 @@ export async function POST(
             */
             await finishTurn(
               {
+                turnId,
                 /*
                   One transaction, through the one port that can reach it.
                   The elevated function is authorised against this user
@@ -454,26 +527,21 @@ export async function POST(
                       // is checked against text the provider cannot have
                       // rewritten.
                       userMessage: parsed.data.message,
+                      /*
+                        Cleared whenever this turn ran its own research
+                        (T10 review round 4, P0-1): the request's value
+                        names a receipt from *before* this turn, which an
+                        `add_evidence` call in this same turn must not be
+                        allowed to fall back to once that context is stale.
+                      */
+                      activeFindingId: researchRanThisTurn
+                        ? null
+                        : (parsed.data.activeFindingId ?? null),
                     },
                     result.operations,
                     assistantText,
                   ),
-                /*
-                  What the canvas is told the project now holds — re-read
-                  from the application's own tables after the write landed,
-                  never from anything the model described.
-                */
-                publishProjectModel: async () => {
-                  const [objects, relationships] = await Promise.all([
-                    loadCanvasObjects(supabase, projectId),
-                    loadProjectRelationships(supabase, projectId),
-                  ]);
-                  emit({
-                    type: "project_model_updated",
-                    objects: objects.data,
-                    relationships: relationships.data,
-                  });
-                },
+                publishProjectModel,
                 closeRun: (state) => closeTurnRun({ turnId, state }),
                 audit: (action, detail) => audit(action, { detail }),
                 /*
@@ -511,6 +579,7 @@ export async function POST(
         await closeTurnRun({ turnId, state: "failed" });
         emit({
           type: "turn_failed",
+          turnId,
           error: {
             code: "engine_unavailable",
             userMessage:

@@ -13,6 +13,14 @@ export const TurnRequestSchema = z
         MAX_MESSAGE_LENGTH,
         `Messages are limited to ${MAX_MESSAGE_LENGTH.toLocaleString("en-GB")} characters. Shorten it and send again.`,
       ),
+    /**
+     * The research receipt the client is currently looking at, if any (T10).
+     * An opaque id into `research_findings` — never content itself, and
+     * never trusted as such: "Add as evidence" resolves the receipt and its
+     * recorded target from that table, never from anything else the client
+     * sends about the finding.
+     */
+    activeFindingId: z.string().trim().min(1).max(100).nullish(),
   })
   .strict();
 

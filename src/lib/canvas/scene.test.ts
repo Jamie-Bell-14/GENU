@@ -33,11 +33,12 @@ function scene(overrides: Record<string, unknown> = {}) {
 
 describe("renderer allow-list", () => {
   it("registers only renderers the application implements", () => {
-    expect(RENDERER_KEYS).toEqual(["problem_exploration"]);
+    expect(RENDERER_KEYS).toEqual(["problem_exploration", "evidence_research"]);
     expect(isRendererRegistered("problem_exploration")).toBe(true);
-    // Part of the approved MVP allow-list but not yet implemented (T10);
-    // registering it early would create a dead renderer key.
-    expect(isRendererRegistered("evidence_research")).toBe(false);
+    // Joined the registry in T10, alongside its own renderer
+    // (EvidenceResearchRenderer) — the two ship together.
+    expect(isRendererRegistered("evidence_research")).toBe(true);
+    expect(isRendererRegistered("custom_iframe")).toBe(false);
   });
 
   it("rejects an unregistered renderer key", () => {

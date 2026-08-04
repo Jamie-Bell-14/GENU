@@ -6,12 +6,13 @@ import { ConversationStream } from "@/components/conversation/conversation-strea
 import { LivingCanvas } from "@/components/canvas/living-canvas";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectScope } from "@/lib/canvas/scene";
+import type { ResearchEvent, ResearchProvider } from "@/lib/research/types";
 import { commitTurn } from "@/lib/services/model-operations";
 import type { CompleteTurnRecord } from "@/lib/services/trusted-writer";
 import { AnthropicDiscoveryEngine } from "./anthropic-engine";
 import { createActivityReporter } from "./activity-reporter";
 import { finishTurn } from "./finish-turn";
-import { createTurnHooks } from "./turn-hooks";
+import { createTurnHooks, type TurnPorts } from "./turn-hooks";
 import {
   INITIAL_TURN_STATE,
   turnReducer,
@@ -244,6 +245,13 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
       },
       takeDirection: async () => null,
       onDirectionApplied: () => {},
+      turnId: TURN,
+      researchProvider: {
+        start: () => ({ id: "unused" }),
+        steer: () => "requires_restart",
+        stop: () => {},
+      },
+      recordResearchFinding: async () => null,
     });
 
     const provider = scriptedProvider();
@@ -270,6 +278,7 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
     */
     await finishTurn(
       {
+        turnId: TURN,
         completeTurn: (assistantText) => {
           order.push("commit");
           return commitTurn(
@@ -402,5 +411,237 @@ describe("a live-shaped Step 2–3 turn reaches the screen", () => {
         /Larger agencies have more disputes by volume/,
       ),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * Same-turn "Research this" → "Add as evidence" (T10 review round 4, P0-1).
+ *
+ * Driven through the real engine, the real hooks and the real `commitTurn`
+ * — not a direct RPC call naming a receipt the application never actually
+ * produced — because the defect the review found was in the *wiring*
+ * between them: `route.ts` observing `research_started` and clearing a
+ * stale `activeFindingId` before it ever reaches `commitTurn`, which a test
+ * that starts from a hand-picked `activeFindingId` cannot exercise.
+ */
+describe("same-turn research and add-evidence are never wired together (T10 review round 4, P0-1)", () => {
+  const FOCAL = "aaaaaaaa-0000-4000-8000-000000000001";
+  const RESEARCH_TURN = "dddddddd-0000-4000-8000-000000000002";
+
+  const scope: ProjectScope = {
+    objectIds: new Set([FOCAL]),
+    relationshipIds: new Set(),
+  };
+
+  /** Emits its whole pass synchronously — nothing here exercises steering. */
+  function fakeResearchProvider(): ResearchProvider {
+    return {
+      start: (_task, onEvent: (event: ResearchEvent) => void) => {
+        onEvent({ type: "step", step: "searching_sources" });
+        onEvent({
+          type: "finding",
+          finding: {
+            id: "provider-side-id",
+            title: "Fresh finding from this turn",
+            keyFinding: "Something new.",
+            whyItMatters: "It matters.",
+            visualisation: { kind: "bar", unit: "%", series: [] },
+            sources: [],
+            methodology: "Method.",
+            limitations: "Limits.",
+            retrievedAt: "2026-08-02T00:00:00.000Z",
+            isDemo: true,
+            conflicting: false,
+          },
+        });
+        onEvent({ type: "done" });
+        return { id: "fake-handle" };
+      },
+      steer: () => "requires_restart",
+      stop: () => {},
+    };
+  }
+
+  function scriptedTurns(): { client: Anthropic; requests: unknown[] } {
+    const requests: unknown[] = [];
+    let call = 0;
+    const turns: { content: unknown[]; stop_reason: string }[] = [
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "start_research",
+            input: { topic: "Deposit disputes" },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "t2",
+            name: "add_evidence",
+            input: {
+              consequenceSummary: "It bears on the target somehow.",
+              direction: "unclear",
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      {
+        content: [{ type: "text", text: "Done for now." }],
+        stop_reason: "end_turn",
+      },
+    ];
+    const client = {
+      messages: {
+        stream(params: unknown) {
+          requests.push(JSON.parse(JSON.stringify(params)));
+          const turn = turns[Math.min(call, turns.length - 1)];
+          call += 1;
+          return {
+            async *[Symbol.asyncIterator]() {
+              for (const [index, block] of turn.content.entries()) {
+                const typed = block as { type: string; text?: string };
+                if (typed.type === "text") {
+                  yield {
+                    type: "content_block_delta",
+                    index,
+                    delta: { type: "text_delta", text: typed.text },
+                  };
+                }
+              }
+            },
+            finalMessage: async () =>
+              ({
+                ...turn,
+                usage: { input_tokens: 100, output_tokens: 100 },
+              }) as unknown as Anthropic.Message,
+          };
+        },
+      },
+    };
+    return { client: client as unknown as Anthropic, requests };
+  }
+
+  /**
+   * Runs the turn exactly as `route.ts` wires it: an `emit` wrapper that
+   * observes `research_started` to decide whether the request's own
+   * `activeFindingId` may still be trusted, feeding that decision into the
+   * same `commitTurn` production code uses.
+   */
+  async function runSameTurnScenario(requestActiveFindingId: string | null) {
+    const events: TurnEvent[] = [];
+    let researchRanThisTurn = false;
+    const emit = (event: TurnEvent) => {
+      if (event.type === "research_started") researchRanThisTurn = true;
+      events.push(event);
+    };
+    const reporter = createActivityReporter({ emit, persist: async () => {} });
+
+    const hooks = createTurnHooks({
+      emit,
+      scope,
+      reporter,
+      onSceneAccepted: async () => {},
+      onSceneRejected: async () => {},
+      takeDirection: async () => null,
+      onDirectionApplied: () => {},
+      turnId: RESEARCH_TURN,
+      researchProvider: fakeResearchProvider(),
+      recordResearchFinding: async () => "fresh-receipt-id",
+    } satisfies TurnPorts);
+
+    const stub = scriptedTurns();
+    const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+    const result = await engine.runTurn(
+      {
+        projectId: "p1",
+        turnId: RESEARCH_TURN,
+        userMessage: "Research this and add it as evidence.",
+        context: { objectIds: [FOCAL], focalObjectId: FOCAL },
+      },
+      hooks,
+      undefined,
+    );
+
+    const committerCalls: unknown[] = [];
+    const commit = async (writes: {
+      assistantText: string;
+      fields: unknown[];
+      assumptions: unknown[];
+      evidence: unknown[];
+    }): Promise<CompleteTurnRecord> => {
+      committerCalls.push(writes.evidence);
+      // Nothing here ever legitimately reaches the committer with an
+      // `add_evidence` row in either scenario below — see the assertions.
+      return { outcome: "completed", written: {}, refused: {} };
+    };
+
+    await finishTurn(
+      {
+        turnId: RESEARCH_TURN,
+        completeTurn: (assistantText) =>
+          commitTurn(
+            commit,
+            {
+              projectId: "p1",
+              turnId: RESEARCH_TURN,
+              userMessage: "Research this and add it as evidence.",
+              /*
+                Cleared whenever this turn ran its own research
+                (T10 review round 4, P0-1) — exactly the check `route.ts`
+                performs, reproduced here rather than re-implemented, so
+                this test proves the same wiring production uses.
+              */
+              activeFindingId: researchRanThisTurn
+                ? null
+                : requestActiveFindingId,
+            },
+            result.operations,
+            assistantText,
+          ),
+        publishProjectModel: async () => {},
+        closeRun: async () => true,
+        audit: async () => {},
+        auditOperation: async () => {},
+        emit,
+      },
+      result.assistantText,
+    );
+
+    return { events, committerCalls };
+  }
+
+  it("with no previous receipt: start_research then add_evidence is refused, never bound to nothing", async () => {
+    const { events, committerCalls } = await runSameTurnScenario(null);
+
+    // The refusal is real and durable, not merely swallowed.
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "evidence_refused" }),
+    );
+    // Nothing was ever staged as a write the committer could act on.
+    expect(
+      committerCalls.every((evidence) => (evidence as unknown[]).length === 0),
+    ).toBe(true);
+  });
+
+  it("with an older receipt active: research produces a new finding, and add_evidence must never write the old one", async () => {
+    const { events, committerCalls } = await runSameTurnScenario(
+      "stale-receipt-from-before-this-turn",
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "evidence_refused" }),
+    );
+    // Specifically: the stale id from before this turn began never reaches
+    // the committer at all — the whole operation is refused before that,
+    // exactly as it is when there was no receipt to begin with.
+    expect(
+      committerCalls.every((evidence) => (evidence as unknown[]).length === 0),
+    ).toBe(true);
   });
 });

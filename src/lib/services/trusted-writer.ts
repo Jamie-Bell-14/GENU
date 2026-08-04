@@ -161,6 +161,12 @@ export async function completeTurnRecord(input: {
   assistantText: string;
   fields: unknown[];
   assumptions: unknown[];
+  /**
+   * "Add as evidence" proposals, staged like any other write (T10 review
+   * round 2, P0-B) — each names a receipt, never a target: the target is
+   * the receipt's own stored focal object.
+   */
+  evidence: unknown[];
 }): Promise<CompleteTurnRecord> {
   const client = trustedClient();
   if (!client) {
@@ -174,6 +180,7 @@ export async function completeTurnRecord(input: {
     p_assistant_text: input.assistantText,
     p_fields: input.fields,
     p_assumptions: input.assumptions,
+    p_evidence: input.evidence,
   });
   if (error) {
     console.error("complete_turn failed", { code: error.code });
@@ -393,6 +400,75 @@ export interface AuditInput {
   correlationId: string;
   /** Small structured context only: codes and counts, never content. */
   detail?: Record<string, string | number | boolean>;
+}
+
+/**
+ * Persists the exact result one research pass produced (T10 review round 1,
+ * P0-1) — system-authored, like activity and audit, so `research_findings`
+ * can later prove a project genuinely produced a given result rather than
+ * trusting a client's say-so.
+ *
+ * Also carries the object the pass actually concerned, and the unavailable
+ * sources and applied steering that were part of what the user saw
+ * (T10 review round 2, P0-A) — so a later "Add as evidence" links to what
+ * was researched, never a freshly recomputed default, and that part of the
+ * displayed result is not lost once session state holding it is gone.
+ *
+ * Returns the receipt id "Add as evidence" resolves in a later turn, or
+ * `null` if it could not be recorded — the caller treats that as the research
+ * pass itself having failed, rather than showing a finding nothing can later
+ * reference.
+ */
+export async function recordResearchFinding(input: {
+  projectId: string;
+  turnId: string;
+  focalObjectId: string | null;
+  unavailableSources: unknown[];
+  appliedDirections: string[];
+  finding: {
+    title: string;
+    keyFinding: string;
+    whyItMatters: string;
+    visualisation: unknown;
+    sources: unknown;
+    methodology: string;
+    limitations: string;
+    retrievedAt: string;
+    isDemo: boolean;
+    conflicting: boolean;
+  };
+}): Promise<string | null> {
+  const client = trustedClient();
+  if (!client) {
+    reportUnavailable("research_finding");
+    return null;
+  }
+  const { data, error } = await client
+    .from("research_findings")
+    .insert({
+      project_id: input.projectId,
+      turn_id: input.turnId,
+      focal_object_id: input.focalObjectId,
+      unavailable_sources: input.unavailableSources,
+      applied_directions: input.appliedDirections,
+      title: input.finding.title,
+      key_finding: input.finding.keyFinding,
+      why_it_matters: input.finding.whyItMatters,
+      visualisation: input.finding.visualisation,
+      sources: input.finding.sources,
+      methodology: input.finding.methodology,
+      limitations: input.finding.limitations,
+      retrieved_at: input.finding.retrievedAt,
+      is_demo: input.finding.isDemo,
+      conflicting: input.finding.conflicting,
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    console.error("research_finding insert failed", { code: error?.code });
+    return null;
+  }
+  return data.id as string;
 }
 
 export async function recordAudit(input: AuditInput): Promise<void> {

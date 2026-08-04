@@ -53,6 +53,77 @@ describe("StructuredInspector states", () => {
   });
 });
 
+describe("evidence provenance stays inspectable after a reload (T10 review round 2, P0-C)", () => {
+  const evidenceObject: CanvasObject = {
+    id: "evidence-1",
+    kind: "evidence",
+    zone: "evidence",
+    title: "Deposit disputes are common",
+    detail: "Supports that disputes occur at meaningfully different rates.",
+    origin: "researched",
+    meta: "Demonstration Deposit Protection Scheme · Demonstration data",
+    evidenceProvenance: {
+      sources: [
+        {
+          id: "s1",
+          name: "Demonstration Scheme Annual Report",
+          url: null,
+          retrievedAt: "2026-07-30T00:00:00.000Z",
+        },
+        {
+          id: "s2",
+          name: "Demonstration Trade Body Survey",
+          url: null,
+          retrievedAt: "2026-07-30T00:00:00.000Z",
+        },
+      ],
+      conflicting: true,
+      methodology:
+        "Illustrative annual reporting, aggregated by agency size band.",
+      limitations: "Demonstration data only.",
+      retrievedAt: "2026-07-30T00:00:00.000Z",
+    },
+  };
+
+  it("is collapsed by default and reveals sources, methodology and limitations on request", async () => {
+    const user = userEvent.setup();
+    render(<StructuredInspector objects={[evidenceObject]} />);
+
+    expect(
+      screen.queryByText("Demonstration Scheme Annual Report"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Inspect sources" }));
+
+    expect(
+      screen.getByText("Demonstration Scheme Annual Report"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Demonstration Trade Body Survey"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Illustrative annual reporting, aggregated by agency size band.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Demonstration data only.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/sources behind this evidence disagree/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no inspection control for evidence with no receipt behind it", () => {
+    render(
+      <StructuredInspector
+        objects={[{ ...evidenceObject, evidenceProvenance: undefined }]}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Inspect sources" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("StructuredInspector view operations", () => {
   it("pins an object to the top of its zone", async () => {
     const user = userEvent.setup();

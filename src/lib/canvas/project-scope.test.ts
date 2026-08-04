@@ -21,6 +21,7 @@ function clientFailing(failing: string[]): SupabaseClient {
       const builder = {
         select: () => builder,
         eq: () => builder,
+        in: () => builder,
         order: () => builder,
         limit: () => Promise.resolve(result),
       };

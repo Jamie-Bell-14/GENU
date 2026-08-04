@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { TurnStatus } from "@/lib/services/turn-snapshot";
+import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
+import { resolveActions } from "./contextual-actions";
 import {
   turnReducer,
   INITIAL_TURN_STATE,
@@ -63,6 +65,13 @@ interface CatchUpResponse {
    */
   activityUnavailable?: boolean;
   message?: Message | null;
+  /**
+   * The durable evidence-refusal outcome for this turn, if it has one
+   * (T10 review round 4, P0-3) — recovered from `turn_runs` rather than
+   * only ever available on the SSE connection that was open when the turn
+   * committed.
+   */
+  evidenceRefusedReason?: string | null;
 }
 
 function wait(ms: number): Promise<void> {
@@ -89,15 +98,46 @@ export function useTurnRuntime({
   projectId,
   initialMessages = [],
   initialActivity = [],
+  initialResearch = null,
+  initialEvidenceOutcome = null,
 }: Readonly<{
   projectId: string;
   initialMessages?: Message[];
   initialActivity?: ActivityLine[];
+  /**
+   * A research receipt still current as of the last reload (T10 review
+   * round 2, P0-A) — seeded once, the same way `initialMessages` is,
+   * rather than through a dispatched action: this is what a fresh mount
+   * already knows, not an event that happened during this session.
+   */
+  initialResearch?: {
+    finding: ResearchFinding;
+    /** The turn that produced it (T10 review round 3, P0-2) — see
+     *  `TurnState.activeResearchTurnId`'s own doc comment. */
+    turnId: string;
+    unavailableSources: { source: ResearchSource; reason: string }[];
+  } | null;
+  /**
+   * A refused "Add as evidence" still current as of the last reload
+   * (T10 review round 4, P0-3) — seeded the same way `initialResearch` is:
+   * this is what a fresh mount already knows about its most recent turn,
+   * not a live event.
+   */
+  initialEvidenceOutcome?: { reason: string } | null;
 }>): TurnRuntime {
   const [state, dispatch] = useReducer(turnReducer, {
     ...INITIAL_TURN_STATE,
     messages: initialMessages,
     activityLog: initialActivity,
+    activeResearch: initialResearch?.finding ?? null,
+    activeResearchTurnId: initialResearch?.turnId ?? null,
+    evidenceOutcome: initialEvidenceOutcome
+      ? { refused: true, reason: initialEvidenceOutcome.reason }
+      : null,
+    unavailableSources: initialResearch?.unavailableSources ?? [],
+    // The action a hydrated receipt actually enables — the only contextual
+    // action a fresh mount can honestly offer without a turn having run.
+    actions: initialResearch ? resolveActions(["add_as_evidence"]) : [],
   });
   const [draft, setDraft] = useState("");
   const [directionPending, setDirectionPending] = useState(false);
@@ -187,6 +227,22 @@ export function useTurnRuntime({
               activityLog,
               message,
             });
+            /*
+              Recovered exactly as the live stream would have shown it
+              (T10 review round 4, P0-3): a connection lost between
+              `complete_turn` committing and the client consuming its
+              `evidence_refused` event must still let catch-up surface the
+              same correction, not only the stored, staged wording.
+            */
+            if (payload.evidenceRefusedReason) {
+              dispatch({
+                type: "event",
+                event: {
+                  type: "evidence_refused",
+                  reason: payload.evidenceRefusedReason,
+                },
+              });
+            }
             return;
           }
 
@@ -263,6 +319,17 @@ export function useTurnRuntime({
     [],
   );
 
+  /*
+    Read once, outside the callback body, so it can sit in `send`'s own
+    dependency array (T10 review round 6, P1): `useCallback`'s memoised
+    closure otherwise keeps whichever `state.activeResearch` was current the
+    last time its dependencies actually changed, not the one current when
+    `send` is finally called. Composing a message while research is still
+    running, then leaving the draft untouched once the finding lands, is
+    exactly the sequence that reused the stale memoised closure without this.
+  */
+  const activeResearchId = state.activeResearch?.id ?? null;
+
   const send = useCallback(async () => {
     const message = draft.trim();
     // Guard against rapid double-submits racing the state update, and against
@@ -304,6 +371,11 @@ export function useTurnRuntime({
         type: "event",
         event: {
           type: "turn_failed",
+          // The server never named this turn, so the message's own id stands
+          // in (see `Message.turnId`'s doc comment) — it cannot collide with
+          // a real turn id, so it cannot wrongly clear another turn's queued
+          // recommendation either.
+          turnId: messageId,
           error: {
             code: "engine_unavailable",
             userMessage:
@@ -318,7 +390,17 @@ export function useTurnRuntime({
       const response = await fetch(turnsEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message }),
+        // `activeFindingId` tells the server which research finding this
+        // session is looking at (T10, `src/lib/research/types.ts`): the
+        // server holds the receipt itself (`research_findings`) and
+        // re-hydrates it on reload, but not which one *this* client last
+        // saw, so the client still has to name it — an opaque reference,
+        // not project truth, and one whose currency the server still
+        // re-checks against its own record before trusting it.
+        body: JSON.stringify({
+          message,
+          activeFindingId: activeResearchId,
+        }),
         signal: controller.signal,
       });
       /*
@@ -406,7 +488,7 @@ export function useTurnRuntime({
       abortRef.current = null;
       stoppedRef.current = false;
     }
-  }, [catchUp, draft, turnsEndpoint]);
+  }, [activeResearchId, catchUp, draft, turnsEndpoint]);
 
   const stop = useCallback(() => {
     stoppedRef.current = true;

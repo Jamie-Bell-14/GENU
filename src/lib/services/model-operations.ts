@@ -1,5 +1,6 @@
 import type { StagedOperation } from "@/lib/ai/discovery-engine";
 import {
+  AddEvidenceSchema,
   RecordAssumptionSchema,
   UpdateProjectModelSchema,
   ProposeConnectedChangeSchema,
@@ -73,6 +74,16 @@ export interface OperationContext {
    * transit through the provider.
    */
   userMessage: string;
+  /**
+   * The research receipt this turn's client says it is looking at, if any
+   * (T10 review round 1, P0-1) — an opaque reference into
+   * `research_findings`, never trusted content: `complete_turn` re-reads the
+   * actual result, and the object it was researched from, from that table by
+   * this id. The model never supplies this; it names only the consequence
+   * text (docs/AI_SYSTEM.md §10). Absent for any turn that never mentioned
+   * one, which is most of them.
+   */
+  activeFindingId?: string | null;
 }
 
 /**
@@ -84,6 +95,7 @@ export type TurnCommitter = (input: {
   assistantText: string;
   fields: unknown[];
   assumptions: unknown[];
+  evidence: unknown[];
 }) => Promise<CompleteTurnRecord>;
 
 function normalise(value: string): string {
@@ -152,10 +164,60 @@ interface AssumptionRow {
   source_excerpt: string | null;
 }
 
-/** Refusal codes the database reports, in words a person can act on. */
-const REFUSAL_MESSAGES: Record<string, string> = {
+/**
+ * A staged "Add as evidence" proposal (T10 review round 2, P0-B). Names a
+ * receipt and a direction, never a target — the target is the receipt's own
+ * recorded focal object, resolved inside `complete_turn` itself.
+ */
+interface EvidenceRow {
+  slot: number;
+  receipt_id: string;
+  consequence_summary: string;
+  direction: "supports" | "contradicts" | "unclear";
+}
+
+/**
+ * Refusal codes the database reports, in words a person can act on.
+ *
+ * Exported rather than kept private: the same mapping is what makes a
+ * durably-recorded refusal (`turn_runs.evidence_refused_reason`, T10 review
+ * round 4) read back as the same words the live `evidence_refused` stream
+ * event showed, whether that reading happens moments later over SSE or
+ * after a reload days on — one wording, wherever the outcome is read.
+ */
+export const REFUSAL_MESSAGES: Record<string, string> = {
   user_owned_field:
     "A field the person stated themselves cannot be replaced automatically.",
+  no_active_research: "There was no research finding this could be added from.",
+  no_focal_object:
+    "The research this came from was not run against any object.",
+  already_linked: "This finding was already added as evidence.",
+  /*
+   * The receipt's own research pass never completed (T10 review round 3,
+   * P0-2) — most often because it was recorded mid-turn and something later
+   * in that same turn failed. The finding shown was real, but nothing that
+   * turn produced was ever settled.
+   */
+  research_incomplete:
+    "The research this came from did not finish, so it was not added.",
+  /*
+   * A later turn has since become the project's most recent one
+   * (T10 review round 4) — the same currency rule reload hydration already
+   * applies (the latest stored message must be this receipt's own turn's),
+   * enforced here so a stale receipt cannot be submitted directly either.
+   */
+  research_superseded:
+    "This is no longer the most recent research, so it was not added.",
+  /*
+   * The receipt names *this turn's own*, still-running research
+   * (T10 review round 4) — same-turn "Research this" → "Add as evidence" is
+   * not supported: the application clears the request's own `activeFindingId`
+   * whenever this turn ran research (see `route.ts`), and this is the
+   * database's independent refusal of the same case, reached only if that
+   * application-side guard were ever bypassed.
+   */
+  research_not_yet_complete:
+    "This turn's own research is not finished yet, so it cannot be added until a later turn.",
 };
 
 /**
@@ -176,6 +238,7 @@ export async function commitTurn(
   const outcomes: OperationOutcome[] = [];
   const fields: FieldRow[] = [];
   const assumptions: AssumptionRow[] = [];
+  const evidence: EvidenceRow[] = [];
   /** Which outcome slots the transaction decides, so it can rewrite them. */
   const writeSlots: number[] = [];
 
@@ -262,6 +325,37 @@ export async function commitTurn(
         break;
       }
 
+      case "add_evidence": {
+        /*
+          Staged like any other write (T10 review round 2, P0-B): whether it
+          actually links is decided when the turn completes, so a Stop or a
+          lost connection afterwards never leaves an evidence row real while
+          the turn's own failure message claims nothing changed — there is no
+          separate "it already happened" fact to contradict, because nothing
+          has happened here yet.
+        */
+        const parsed = AddEvidenceSchema.safeParse(operation.candidate);
+        if (!parsed.success) {
+          outcomes.push(reject(tool, parsed.error.issues[0].message));
+          break;
+        }
+        if (!context.activeFindingId) {
+          // No receipt to resolve at all — nothing for `complete_turn` to
+          // look up, so this is refused here rather than sent to it.
+          outcomes.push(reject(tool, "no_active_research"));
+          break;
+        }
+        evidence.push({
+          slot,
+          receipt_id: context.activeFindingId,
+          consequence_summary: parsed.data.consequenceSummary,
+          direction: parsed.data.direction,
+        });
+        writeSlots.push(slot);
+        outcomes.push({ applied: true, kind: tool, count: 1 });
+        break;
+      }
+
       case "suggest_actions":
       case "recommend_canvas_scene":
         /*
@@ -280,7 +374,7 @@ export async function commitTurn(
     state are part of this transaction too, so there is no path on which a turn
     ends without one.
   */
-  const record = await commit({ assistantText, fields, assumptions });
+  const record = await commit({ assistantText, fields, assumptions, evidence });
 
   if (record.outcome !== "completed") {
     /*

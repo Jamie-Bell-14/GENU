@@ -4,9 +4,11 @@ import { WorkspaceClient } from "./workspace-client";
 import type { Message } from "@/lib/ai/turn-events";
 import {
   loadCanvasObjects,
+  loadLatestResearchReceipt,
   loadProjectRelationships,
 } from "@/lib/canvas/project-model-store";
 import { loadActivityHistory } from "@/lib/services/activity";
+import { loadLatestEvidenceOutcome } from "@/lib/services/turn-snapshot";
 
 // Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
@@ -45,12 +47,27 @@ export default async function ProjectPage({
     createdAt: row.created_at as string,
   }));
 
-  const [canvasObjects, canvasRelationships, activity] = await Promise.all([
+  const [
+    canvasObjects,
+    canvasRelationships,
+    activity,
+    research,
+    evidenceOutcome,
+  ] = await Promise.all([
     loadCanvasObjects(supabase, projectId),
     loadProjectRelationships(supabase, projectId),
-    // Activity recorded before this page load, so the history panel survives
-    // a reload rather than starting empty (T8).
+    // Activity recorded before this page load, so the history panel
+    // survives a reload rather than starting empty (T8).
     loadActivityHistory(supabase, projectId),
+    // The research receipt "Add as evidence" can still resolve, if it is
+    // still what this project's conversation is actually about
+    // (T10 review round 2, P0-A).
+    loadLatestResearchReceipt(supabase, projectId),
+    // A refused "Add as evidence" from the project's most recent turn,
+    // recovered the same way a reload recovers a still-current research
+    // receipt (T10 review round 4, P0-3) — otherwise only the stored,
+    // staged assistant wording would survive a reload.
+    loadLatestEvidenceOutcome(supabase, projectId),
   ]);
 
   return (
@@ -62,6 +79,8 @@ export default async function ProjectPage({
       activityTruncated={activity.truncated}
       canvasObjects={canvasObjects.data}
       canvasRelationships={canvasRelationships.data}
+      initialResearch={research}
+      initialEvidenceOutcome={evidenceOutcome}
     />
   );
 }

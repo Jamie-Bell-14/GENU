@@ -1,5 +1,7 @@
 import type { ActivityStep } from "./activity-steps";
+import { resolveActions } from "./contextual-actions";
 import type { EngineEvent } from "./turn-events";
+import type { ResearchTask } from "@/lib/research/types";
 
 /**
  * The minimum project context an engine receives. Ids only: an engine needs to
@@ -95,7 +97,24 @@ export interface TurnHooks {
    * will never come.
    */
   takeDirection(options: { final: boolean }): Promise<string | null>;
+  /**
+   * Runs the slice's one research provider to completion inside this turn
+   * (docs/ARCHITECTURE.md §9, T10). Steps, sources and the finding stream to
+   * the client as they happen; this resolves once the pass is over, stopped,
+   * or failed. The engine is told only enough to phrase an honest reply — the
+   * finding's full detail reaches the canvas directly, never through the
+   * engine (docs/AI_SYSTEM.md §9.1: a scene names existing objects, it does
+   * not carry render content the model composed).
+   */
+  runResearch(
+    task: ResearchTask,
+    signal?: AbortSignal,
+  ): Promise<ResearchOutcome>;
 }
+
+export type ResearchOutcome =
+  | { ok: true; findingTitle: string }
+  | { ok: false; reason: "stopped" | "unavailable" };
 
 export type DirectionApplicationMode = "applies_now" | "next_step" | "restart";
 
@@ -144,6 +163,7 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     const interrupted = () => {
       hooks.emit({
         type: "turn_failed",
+        turnId: input.turnId,
         error: {
           code: "turn_interrupted",
           userMessage:
@@ -157,6 +177,27 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     if (signal?.aborted) return interrupted();
 
     const trimmed = input.userMessage.trim();
+
+    /*
+      Recognised by exact text, not understanding — this engine performs no
+      analysis at all (see the class doc). The live engine recognises the same
+      requests by what they mean, through the same two tools
+      (docs/ARCHITECTURE.md §8); this is only the deterministic stand-in CI and
+      Playwright run against.
+
+      "Research this" matches by prefix, not full equality: the T10
+      all-sources-unavailable edge case is reached by appending a marker
+      MockResearchProvider recognises on the topic it is handed (e.g.
+      "Research this (all sources unavailable)"), and the full message is
+      what becomes that topic — see `runResearchTurn` below.
+    */
+    if (trimmed.toLowerCase().startsWith("research this")) {
+      return this.runResearchTurn(input, hooks, signal, interrupted);
+    }
+    if (trimmed.toLowerCase() === "add as evidence") {
+      return this.runAddEvidenceTurn(input, hooks, signal, interrupted);
+    }
+
     const preview =
       trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
     const lines = [
@@ -238,6 +279,115 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     // outcome is recorded.
     // The scripted engine proposes no project-truth operations.
     return { assistantText: lines.join("\n"), operations: [] };
+  }
+
+  /**
+   * "Research this" (VERTICAL_SLICE_SPEC Step 4). Runs the provider, then — on
+   * a finding — recommends the research view and names the one action that
+   * genuinely follows from it.
+   */
+  private async runResearchTurn(
+    input: TurnInput,
+    hooks: TurnHooks,
+    signal: AbortSignal | undefined,
+    interrupted: () => TurnResult,
+  ): Promise<TurnResult> {
+    if (signal?.aborted) return interrupted();
+
+    const outcome = await hooks.runResearch(
+      {
+        topic: input.userMessage.trim(),
+        focalObjectId: input.context?.focalObjectId ?? null,
+      },
+      signal,
+    );
+    if (signal?.aborted) return interrupted();
+
+    if (!outcome.ok) {
+      const text =
+        outcome.reason === "stopped"
+          ? "Research was stopped before it produced a finding."
+          : "Research could not run just now. Nothing was added to the project.";
+      hooks.emit({ type: "block", kind: "plain" });
+      if (!(await this.stream(text, hooks, signal))) return interrupted();
+      return { assistantText: text, operations: [] };
+    }
+
+    const focalObjectId = input.context?.focalObjectId;
+    if (focalObjectId) {
+      await hooks.recommendScene({
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId,
+        visibleObjectIds: [focalObjectId],
+        visibleRelationshipIds: [],
+        emphasis: "none",
+        reason: `Showing what was found: “${outcome.findingTitle}”. This is demonstration data.`,
+        transition: "replace",
+      });
+    }
+
+    /*
+      A successful pass with no focal object queues no scene at all (the
+      branch above) and its receipt has no target — `complete_turn` can only
+      refuse it as `no_focal_object`. Neither the reply nor the offered
+      actions may say otherwise (T10 review round 9, P1: the same
+      application-owned eligibility rule the live engine's tool result and
+      reload hydration already apply — see `anthropic-engine.ts` and
+      `project-model-store.ts`'s `loadLatestResearchReceipt`). There is no
+      canvas view to point to, and "Add as evidence" would submit a receipt
+      the database is guaranteed to refuse.
+    */
+    const text = focalObjectId
+      ? `I found: “${outcome.findingTitle}”. This is demonstration data, not a live lookup — see the canvas for the full finding, its sources and what it does and does not support.`
+      : `I found: “${outcome.findingTitle}”. This is demonstration data, not a live lookup. Nothing was in focus, so no research view was queued and this cannot be added as evidence — establish or focus the relevant object, then run the research again.`;
+    hooks.emit({ type: "block", kind: "finding" });
+    if (!(await this.stream(text, hooks, signal))) return interrupted();
+
+    if (focalObjectId) {
+      hooks.emit({
+        type: "actions",
+        actions: resolveActions(["add_as_evidence"]),
+      });
+    }
+    return { assistantText: text, operations: [] };
+  }
+
+  /**
+   * "Add as evidence" (VERTICAL_SLICE_SPEC Step 6).
+   *
+   * Staged like any other project-truth write (T10 review round 2, P0-B):
+   * whether it actually links is decided when the turn completes, not here,
+   * so the reply speaks in the same present-progressive terms as any other
+   * staged proposal rather than claiming a result this engine cannot yet
+   * know. This engine cannot itself judge whether the scripted finding
+   * supports or contradicts an arbitrary, unknown target object, so it
+   * honestly proposes `unclear` rather than guess — the live engine, which
+   * can read the target's own text, judges this for real.
+   */
+  private async runAddEvidenceTurn(
+    input: TurnInput,
+    hooks: TurnHooks,
+    signal: AbortSignal | undefined,
+    interrupted: () => TurnResult,
+  ): Promise<TurnResult> {
+    if (signal?.aborted) return interrupted();
+
+    const consequenceSummary =
+      "It supports that deposit disputes occur at meaningfully different rates across agency sizes in the scripted scenario. It does not establish anything about a real agency's own dispute rate, and the two demonstration sources disagree on the overall figure.";
+    const text = `Adding this as evidence — it will show on the canvas once this finishes. ${consequenceSummary}`;
+
+    hooks.emit({ type: "block", kind: "plain" });
+    if (!(await this.stream(text, hooks, signal))) return interrupted();
+    return {
+      assistantText: text,
+      operations: [
+        {
+          name: "add_evidence",
+          candidate: { consequenceSummary, direction: "unclear" },
+        },
+      ],
+    };
   }
 
   /** Streams text, returning false if the turn was stopped part-way. */

@@ -46,6 +46,21 @@ function streamStarted(state: TurnState): TurnState {
   });
 }
 
+/**
+ * The server has genuinely accepted a turn (T10 review round 5): in
+ * production this fires from the `x-turn-id` response header, which is
+ * only ever set once `start_turn` has actually stored the user's message —
+ * never on a refused send. Dispatched against `userMessage.id` here since
+ * that is the only message these tests ever send.
+ */
+function turnIdentified(state: TurnState, turnId: string): TurnState {
+  return turnReducer(state, {
+    type: "turn_identified",
+    messageId: userMessage.id,
+    turnId,
+  });
+}
+
 describe("turnReducer", () => {
   it("appends the user message and marks the turn as sending", () => {
     const state = send();
@@ -133,6 +148,7 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "turn_failed",
+        turnId: TURN,
         error: {
           code: "engine_unavailable",
           userMessage: "The response could not be completed.",
@@ -162,7 +178,7 @@ describe("turnReducer", () => {
     });
     state = turnReducer(state, {
       type: "event",
-      event: { type: "scene_recommended", scene: scene() },
+      event: { type: "scene_recommended", scene: scene(), turnId: TURN },
     });
     expect(state.actions).toHaveLength(1);
     expect(state.recommendedScene).not.toBeNull();
@@ -171,6 +187,7 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "turn_failed",
+        turnId: TURN,
         error: {
           code: "engine_unavailable",
           userMessage: "The response could not be completed.",
@@ -180,6 +197,31 @@ describe("turnReducer", () => {
     });
     expect(state.actions).toEqual([]);
     expect(state.recommendedScene).toBeNull();
+  });
+
+  it("issue #13: does not clear a different turn's queued recommendation", () => {
+    let state = streamStarted(send());
+    state = turnReducer(state, {
+      type: "event",
+      event: { type: "scene_recommended", scene: scene(), turnId: TURN },
+    });
+    expect(state.recommendedScene?.turnId).toBe(TURN);
+
+    // A failure attributed to a *different* turn must not touch it.
+    state = turnReducer(state, {
+      type: "event",
+      event: {
+        type: "turn_failed",
+        turnId: "some-other-turn",
+        error: {
+          code: "engine_unavailable",
+          userMessage: "The response could not be completed.",
+          recoverable: true,
+        },
+      },
+    });
+    expect(state.recommendedScene).not.toBeNull();
+    expect(state.recommendedScene?.turnId).toBe(TURN);
   });
 
   it("withdraws the message when the server refused to start the turn", () => {
@@ -230,6 +272,7 @@ describe("turnReducer", () => {
       type: "event",
       event: {
         type: "turn_failed",
+        turnId: TURN,
         error: {
           code: "rate_limited",
           userMessage: "Wait a moment.",
@@ -307,10 +350,10 @@ describe("activity history, scenes and steering", () => {
     };
     const state = turnReducer(streamStarted(send()), {
       type: "event",
-      event: { type: "scene_recommended", scene },
+      event: { type: "scene_recommended", scene, turnId: TURN },
     });
 
-    expect(state.recommendedScene).toEqual(scene);
+    expect(state.recommendedScene).toEqual({ scene, turnId: TURN });
     // Nothing about project truth lives in turn state, so there is nothing a
     // scene could have changed.
     expect(state.messages).toEqual([userMessage]);
@@ -627,5 +670,428 @@ describe("an unresolved recovery", () => {
     });
     expect(resolved.recoveries).toEqual([]);
     expect(resolved.messages).toHaveLength(2);
+  });
+});
+
+describe("research (T10)", () => {
+  const testFinding = {
+    id: "tenancy-deposit-disputes-2024",
+    title: "Deposit disputes are common",
+    keyFinding: "Roughly 1 in 6.",
+    whyItMatters: "It matters.",
+    visualisation: { kind: "bar" as const, unit: "%", series: [] },
+    sources: [],
+    methodology: "Method.",
+    limitations: "Limits.",
+    retrievedAt: "2026-07-30T00:00:00.000Z",
+    isDemo: true as const,
+    conflicting: false,
+  };
+
+  it("holds the finding a research pass produced", () => {
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: { type: "research_finding", finding: testFinding },
+    });
+    expect(state.activeResearch).toEqual(testFinding);
+  });
+
+  it("accumulates unavailable sources rather than discarding them", () => {
+    const unavailable = {
+      id: "demo-regional-authority-bulletin",
+      name: "Demonstration Regional Housing Authority — Illustrative Bulletin",
+      url: null,
+      retrievedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const state = turnReducer(streamStarted(send()), {
+      type: "event",
+      event: {
+        type: "research_failed_source",
+        source: unavailable,
+        reason: "This source could not be retrieved in the demonstration run.",
+      },
+    });
+    expect(state.unavailableSources).toEqual([
+      {
+        source: unavailable,
+        reason: "This source could not be retrieved in the demonstration run.",
+      },
+    ]);
+  });
+
+  describe("a new pass supersedes the last one (T10 review round 2, P0-D)", () => {
+    it("clears a previous finding the moment a new pass starts", () => {
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const state = turnReducer(withFinding, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+      expect(state.activeResearch).toBeNull();
+    });
+
+    it("clears the previous pass's unavailable sources the moment a new pass starts", () => {
+      const unavailable = {
+        id: "demo-regional-authority-bulletin",
+        name: "Demonstration Regional Housing Authority — Illustrative Bulletin",
+        url: null,
+        retrievedAt: "2026-07-30T00:00:00.000Z",
+      };
+      const withUnavailable = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "research_failed_source",
+          source: unavailable,
+          reason: "unavailable",
+        },
+      });
+      const state = turnReducer(withUnavailable, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+      expect(state.unavailableSources).toEqual([]);
+    });
+
+    it("leaves a pass that produces nothing with no stale receipt to add", () => {
+      // The exact scenario the review flagged: a successful pass, then a
+      // second pass that produces no finding at all (e.g. every source
+      // unavailable) must not leave the first pass's receipt answerable to
+      // "Add as evidence".
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const secondPassStarted = turnReducer(withFinding, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+      const failed = turnReducer(secondPassStarted, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: "t1",
+          error: {
+            code: "research_source_unavailable",
+            userMessage:
+              "None of the demonstration sources could be retrieved.",
+            recoverable: true,
+          },
+        },
+      });
+      expect(failed.activeResearch).toBeNull();
+    });
+
+    /*
+      T10 review round 10, P1: superseding the receipt is not the same as
+      withdrawing the affordances a *prior* pass, within this same turn,
+      already validated on top of it — a suggested "Add as evidence" action
+      and a queued evidence_research recommendation. Both promise a receipt
+      behind them; leaving them in place after a later pass supersedes that
+      receipt offers a button and a "Show it" for research this event just
+      retired.
+    */
+    function researchScene(): CanvasScene {
+      return {
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId: "aaaaaaaa-0000-4000-8000-000000000001",
+        visibleObjectIds: ["aaaaaaaa-0000-4000-8000-000000000001"],
+        visibleRelationshipIds: [],
+        emphasis: "none",
+        reason: "Showing what was found.",
+        transition: "replace",
+      };
+    }
+
+    it("withdraws the earlier pass's add_as_evidence action and queued research scene once a later pass starts", () => {
+      // A second pass that merely finds nothing does not fail the turn —
+      // the engine reports it plainly and the turn completes normally via
+      // "done", never "turn_failed". The regression has to be provable
+      // without that event, since `turn_failed` already clears `actions`
+      // and a matching-turnId `recommendedScene` on its own and would mask
+      // the defect this test exists to catch.
+      let state = streamStarted(send());
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "scene_recommended",
+          scene: researchScene(),
+          turnId: TURN,
+        },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "actions",
+          actions: [{ id: "add_as_evidence", label: "Add as evidence" }],
+        },
+      });
+      expect(state.actions.map((a) => a.id)).toContain("add_as_evidence");
+      expect(state.recommendedScene).not.toBeNull();
+
+      // The second pass starts and finds nothing — no further research or
+      // turn-lifecycle event follows before the turn completes normally.
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.actions.map((a) => a.id)).not.toContain("add_as_evidence");
+      expect(state.recommendedScene).toBeNull();
+
+      // The turn completing normally afterwards must not resurrect anything.
+      state = turnReducer(state, { type: "event", event: { type: "done" } });
+      expect(state.actions.map((a) => a.id)).not.toContain("add_as_evidence");
+      expect(state.recommendedScene).toBeNull();
+    });
+
+    it("does not withdraw an unrelated action or scene when a research pass starts", () => {
+      let state = streamStarted(send());
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "scene_recommended", scene: scene(), turnId: TURN },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "actions",
+          actions: [{ id: "challenge_this", label: "Challenge this" }],
+        },
+      });
+
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+
+      expect(state.actions.map((a) => a.id)).toContain("challenge_this");
+      expect(state.recommendedScene).not.toBeNull();
+      expect(state.recommendedScene?.scene.renderer).toBe(
+        "problem_exploration",
+      );
+    });
+
+    it("leaves the action and scene in place through the normal single-pass path, once its own result is seen", () => {
+      // The path this correction must not regress: one focused pass,
+      // producing a finding, a queued view and the action — with no
+      // superseding pass, all three stay exactly as the turn left them.
+      let state = streamStarted(send());
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "scene_recommended",
+          scene: researchScene(),
+          turnId: TURN,
+        },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "actions",
+          actions: [{ id: "add_as_evidence", label: "Add as evidence" }],
+        },
+      });
+      state = turnReducer(state, { type: "event", event: { type: "done" } });
+
+      expect(state.activeResearch).toEqual(testFinding);
+      expect(state.actions.map((a) => a.id)).toContain("add_as_evidence");
+      expect(state.recommendedScene).not.toBeNull();
+    });
+  });
+
+  describe("a receipt stays current only while its own turn is the latest thing that happened (T10 review round 3, P0-2)", () => {
+    function doneFor(state: TurnState): TurnState {
+      return turnReducer(state, { type: "event", event: { type: "done" } });
+    }
+
+    it("stamps the finding with the turn that produced it", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      expect(state.activeResearchTurnId).toBe(TURN);
+    });
+
+    it("does not retire the receipt when its own turn completes", () => {
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const state = doneFor(withFinding);
+      // This is the completion that makes the receipt addable at all.
+      expect(state.activeResearch).toEqual(testFinding);
+      expect(state.activeResearchTurnId).toBe(TURN);
+    });
+
+    it("retires the receipt the moment a later turn is accepted, before that turn does anything else", () => {
+      // T10 review round 5: retirement happens on `turn_identified` — the
+      // server genuinely accepting a new turn — not on that turn's later
+      // completion. `loadLatestResearchReceipt`'s reload rule already
+      // agrees: the most recent *stored* message decides currency, and a
+      // new turn's message is stored (via `start_turn`) the instant it is
+      // accepted, well before any assistant answer exists.
+      const withFinding = doneFor(
+        turnReducer(streamStarted(send()), {
+          type: "event",
+          event: { type: "research_finding", finding: testFinding },
+        }),
+      );
+      const state = turnIdentified(withFinding, "t2");
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.activeResearchTurnId).toBeNull();
+      expect(state.unavailableSources).toEqual([]);
+    });
+
+    it("stays retired regardless of how the later turn that retired it goes on to end", () => {
+      // Accepted, then fails, is stopped, or expires unfinished — none of
+      // that is undone: the conversation already moved on the moment the
+      // later turn was accepted (T10 review round 5).
+      const withFinding = doneFor(
+        turnReducer(streamStarted(send()), {
+          type: "event",
+          event: { type: "research_finding", finding: testFinding },
+        }),
+      );
+      const retired = turnIdentified(withFinding, "t2");
+      const state = turnReducer(retired, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: "t2",
+          error: {
+            code: "engine_unavailable",
+            userMessage: "Unrelated failure.",
+            recoverable: true,
+          },
+        },
+      });
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.activeResearchTurnId).toBeNull();
+    });
+
+    it("retires the receipt when its own turn fails after producing it", () => {
+      // The exact scenario the review flagged: research emits a finding
+      // mid-turn, then something later in that *same* turn fails. No
+      // assistant message is ever stored for a failed turn, so a reload at
+      // this point would already show no current receipt.
+      const withFinding = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      const state = turnReducer(withFinding, {
+        type: "event",
+        event: {
+          type: "turn_failed",
+          turnId: TURN,
+          error: {
+            code: "model_output_invalid",
+            userMessage: "Something later in the turn failed.",
+            recoverable: true,
+          },
+        },
+      });
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.activeResearchTurnId).toBeNull();
+    });
+
+    it("preserves the receipt when a send is refused and no later turn is ever accepted", () => {
+      // T10 review round 5's other required distinction: a refusal stores
+      // nothing, so `turn_identified` never fires for it at all (in
+      // production, `route.ts`'s `errorResponse` carries no `x-turn-id`
+      // header) — this must not read as "a later turn happened".
+      const withFinding = doneFor(
+        turnReducer(streamStarted(send()), {
+          type: "event",
+          event: { type: "research_finding", finding: testFinding },
+        }),
+      );
+      const state = turnReducer(withFinding, {
+        type: "send_refused",
+        messageId: "m2",
+        error: {
+          code: "engine_unavailable",
+          userMessage: "The message could not be sent.",
+          recoverable: true,
+        },
+      });
+
+      expect(state.activeResearch).toEqual(testFinding);
+      expect(state.activeResearchTurnId).toBe(TURN);
+    });
+  });
+
+  describe("evidence_refused (T10 review round 3, P0-2)", () => {
+    it("surfaces why a staged add-as-evidence proposal was not written", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "evidence_refused",
+          reason: "This finding was already added as evidence.",
+        },
+      });
+      expect(state.evidenceOutcome).toEqual({
+        refused: true,
+        reason: "This finding was already added as evidence.",
+      });
+    });
+
+    it("clears once the conversation moves on to a new message", () => {
+      const withOutcome = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: { type: "evidence_refused", reason: "Refused." },
+      });
+      const state = send(withOutcome);
+      expect(state.evidenceOutcome).toBeNull();
+    });
+  });
+
+  describe("direction_rejected (T10 review round 2, P0-D)", () => {
+    it("corrects the earlier promise once the provider says it cannot apply", () => {
+      const withDirection = turnReducer(streamStarted(send()), {
+        type: "direction_accepted",
+        note: "Focus on smaller agencies.",
+        application: "next_step",
+      });
+      const state = turnReducer(withDirection, {
+        type: "event",
+        event: {
+          type: "direction_rejected",
+          note: "Focus on smaller agencies.",
+          reason:
+            "This direction cannot be applied to the research already running.",
+        },
+      });
+      expect(state.direction).toMatchObject({
+        applied: false,
+        rejectedReason:
+          "This direction cannot be applied to the research already running.",
+      });
+    });
+
+    it("does nothing when no direction was ever accepted", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "direction_rejected",
+          note: "unseen",
+          reason: "unseen",
+        },
+      });
+      expect(state.direction).toBeNull();
+    });
   });
 });

@@ -12,18 +12,29 @@ import { z } from "zod";
  * Renderer keys the application implements. A scene naming anything outside
  * this registry is rejected.
  *
- * `evidence_research` is part of the approved MVP allow-list
- * (docs/AI_SYSTEM.md §9) but its renderer ships with T10; registering the key
- * before the renderer exists would create a dead control, so the registry
- * lists only what can actually be rendered today.
+ * `evidence_research` joins the registry here, in T10, with its renderer
+ * (`EvidenceResearchRenderer`) — the two ship together so a validated scene
+ * naming this key can always actually be drawn (docs/AI_SYSTEM.md §9).
  */
-export const RENDERER_KEYS = ["problem_exploration"] as const;
+export const RENDERER_KEYS = [
+  "problem_exploration",
+  "evidence_research",
+] as const;
 export type RendererKey = (typeof RENDERER_KEYS)[number];
 
 export const SCENE_PURPOSES = [
   "explore_problem",
   "review_impact",
   "inspect_structure",
+  /**
+   * The reasoning purpose while research is running or its finding is on
+   * screen (T10). Kept distinct from `explore_problem`: showing evidence about
+   * a claim is a materially different activity from exploring the problem
+   * map, and the purpose is what a future surface would key off to decide how
+   * to present itself — collapsing the two would lose that distinction for no
+   * reason other than the enum being small today.
+   */
+  "research_evidence",
 ] as const;
 export type ScenePurpose = (typeof SCENE_PURPOSES)[number];
 

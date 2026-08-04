@@ -29,6 +29,7 @@ import {
   DISCOVERY_PROMPT_VERSION,
   DISCOVERY_SYSTEM_PROMPT,
 } from "./prompts/discovery";
+import type { AddEvidence } from "./tools/discovery-tools";
 import { DISCOVERY_TOOLS, validateToolInput } from "./tools/discovery-tools";
 import type { SafeError } from "./turn-events";
 
@@ -146,7 +147,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       });
 
     const fail = (error: SafeError): TurnResult => {
-      hooks.emit({ type: "turn_failed", error });
+      hooks.emit({ type: "turn_failed", turnId: input.turnId, error });
       report("failed", error.code);
       // No operations: staged work is discarded with the turn.
       return { assistantText: "", operations: [] };
@@ -224,12 +225,60 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       more trustworthy than a chat message. Leaving it undelimited put
       user-authored text outside the regions the system prompt declares as data.
     */
+    /*
+      Sent verbatim rather than through `assembleContext`'s budget: without
+      it, an `add_evidence` call this turn makes has nothing to genuinely
+      compare and must be refused down to `unclear` regardless of what the
+      model returns (T10 review round 3, P0-1) — trimming it silently would
+      turn an honest turn into a wrongly-ungrounded one for a reason nobody
+      could see.
+    */
+    const groundingText =
+      context.researchGrounding?.grounded === true
+        ? context.researchGrounding.text
+        : null;
+
+    /*
+      Whether `suggest_actions` may honour a model-supplied `add_as_evidence`
+      id (T10 review round 9, P1; corrected round 10, P1). A closed action id
+      only proves the model named a real action, not that pressing the
+      resulting button can succeed — the application owns the label, so it
+      owns this promise too, the same way it already owns the tool-result
+      wording (above) and reload hydration
+      (`project-model-store.ts`'s `loadLatestResearchReceipt`).
+
+      Deliberately *not* seeded from `groundingText`. `groundingText` answers
+      a different question — may *this turn* trust a comparison against the
+      receipt it was sent, for its own `add_evidence` call — not whether a
+      button offered for a *later* turn will still work. Even a genuinely
+      grounded prior receipt is retired by this very turn: the client clears
+      `activeResearch` the moment a turn other than the receipt's own is
+      identified, which happens as this turn starts, well before its
+      response is produced. Seeding eligibility from it would offer a button
+      the receipt can no longer back by the time this turn's answer reaches
+      the person.
+
+      Starts `false`. Only a fresh, successful, focused `start_research`
+      *this turn produces* can set it — because that receipt's own turn is
+      this turn, so it is still current once this turn's answer is the
+      project's newest message. Updated once per provider round, at the end
+      of that round's tool processing (see `addEvidenceEligibleNextRound`
+      below) rather than as each tool result is produced, so a
+      `start_research` call and a `suggest_actions` call in the *same* batch
+      cannot make each other eligible: the model generated both without
+      seeing either result, so a `suggest_actions` call in that batch is
+      filtered against eligibility as it stood before the round started,
+      never against what the round itself just produced.
+    */
+    let addEvidenceEligible: boolean = false;
+
     messages.push({
       role: "user",
       content: [
         assembled.snapshot
           ? asUntrusted("project_context", assembled.snapshot)
           : "",
+        groundingText ? asUntrusted("research", groundingText) : "",
         asUntrusted("user_message", input.userMessage),
       ]
         .filter(Boolean)
@@ -526,9 +575,13 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       }
 
       const results: Anthropic.ToolResultBlockParam[] = [];
+      // Frozen for the duration of this round's processing (T10 review
+      // round 9, P1) — see `addEvidenceEligible` above.
+      let addEvidenceEligibleNextRound: boolean = addEvidenceEligible;
       for (const { use, validation } of validations) {
         if (!validation.ok) continue;
         toolCalls += 1;
+        let content: string = STAGED;
         if (validation.tool === "recommend_canvas_scene") {
           /*
             Scenes are exempt from staging because they mutate nothing: a scene
@@ -539,12 +592,115 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
           await hooks.recommendScene(use.input);
         } else if (validation.tool === "suggest_actions") {
           // Resolved to application-owned labels; the ids are all the model
-          // supplied and all it could supply.
+          // supplied and all it could supply. `add_as_evidence` is withheld
+          // unless eligibility was already established before this round —
+          // a closed action id proves the model named a real action, not
+          // that this one can actually succeed right now (T10 review
+          // round 9, P1).
+          const requestedIds = (validation.value as { actionIds: string[] })
+            .actionIds;
+          const allowedIds = addEvidenceEligible
+            ? requestedIds
+            : requestedIds.filter((id) => id !== "add_as_evidence");
           hooks.emit({
             type: "actions",
-            actions: resolveActions(
-              (validation.value as { actionIds: string[] }).actionIds,
-            ),
+            actions: resolveActions(allowedIds),
+          });
+        } else if (validation.tool === "start_research") {
+          /*
+            Runs to completion inside this tool round, like a scene: research
+            activity has to stream while the model is still working, not after
+            the turn ends, so it cannot be staged (docs/ARCHITECTURE.md §14).
+          */
+          const focalObjectId = input.context?.focalObjectId ?? null;
+          const outcome = await hooks.runResearch(
+            {
+              topic: (validation.value as { topic: string }).topic,
+              focalObjectId,
+            },
+            signal,
+          );
+          /*
+            The scene is queued here, by the host, rather than left to a
+            second model tool call the response might never make — the tool
+            result below has to describe what queuing actually does, not what
+            a second call might later achieve.
+
+            Queuing is not showing (T10 review round 6, P0): `recommendScene`
+            only offers the recommendation — `docs/ADAPTIVE_CANVAS_MVP.md`
+            requires that a non-urgent scene update never move content under
+            the user, so `LivingCanvas` holds the current scene and presents
+            "Show it" / "Stay here" rather than applying it. The tool result
+            must say the view is ready and selectable, never that it is
+            already visible — telling the model otherwise would have it skip
+            explaining the finding on the false assumption the user is
+            already looking at it.
+          */
+          if (outcome.ok && focalObjectId) {
+            await hooks.recommendScene({
+              renderer: "evidence_research",
+              purpose: "research_evidence",
+              focalObjectId,
+              visibleObjectIds: [focalObjectId],
+              visibleRelationshipIds: [],
+              emphasis: "none",
+              reason: `Showing what was found: "${outcome.findingTitle}". This is demonstration data.`,
+              transition: "replace",
+            });
+          }
+          /*
+            Every pass this round decides next-round eligibility afresh —
+            an unconditional assignment, not an OR — so a stopped,
+            unavailable or no-focus pass revokes eligibility a prior grounded
+            receipt might have implied just as surely as a focused success
+            grants it, and a second pass in the same round overrides the
+            first's outcome rather than accumulating with it (T10 review
+            round 10, P1). Takes effect from the next round onward, once the
+            model has actually seen this result — never within this same
+            batch (T10 review round 9, P1; see `addEvidenceEligibleNextRound`).
+          */
+          addEvidenceEligibleNextRound = outcome.ok && focalObjectId !== null;
+          /*
+            A successful pass with no focal object queues no scene at all
+            (the branch above), and its receipt has no target —
+            `complete_turn` refuses it as `no_focal_object` (T10 review
+            round 7, P1). The tool result has to branch on that too: telling
+            the model a view is ready and offering "Add as evidence" would
+            be describing a scene that was never queued and inviting an add
+            the database will refuse.
+
+            The receipt's target is fixed at the moment it is recorded, and
+            currency retires it the instant any later turn is accepted (see
+            `complete_turn`'s round-5 rule) — so establishing or selecting a
+            claim in a later turn can never make *this* receipt addable; it
+            would already be superseded by the turn that did the
+            establishing. The honest next step is a fresh pass, not a
+            promise this one will become usable (T10 review round 8, P1).
+          */
+          content = !outcome.ok
+            ? outcome.reason === "stopped"
+              ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
+              : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added."
+            : focalObjectId
+              ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. A validated research view is ready on the canvas; the person can select "Show it" to open it — do not claim it is already visible. Briefly state the conclusion and offer to add it as evidence if that follows, without restating the full research detail.`
+              : `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. No project object was in focus, so no research view was queued and this result cannot be added as evidence — do not offer to add it as evidence, and do not imply it could become addable later. Briefly summarise the finding, and tell the person to establish or focus the relevant claim or object, then run the research again.`;
+        } else if (validation.tool === "add_evidence") {
+          /*
+            The model's `direction` is only ever trusted when this request
+            genuinely carried both sides of the comparison it is judging —
+            the exact receipt and the target's own stored text
+            (`groundingText` above, T10 review round 3, P0-1). Without that,
+            `supports`/`contradicts` would be an assertion made from a title
+            alone; overriding to `unclear` here, rather than trusting
+            whatever the model returned, is what keeps that assertion from
+            ever reaching the database ungrounded.
+          */
+          const value = validation.value as AddEvidence;
+          staged.push({
+            name: "add_evidence",
+            candidate: groundingText
+              ? value
+              : { ...value, direction: "unclear" as const },
           });
         } else {
           staged.push({ name: validation.tool, candidate: use.input });
@@ -552,11 +708,12 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         results.push({
           type: "tool_result",
           tool_use_id: use.id,
-          content: STAGED,
+          content,
         });
       }
 
       messages.push({ role: "user", content: results });
+      addEvidenceEligible = addEvidenceEligibleNextRound;
 
       /*
         A genuine step boundary, which is what makes "next step" an honest

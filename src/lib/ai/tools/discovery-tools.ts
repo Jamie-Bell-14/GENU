@@ -34,12 +34,15 @@ export const PROJECT_AREAS = [
  * The only origin a model may propose.
  *
  * `user_stated` is excluded because the model does not get to assert that the
- * person said something; `researched` is excluded because no research provider
- * exists until T10, so a turn claiming it would be claiming evidence that
- * cannot exist. Both are *provenance* claims rather than shapes, and provenance
- * has to be derived from something traceable — see `quotedFromMessage` below,
- * which is how a field becomes `user_stated` without the model being trusted
- * to say so (docs/AI_SYSTEM.md §2, §10).
+ * person said something — see `quotedFromMessage` below, which is how a field
+ * becomes `user_stated` without the model being trusted to say so
+ * (docs/AI_SYSTEM.md §2, §10). `researched` stays excluded even though T10
+ * adds a research provider: it names *evidence support* for a claim, not
+ * whether the claim's own wording was inferred, and evidence support is
+ * tracked separately, on `project_relationships` and the field's `support`
+ * state
+ * (already settable via `PROPOSABLE_SUPPORT`'s `some_evidence`) — not by
+ * rewriting a field's origin.
  */
 export const PROPOSABLE_ORIGINS = ["ai_inferred"] as const;
 
@@ -236,6 +239,55 @@ export const SuggestActionsSchema = z
 export type SuggestActions = z.infer<typeof SuggestActionsSchema>;
 
 /**
+ * Starts the slice's one research provider (docs/ARCHITECTURE.md §9, T10).
+ *
+ * `topic` is display-only — quoted back to the person so they can see what
+ * was asked for — and never a query the provider executes: `MockResearchProvider`
+ * ignores it entirely, since this slice has exactly one scripted scenario.
+ */
+export const StartResearchSchema = z
+  .object({
+    topic: safeText(300),
+  })
+  .strict();
+
+export type StartResearch = z.infer<typeof StartResearchSchema>;
+
+/**
+ * Records a research finding as evidence (T10, VERTICAL_SLICE_SPEC Step 6).
+ *
+ * The model supplies the honest, bounded consequence text — what this
+ * specific finding does and does not support — and, separately, `direction`:
+ * a closed judgement of whether the finding genuinely supports, contradicts,
+ * or does not clearly bear on whatever object is currently in focus.
+ * `direction` is never inferred by application code from the mere fact that
+ * evidence is being linked (T10 review round 2, P0-C) — it must reflect a
+ * real comparison between the finding and the target's own stated content,
+ * and `unclear` is always the honest answer when that comparison cannot be
+ * made confidently. Getting this wrong the model's own way is a normal
+ * reasoning error the person can see and correct; a database that asserted
+ * "supports" unconditionally would be silently wrong on principle every time
+ * the true relationship happened to be otherwise.
+ *
+ * The model never supplies *which* finding or *which* object: those come
+ * from the receipt this turn is looking at and that receipt's own recorded
+ * target, so a call here cannot attach fabricated provenance to an arbitrary
+ * object the model names.
+ *
+ * `consequenceSummary` is bounded to 500, matching
+ * `project_relationships.note`'s own check constraint — it is stored there,
+ * not in a bespoke column, so the two limits have to agree.
+ */
+export const AddEvidenceSchema = z
+  .object({
+    consequenceSummary: safeText(500),
+    direction: z.enum(["supports", "contradicts", "unclear"]),
+  })
+  .strict();
+
+export type AddEvidence = z.infer<typeof AddEvidenceSchema>;
+
+/**
  * The scene tool reuses `CanvasSceneSchema` verbatim rather than restating it.
  * A second definition would be a second place for the allow-list to drift from
  * the renderers that actually exist.
@@ -248,7 +300,9 @@ export type DiscoveryToolName =
   | "propose_connected_change"
   | "suggest_checkpoint"
   | "suggest_actions"
-  | "recommend_canvas_scene";
+  | "recommend_canvas_scene"
+  | "start_research"
+  | "add_evidence";
 
 /**
  * Provider-facing tool definitions.
@@ -474,6 +528,48 @@ export const DISCOVERY_TOOLS = [
       },
     },
   },
+  {
+    name: "start_research",
+    description:
+      "Start the project's research flow on the current focal object. Use this when the person asks you to look something up or research a claim. This slice's research is entirely demonstration data — say so plainly rather than implying a live lookup.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["topic"],
+      properties: {
+        topic: {
+          type: "string",
+          description:
+            "A short, honest restatement of what is being researched, shown to the person as-is.",
+        },
+      },
+    },
+  },
+  {
+    name: "add_evidence",
+    description:
+      "Add the research finding this turn just produced as evidence, linked to the object research was launched from. Only call this once a finding exists and the person has asked to keep it. State plainly what the finding supports and — just as plainly — what it does not support; never claim more than the evidence shows. Set direction from a real comparison between the finding and the target's own stated content — use unclear rather than guess when that comparison is not confident.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["consequenceSummary", "direction"],
+      properties: {
+        consequenceSummary: {
+          type: "string",
+          description:
+            "One or two honest sentences: what this specific finding supports, and what it does not.",
+        },
+        direction: {
+          type: "string",
+          enum: ["supports", "contradicts", "unclear"],
+          description:
+            "Whether this finding genuinely supports, contradicts, or does not clearly bear on the object currently in focus. Never a default — judge it from the finding and the object's own text.",
+        },
+      },
+    },
+  },
 ] as const;
 
 export type ToolValidation<T> =
@@ -526,6 +622,14 @@ export function validateToolInput(
     }
     case "recommend_canvas_scene": {
       const result = parse(RecommendCanvasSceneSchema, input);
+      return result.ok ? { ok: true, tool: name, value: result.value } : result;
+    }
+    case "start_research": {
+      const result = parse(StartResearchSchema, input);
+      return result.ok ? { ok: true, tool: name, value: result.value } : result;
+    }
+    case "add_evidence": {
+      const result = parse(AddEvidenceSchema, input);
       return result.ok ? { ok: true, tool: name, value: result.value } : result;
     }
     default:

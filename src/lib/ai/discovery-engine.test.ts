@@ -4,19 +4,30 @@ import {
   isActivityStep,
   type ActivityStep,
 } from "./activity-steps";
-import { ScriptedDiscoveryEngine, type TurnHooks } from "./discovery-engine";
+import {
+  ScriptedDiscoveryEngine,
+  type ResearchOutcome,
+  type TurnHooks,
+} from "./discovery-engine";
 import type { EngineEvent } from "./turn-events";
+import type { ResearchTask } from "@/lib/research/types";
 
 const TURN_ID = "dddddddd-0000-4000-8000-000000000001";
 const OBJECT_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER_OBJECT = "aaaaaaaa-0000-4000-8000-000000000002";
 const THIRD_OBJECT = "aaaaaaaa-0000-4000-8000-000000000003";
 
-function harness(direction: string | null = null) {
+function harness(
+  direction: string | null = null,
+  options: {
+    researchOutcome?: ResearchOutcome;
+  } = {},
+) {
   const events: EngineEvent[] = [];
   const steps: string[] = [];
   const candidates: unknown[] = [];
   const appliedDirections: string[] = [];
+  const researchCalls: ResearchTask[] = [];
   let remaining = direction;
   const hooks: TurnHooks = {
     emit: (event) => events.push(event),
@@ -40,8 +51,21 @@ function harness(direction: string | null = null) {
       remaining = null;
       return next;
     },
+    runResearch: async (task) => {
+      researchCalls.push(task);
+      return (
+        options.researchOutcome ?? { ok: true, findingTitle: "Test finding" }
+      );
+    },
   };
-  return { events, steps, candidates, appliedDirections, hooks };
+  return {
+    events,
+    steps,
+    candidates,
+    appliedDirections,
+    researchCalls,
+    hooks,
+  };
 }
 
 const input = {
@@ -231,5 +255,91 @@ describe("ScriptedDiscoveryEngine", () => {
     });
     // `done` is the host's to emit, so the engine never produces one at all.
     expect(events.map((event) => event.type)).not.toContain("done");
+  });
+
+  describe("research (T10)", () => {
+    it("runs research and recommends the evidence view on 'Research this'", async () => {
+      const { candidates, researchCalls, events, hooks } = harness();
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Research this" },
+        hooks,
+      );
+      expect(researchCalls).toHaveLength(1);
+      expect(researchCalls[0].focalObjectId).toBe(OBJECT_A);
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId: OBJECT_A,
+      });
+      expect(result.assistantText).toContain("Test finding");
+      const actionIds = events
+        .filter((event) => event.type === "actions")
+        .flatMap((event) => event.actions.map((action) => action.id));
+      expect(actionIds).toContain("add_as_evidence");
+    });
+
+    it("reports a stopped research pass honestly rather than a finding", async () => {
+      const { hooks } = harness(null, {
+        researchOutcome: { ok: false, reason: "stopped" },
+      });
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Research this" },
+        hooks,
+      );
+      expect(result.assistantText).toMatch(/stopped/i);
+    });
+
+    /*
+      T10 review round 9, P1: a successful pass with no focal object queues
+      no scene at all, and its receipt has no target — `complete_turn` can
+      only refuse it as `no_focal_object`. Neither the reply nor the offered
+      actions may say otherwise.
+    */
+    it("does not recommend a scene, offer to add as evidence, or claim a canvas view when research has no focal object", async () => {
+      const { candidates, events, hooks } = harness();
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        {
+          ...input,
+          userMessage: "Research this",
+          context: { objectIds: [], focalObjectId: null },
+        },
+        hooks,
+      );
+      expect(candidates).toHaveLength(0);
+      const actionIds = events
+        .filter((event) => event.type === "actions")
+        .flatMap((event) => event.actions.map((action) => action.id));
+      expect(actionIds).not.toContain("add_as_evidence");
+      expect(result.assistantText).not.toMatch(/see the canvas/i);
+      expect(result.assistantText).toMatch(/run the research again/i);
+    });
+  });
+
+  describe("add as evidence (T10 review round 2, P0-B/P0-C)", () => {
+    it("stages add_evidence rather than claiming it happened", async () => {
+      const { hooks } = harness();
+      const result = await new ScriptedDiscoveryEngine().runTurn(
+        { ...input, userMessage: "Add as evidence" },
+        hooks,
+      );
+      // Staged like any other project-truth write: whether it actually
+      // links is decided when the turn completes, not by this engine.
+      expect(result.operations).toEqual([
+        {
+          name: "add_evidence",
+          candidate: {
+            consequenceSummary: expect.any(String),
+            // This engine cannot judge whether the scripted finding
+            // supports or contradicts an arbitrary, unknown target object,
+            // so it honestly proposes "unclear" rather than guess.
+            direction: "unclear",
+          },
+        },
+      ]);
+      // Present-progressive, not a past-tense claim the turn cannot yet back.
+      expect(result.assistantText).not.toMatch(/^i added/i);
+      expect(result.assistantText).toMatch(/does not/i);
+    });
   });
 });

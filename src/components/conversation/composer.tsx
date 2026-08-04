@@ -68,11 +68,24 @@ export function Composer({
             (DESIGN.md §9.3). */}
         {state.direction && (
           <p className="text-fg-tertiary text-xs">
-            {state.direction.applied
-              ? "Your direction was picked up by this turn."
-              : streaming
-                ? DIRECTION_APPLICATION_MESSAGES[state.direction.application]
-                : "Your direction was recorded, but this turn had already passed its last step."}
+            {state.direction.rejectedReason
+              ? state.direction.rejectedReason
+              : state.direction.applied
+                ? "Your direction was picked up by this turn."
+                : streaming
+                  ? DIRECTION_APPLICATION_MESSAGES[state.direction.application]
+                  : "Your direction was recorded, but this turn had already passed its last step."}
+          </p>
+        )}
+
+        {/* A staged "Add as evidence" proposal that `complete_turn` did not
+            write, once that outcome is actually known (T10 review round 3,
+            P0-2) — the assistant's own reply necessarily spoke in staged
+            terms, so this is what corrects it rather than leaving the
+            refusal recoverable only from audit data. */}
+        {state.evidenceOutcome?.refused && (
+          <p className="text-fg-tertiary text-xs">
+            {state.evidenceOutcome.reason}
           </p>
         )}
 

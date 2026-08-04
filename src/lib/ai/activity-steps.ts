@@ -40,6 +40,39 @@ export const ACTIVITY_STEPS = {
     succeeded: "Canvas view prepared",
     failed: "No canvas view could be prepared",
   },
+  /*
+    The four research steps below give MockResearchProvider's scripted
+    tenancy-deposit run (T10) the same closed, application-owned vocabulary as
+    every other step — the mock provider is application code, not a model, but
+    its narration is still fixed text keyed by step, never free text it
+    composes. Wording matches DESIGN.md §9.2's activity examples exactly,
+    since that section's example scenario is this same tenancy-deposit
+    research.
+  */
+  searching_sources: {
+    kind: "research",
+    active: "Searching GOV.UK tenancy-deposit data…",
+    succeeded: "GOV.UK tenancy-deposit data searched",
+    failed: "GOV.UK tenancy-deposit data could not be searched",
+  },
+  reviewing_sources: {
+    kind: "research",
+    active: "Reviewing scheme annual reports…",
+    succeeded: "Scheme annual reports reviewed",
+    failed: "Scheme annual reports could not be reviewed",
+  },
+  comparing_methods: {
+    kind: "research",
+    active: "Comparing reporting methodologies…",
+    succeeded: "Reporting methodologies compared",
+    failed: "Reporting methodologies could not be compared",
+  },
+  checking_source_context: {
+    kind: "research",
+    active: "Found a relevant figure — checking source context…",
+    succeeded: "Source context checked",
+    failed: "Source context could not be confirmed",
+  },
 } as const satisfies Record<
   string,
   { kind: ActivityKind; active: string; succeeded: string; failed: string }

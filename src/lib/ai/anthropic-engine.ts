@@ -604,11 +604,22 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
               transition: "replace",
             });
           }
-          content = outcome.ok
-            ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. A validated research view is ready on the canvas; the person can select "Show it" to open it — do not claim it is already visible. Briefly state the conclusion and offer to add it as evidence if that follows, without restating the full research detail.`
-            : outcome.reason === "stopped"
+          /*
+            A successful pass with no focal object queues no scene at all
+            (the branch above), and its receipt has no target —
+            `complete_turn` refuses it as `no_focal_object` (T10 review
+            round 7, P1). The tool result has to branch on that too: telling
+            the model a view is ready and offering "Add as evidence" would
+            be describing a scene that was never queued and inviting an add
+            the database will refuse.
+          */
+          content = !outcome.ok
+            ? outcome.reason === "stopped"
               ? "Research was stopped before it produced a finding. Tell the person plainly; nothing further to report."
-              : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added.";
+              : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added."
+            : focalObjectId
+              ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. A validated research view is ready on the canvas; the person can select "Show it" to open it — do not claim it is already visible. Briefly state the conclusion and offer to add it as evidence if that follows, without restating the full research detail.`
+              : `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. No project object was in focus, so no research view was queued and this result cannot yet be added as evidence — do not offer to add it as evidence. Briefly summarise the finding and ask the person to establish or select the claim it should relate to.`;
         } else if (validation.tool === "add_evidence") {
           /*
             The model's `direction` is only ever trusted when this request

@@ -375,6 +375,63 @@ describe("AnthropicDiscoveryEngine", () => {
       // this is not a ban on all explanation, only on the false premise.
       expect(toolResult?.content).toMatch(/offer to add it as evidence/i);
     });
+
+    /*
+      T10 review round 7, P1: a successful pass with no focal object queues
+      no scene at all (the `focalObjectId` guard above `recommendScene`),
+      and its receipt has no target — `complete_turn` refuses it as
+      `no_focal_object`. The round-6 wording only branched on `outcome.ok`,
+      so this path still told the model a view was ready and invited it to
+      offer "Add as evidence" for a receipt the database would refuse.
+      Reachable whenever the model runs `start_research` with nothing in
+      focus — e.g. an empty/new project — via the plain `input` fixture,
+      which carries no `context`.
+    */
+    it("tells the model no view was queued and not to offer adding as evidence, when nothing was in focus", async () => {
+      const { scenes, hooks } = harness();
+      const stub = stubClient([
+        {
+          blocks: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "start_research",
+              input: { topic: "Deposit disputes" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(input, hooks);
+
+      // No target for a scene, so nothing is queued — the existing
+      // focalObjectId guard, unaffected by this fix.
+      expect(scenes).toHaveLength(0);
+
+      expect(stub.requests).toHaveLength(2);
+      const nextRequest = stub.requests[1] as {
+        messages: { role: string; content: unknown }[];
+      };
+      const toolResultTurn = nextRequest.messages.at(-1) as {
+        role: string;
+        content: { type: string; tool_use_id: string; content: string }[];
+      };
+      const toolResult = toolResultTurn.content.find(
+        (block) => block.tool_use_id === "t1",
+      );
+
+      expect(toolResult?.content).toBeDefined();
+      expect(toolResult?.content).not.toMatch(/ready.*select/i);
+      expect(toolResult?.content).not.toMatch(
+        /already (on the canvas|visible)/i,
+      );
+      expect(toolResult?.content).toMatch(
+        /do not offer to add it as evidence/i,
+      );
+      expect(toolResult?.content).toMatch(/no project object was in focus/i);
+    });
   });
 
   describe("add_evidence direction is grounded, not asserted (T10 review round 3, P0-1)", () => {

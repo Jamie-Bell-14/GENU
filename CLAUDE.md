@@ -28,12 +28,17 @@ Before beginning any significant task, read:
 6. `docs/VERTICAL_SLICE_SPEC.md`
 7. `docs/UI_ACCEPTANCE_CRITERIA.md`
 
+For any review response, implementation pull request or work that will be handed to GPT for verification, also read:
+
+8. `docs/REVIEW_WORKFLOW.md`
+9. `docs/CLAUDE_REVIEW_PROTOCOL.md`
+
 For implementation work, also read:
 
-8. `docs/ARCHITECTURE.md`
-9. `docs/AI_SYSTEM.md`
-10. `docs/VERTICAL_SLICE_TASKS.md`
-11. `docs/SECURITY_REVIEW.md`
+10. `docs/ARCHITECTURE.md`
+11. `docs/AI_SYSTEM.md`
+12. `docs/VERTICAL_SLICE_TASKS.md`
+13. `docs/SECURITY_REVIEW.md`
 
 If any referenced document is missing, stop and report it before implementation.
 
@@ -60,6 +65,8 @@ Do not silently resolve meaningful conflicts.
 Explain the conflict, recommend the strongest interpretation and wait for clarification when the decision could materially affect scope, architecture, data or product behaviour.
 
 Project-specific documentation takes precedence over generic skill examples.
+
+`docs/REVIEW_WORKFLOW.md` and `docs/CLAUDE_REVIEW_PROTOCOL.md` govern review mechanics and handoff quality. They do not override approved product, security or architecture direction.
 
 ---
 
@@ -121,10 +128,12 @@ Before implementing any significant feature:
 5. Identify unresolved decisions and risks.
 6. Break the work into small, testable increments.
 7. Confirm acceptance criteria.
-8. Implement only the approved scope.
-9. Run relevant tests, linting and type checks.
-10. Update documentation when behaviour or architecture changes.
-11. Report what changed, what was tested and what remains unresolved.
+8. For cross-cutting work, define feature invariants, the state/scenario matrix and every surface that derives from the affected state before implementation is considered review-ready.
+9. Implement only the approved scope.
+10. Run relevant tests, linting and type checks.
+11. Perform the self-review required by `docs/CLAUDE_REVIEW_PROTOCOL.md`, including live, reload, recovery, failure and supersession equivalents where applicable.
+12. Update documentation when behaviour or architecture changes.
+13. Report what changed, what was tested and what remains unresolved.
 
 Do not begin a major implementation when the request is still materially ambiguous.
 
@@ -318,6 +327,8 @@ Before marking a task complete, report:
 - any remaining risks
 
 Never claim testing was completed when it was not.
+
+A green suite proves only the scenarios exercised. For cross-cutting work, map material invariants to explicit tests and check the joins between separately mocked layers.
 
 ---
 

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { CanvasScene } from "@/lib/canvas/scene";
+import type { ResearchFinding } from "@/lib/research/types";
 import { LivingCanvas } from "./living-canvas";
 
 const PROBLEM = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -360,6 +361,111 @@ describe("recommended scenes", () => {
       expect(
         screen.getByText(/The conversation moved to missing check-in evidence/),
       ).toBeInTheDocument();
+    });
+  });
+
+  /*
+    T10 review round 10, third correction: the issue #13 invalidation above
+    only ever retires a queued copy the person has not acted on. Once they
+    have selected "Show it", that same scene moves into `sceneState.current`
+    — and a later research pass superseding its receipt has nothing left to
+    tell the host, because `recommendedScene` was already consumed. Without
+    a separate mechanism, the accepted `evidence_research` view is never
+    moved off, and `EvidenceResearchRenderer` sits on "Research is
+    running…" once the pass that would have resolved it ends without a
+    finding.
+  */
+  describe("a superseded but already-accepted research view (T10 review round 10, third correction)", () => {
+    const finding: ResearchFinding = {
+      id: "tenancy-deposit-disputes-2024",
+      title: "Deposit disputes are common",
+      keyFinding: "Roughly 1 in 6.",
+      whyItMatters: "It matters.",
+      visualisation: { kind: "bar", unit: "%", series: [] },
+      sources: [],
+      methodology: "Method.",
+      limitations: "Limits.",
+      retrievedAt: "2026-07-30T00:00:00.000Z",
+      isDemo: true,
+      conflicting: false,
+    };
+    const researchRecommendation: CanvasScene = {
+      renderer: "evidence_research",
+      purpose: "research_evidence",
+      focalObjectId: PROBLEM,
+      visibleObjectIds: [PROBLEM],
+      visibleRelationshipIds: [],
+      emphasis: "none",
+      reason: "Showing what was found.",
+      transition: "replace",
+    };
+
+    it("moves off the accepted research view once its receipt is retired, rather than staying on 'Research is running…' indefinitely", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderCanvas({
+        recommendedScene: withTurn(researchRecommendation),
+        activeResearch: finding,
+      });
+
+      await user.click(screen.getByRole("button", { name: "Show it" }));
+      expect(
+        screen.getByText("Deposit disputes are common"),
+      ).toBeInTheDocument();
+
+      // A later pass in the same turn supersedes the receipt: turn-events.ts's
+      // `research_started` clears both `activeResearch` and the (already
+      // consumed) `recommendedScene` prop.
+      rerender(
+        <LivingCanvas
+          objects={objects}
+          relationships={relationships}
+          recommendedScene={null}
+          activeResearch={null}
+        />,
+      );
+
+      expect(screen.queryByText(/Research is running/)).toBeNull();
+      // Falls back to whatever the canvas showed before the research view
+      // was accepted — the application's own default, not an empty canvas.
+      expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+        "Property-condition disagreement",
+      );
+    });
+
+    it("leaves an unrelated accepted scene untouched", async () => {
+      const user = userEvent.setup();
+      const unrelatedRecommendation: CanvasScene = {
+        renderer: "problem_exploration",
+        purpose: "explore_problem",
+        focalObjectId: CAUSE,
+        visibleObjectIds: [CAUSE, PROBLEM],
+        visibleRelationshipIds: ["bbbbbbbb-0000-4000-8000-000000000001"],
+        emphasis: "none",
+        reason: "The conversation moved to missing check-in evidence.",
+        transition: "replace",
+      };
+      const { rerender } = renderCanvas({
+        recommendedScene: withTurn(unrelatedRecommendation),
+      });
+      await user.click(screen.getByRole("button", { name: "Show it" }));
+      expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+        "Missing check-in evidence",
+      );
+
+      // `activeResearch` clearing (e.g. a research pass elsewhere, or simply
+      // never having been set) must not move a scene that was never the
+      // research view.
+      rerender(
+        <LivingCanvas
+          objects={objects}
+          relationships={relationships}
+          recommendedScene={null}
+          activeResearch={null}
+        />,
+      );
+      expect(screen.getByLabelText("Object in focus")).toHaveTextContent(
+        "Missing check-in evidence",
+      );
     });
   });
 });

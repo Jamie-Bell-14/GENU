@@ -19,6 +19,19 @@ function scene(id: string, transition: CanvasScene["transition"] = "replace") {
   } as CanvasScene;
 }
 
+function researchScene(id: string): CanvasScene {
+  return {
+    renderer: "evidence_research",
+    purpose: "research_evidence",
+    focalObjectId: id,
+    visibleObjectIds: [id],
+    visibleRelationshipIds: [],
+    emphasis: "none",
+    reason: `Showing what was found for ${id}`,
+    transition: "replace",
+  };
+}
+
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "aaaaaaaa-0000-4000-8000-000000000002";
 const TURN_A = "dddddddd-0000-4000-8000-000000000001";
@@ -121,6 +134,63 @@ describe("sceneReducer", () => {
       });
       expect(afterAccept).toBe(state);
       expect(afterAccept.current?.focalObjectId).toBe(B);
+    });
+  });
+
+  /*
+    T10 review round 10, third correction: `research_started` retiring
+    `activeResearch` only ever invalidates a still-*queued* recommendation
+    (`invalidate_queued`) — but "Show it" can already have moved that
+    recommendation into `current` before a later pass supersedes it.
+    Without this, `EvidenceResearchRenderer` would sit on "Research is
+    running…" forever once the pass that would have resolved it ends
+    without a finding.
+  */
+  describe("retire_stale_research_view", () => {
+    it("returns to the previous scene when the accepted research view's receipt is gone", () => {
+      let state = initialSceneState(scene(A));
+      state = sceneReducer(state, {
+        type: "recommend_scene",
+        scene: researchScene(B),
+        turnId: TURN_A,
+      });
+      state = sceneReducer(state, { type: "accept_queued" });
+      expect(state.current?.renderer).toBe("evidence_research");
+
+      state = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: scene(A),
+      });
+      expect(state.current?.focalObjectId).toBe(A);
+      expect(canReturnToPrevious(state)).toBe(false);
+    });
+
+    it("falls back to the application default when there is no history to return to", () => {
+      let state = initialSceneState(researchScene(B));
+      state = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: scene(A),
+      });
+      expect(state.current?.focalObjectId).toBe(A);
+      expect(state.current?.renderer).toBe("problem_exploration");
+    });
+
+    it("clears to empty rather than leave the stale research view up when there is no fallback either", () => {
+      let state = initialSceneState(researchScene(B));
+      state = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: null,
+      });
+      expect(state.current).toBeNull();
+    });
+
+    it("is a no-op when the current scene is not the research view", () => {
+      const state = initialSceneState(scene(A));
+      const after = sceneReducer(state, {
+        type: "retire_stale_research_view",
+        fallback: scene(B),
+      });
+      expect(after).toBe(state);
     });
   });
 

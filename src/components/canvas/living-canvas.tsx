@@ -261,11 +261,13 @@ export function LivingCanvas({
     if (!recommendedScene) {
       /*
         Issue #13 (T10 exit gate): `recommendedScene` only ever becomes null
-        because `turnReducer` cleared *its own matching turn's* entry on
-        `turn_failed` — nothing else in that reducer touches it. So the turn
-        that owned the last recommendation this host received is the one that
-        just failed, and a copy still queued from that same turn is stale.
-        `invalidate_queued` clears it only if it is still that turn's own
+        because `turnReducer` cleared *its own matching turn's* entry — on
+        `turn_failed`, or, since T10 review round 10's second correction, the
+        moment a later research pass supersedes the receipt behind a queued
+        `evidence_research` recommendation (`research_started`). Either way,
+        the turn or pass that owned the last recommendation this host
+        received is the one that just ended, and a copy still queued from it
+        is stale. `invalidate_queued` clears it only if it is still that same
         entry — a newer recommendation the user has not acted on yet, or one
         they already accepted or dismissed, is untouched either way.
       */
@@ -291,6 +293,31 @@ export function LivingCanvas({
         : { type: "scene_rejected", rejection: result.rejection },
     );
   }, [recommendedScene, scope]);
+
+  /*
+    The queued-recommendation case above only ever retires a copy the person
+    has not acted on. Once they have selected "Show it", that same scene
+    moves into `sceneState.current` — and a later research pass superseding
+    its receipt (`research_started` in `turn-events.ts`, clearing
+    `activeResearch`) has nothing left to tell this host, because
+    `recommendedScene` was already consumed and cannot become `null` a
+    second time for the same recommendation. Without this, the accepted
+    `evidence_research` view is never moved off, and `EvidenceResearchRenderer`
+    sits on "Research is running…" indefinitely once the pass that would
+    have resolved it ends without a finding (T10 review round 10, third
+    correction). Scoped by the reducer itself to a `research_evidence`
+    current scene, so an unrelated accepted view is never touched.
+  */
+  const currentResearchViewStale =
+    sceneState.current?.purpose === "research_evidence" && !activeResearch;
+  useEffect(() => {
+    if (currentResearchViewStale) {
+      dispatchScene({
+        type: "retire_stale_research_view",
+        fallback: derivedScene,
+      });
+    }
+  }, [currentResearchViewStale, derivedScene]);
 
   const scene = sceneState.current;
   const map = useMemo(

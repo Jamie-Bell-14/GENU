@@ -773,12 +773,36 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             must not leave an earlier pass's finding answerable to "Add as
             evidence", and its unavailable-source list belongs to *that*
             pass, not this one.
+
+            Superseding the receipt is not enough on its own (T10 review
+            round 10, P1): a prior pass within the *same* turn can already
+            have produced a validated "Add as evidence" action and a queued
+            evidence_research recommendation before this new pass began. Both
+            are affordances that promise a receipt behind them — leaving them
+            in place here would offer a button and a "Show it" for a receipt
+            this event just retired.
+
+            `add_as_evidence` only ever reaches `actions` from a research
+            pass, so removing it here can never touch an unrelated
+            suggestion. `recommendedScene` is cleared only when it is the
+            research view itself — an unrelated scene the person has not
+            acted on yet is untouched. Clearing it to `null` also drives
+            `LivingCanvas`'s own invalidation: that host treats the prop
+            becoming `null` as its cue to retire its local queued copy
+            (issue #13's `invalidate_queued`), so no second signal is needed.
           */
           return {
             ...state,
             activeResearch: null,
             activeResearchTurnId: null,
             unavailableSources: [],
+            actions: state.actions.filter(
+              (action) => action.id !== "add_as_evidence",
+            ),
+            recommendedScene:
+              state.recommendedScene?.scene.purpose === "research_evidence"
+                ? null
+                : state.recommendedScene,
           };
 
         case "research_source":

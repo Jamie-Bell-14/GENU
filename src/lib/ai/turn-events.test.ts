@@ -782,6 +782,132 @@ describe("research (T10)", () => {
       });
       expect(failed.activeResearch).toBeNull();
     });
+
+    /*
+      T10 review round 10, P1: superseding the receipt is not the same as
+      withdrawing the affordances a *prior* pass, within this same turn,
+      already validated on top of it — a suggested "Add as evidence" action
+      and a queued evidence_research recommendation. Both promise a receipt
+      behind them; leaving them in place after a later pass supersedes that
+      receipt offers a button and a "Show it" for research this event just
+      retired.
+    */
+    function researchScene(): CanvasScene {
+      return {
+        renderer: "evidence_research",
+        purpose: "research_evidence",
+        focalObjectId: "aaaaaaaa-0000-4000-8000-000000000001",
+        visibleObjectIds: ["aaaaaaaa-0000-4000-8000-000000000001"],
+        visibleRelationshipIds: [],
+        emphasis: "none",
+        reason: "Showing what was found.",
+        transition: "replace",
+      };
+    }
+
+    it("withdraws the earlier pass's add_as_evidence action and queued research scene once a later pass starts", () => {
+      // A second pass that merely finds nothing does not fail the turn —
+      // the engine reports it plainly and the turn completes normally via
+      // "done", never "turn_failed". The regression has to be provable
+      // without that event, since `turn_failed` already clears `actions`
+      // and a matching-turnId `recommendedScene` on its own and would mask
+      // the defect this test exists to catch.
+      let state = streamStarted(send());
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "scene_recommended",
+          scene: researchScene(),
+          turnId: TURN,
+        },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "actions",
+          actions: [{ id: "add_as_evidence", label: "Add as evidence" }],
+        },
+      });
+      expect(state.actions.map((a) => a.id)).toContain("add_as_evidence");
+      expect(state.recommendedScene).not.toBeNull();
+
+      // The second pass starts and finds nothing — no further research or
+      // turn-lifecycle event follows before the turn completes normally.
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+
+      expect(state.activeResearch).toBeNull();
+      expect(state.actions.map((a) => a.id)).not.toContain("add_as_evidence");
+      expect(state.recommendedScene).toBeNull();
+
+      // The turn completing normally afterwards must not resurrect anything.
+      state = turnReducer(state, { type: "event", event: { type: "done" } });
+      expect(state.actions.map((a) => a.id)).not.toContain("add_as_evidence");
+      expect(state.recommendedScene).toBeNull();
+    });
+
+    it("does not withdraw an unrelated action or scene when a research pass starts", () => {
+      let state = streamStarted(send());
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "scene_recommended", scene: scene(), turnId: TURN },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "actions",
+          actions: [{ id: "challenge_this", label: "Challenge this" }],
+        },
+      });
+
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_started" },
+      });
+
+      expect(state.actions.map((a) => a.id)).toContain("challenge_this");
+      expect(state.recommendedScene).not.toBeNull();
+      expect(state.recommendedScene?.scene.renderer).toBe(
+        "problem_exploration",
+      );
+    });
+
+    it("leaves the action and scene in place through the normal single-pass path, once its own result is seen", () => {
+      // The path this correction must not regress: one focused pass,
+      // producing a finding, a queued view and the action — with no
+      // superseding pass, all three stay exactly as the turn left them.
+      let state = streamStarted(send());
+      state = turnReducer(state, {
+        type: "event",
+        event: { type: "research_finding", finding: testFinding },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "scene_recommended",
+          scene: researchScene(),
+          turnId: TURN,
+        },
+      });
+      state = turnReducer(state, {
+        type: "event",
+        event: {
+          type: "actions",
+          actions: [{ id: "add_as_evidence", label: "Add as evidence" }],
+        },
+      });
+      state = turnReducer(state, { type: "event", event: { type: "done" } });
+
+      expect(state.activeResearch).toEqual(testFinding);
+      expect(state.actions.map((a) => a.id)).toContain("add_as_evidence");
+      expect(state.recommendedScene).not.toBeNull();
+    });
   });
 
   describe("a receipt stays current only while its own turn is the latest thing that happened (T10 review round 3, P0-2)", () => {

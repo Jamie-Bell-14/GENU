@@ -290,9 +290,15 @@ describe("ScriptedDiscoveryEngine", () => {
       expect(result.assistantText).toMatch(/stopped/i);
     });
 
-    it("does not recommend a scene when research has no focal object", async () => {
-      const { candidates, hooks } = harness();
-      await new ScriptedDiscoveryEngine().runTurn(
+    /*
+      T10 review round 9, P1: a successful pass with no focal object queues
+      no scene at all, and its receipt has no target — `complete_turn` can
+      only refuse it as `no_focal_object`. Neither the reply nor the offered
+      actions may say otherwise.
+    */
+    it("does not recommend a scene, offer to add as evidence, or claim a canvas view when research has no focal object", async () => {
+      const { candidates, events, hooks } = harness();
+      const result = await new ScriptedDiscoveryEngine().runTurn(
         {
           ...input,
           userMessage: "Research this",
@@ -301,6 +307,12 @@ describe("ScriptedDiscoveryEngine", () => {
         hooks,
       );
       expect(candidates).toHaveLength(0);
+      const actionIds = events
+        .filter((event) => event.type === "actions")
+        .flatMap((event) => event.actions.map((action) => action.id));
+      expect(actionIds).not.toContain("add_as_evidence");
+      expect(result.assistantText).not.toMatch(/see the canvas/i);
+      expect(result.assistantText).toMatch(/run the research again/i);
     });
   });
 

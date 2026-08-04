@@ -327,14 +327,29 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
       });
     }
 
-    const text = `I found: “${outcome.findingTitle}”. This is demonstration data, not a live lookup — see the canvas for the full finding, its sources and what it does and does not support.`;
+    /*
+      A successful pass with no focal object queues no scene at all (the
+      branch above) and its receipt has no target — `complete_turn` can only
+      refuse it as `no_focal_object`. Neither the reply nor the offered
+      actions may say otherwise (T10 review round 9, P1: the same
+      application-owned eligibility rule the live engine's tool result and
+      reload hydration already apply — see `anthropic-engine.ts` and
+      `project-model-store.ts`'s `loadLatestResearchReceipt`). There is no
+      canvas view to point to, and "Add as evidence" would submit a receipt
+      the database is guaranteed to refuse.
+    */
+    const text = focalObjectId
+      ? `I found: “${outcome.findingTitle}”. This is demonstration data, not a live lookup — see the canvas for the full finding, its sources and what it does and does not support.`
+      : `I found: “${outcome.findingTitle}”. This is demonstration data, not a live lookup. Nothing was in focus, so no research view was queued and this cannot be added as evidence — establish or focus the relevant object, then run the research again.`;
     hooks.emit({ type: "block", kind: "finding" });
     if (!(await this.stream(text, hooks, signal))) return interrupted();
 
-    hooks.emit({
-      type: "actions",
-      actions: resolveActions(["add_as_evidence"]),
-    });
+    if (focalObjectId) {
+      hooks.emit({
+        type: "actions",
+        actions: resolveActions(["add_as_evidence"]),
+      });
+    }
     return { assistantText: text, operations: [] };
   }
 

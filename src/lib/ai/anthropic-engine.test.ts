@@ -446,6 +446,107 @@ describe("AnthropicDiscoveryEngine", () => {
     });
   });
 
+  /*
+    T10 review round 9, P1: a closed action id only proves the model named a
+    real action, not that pressing the resulting button can succeed. The
+    round-6/7/8 fixes made the `start_research` tool result honest about
+    whether a scene was queued and whether an add is even possible — but the
+    application still trusted any model-supplied `suggest_actions` call
+    containing `add_as_evidence` outright, validated only against the closed
+    action-id catalogue. A model could suggest it without having run
+    research at all, after a no-focus pass, or in the same tool-use batch as
+    `start_research` before ever seeing that tool's result. `add_as_evidence`
+    must be withheld from `suggest_actions` unless eligibility was
+    established *before* the round the call arrives in.
+  */
+  describe("add_as_evidence eligibility is application-enforced, not model-trusted (T10 review round 9, P1)", () => {
+    const focalObjectId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const inputWithFocus = {
+      ...input,
+      context: { objectIds: [focalObjectId], focalObjectId },
+    };
+
+    const startResearchBlock = (id: string): Block => ({
+      type: "tool_use",
+      id,
+      name: "start_research",
+      input: { topic: "Deposit disputes" },
+    });
+    const suggestAddAsEvidenceBlock = (id: string): Block => ({
+      type: "tool_use",
+      id,
+      name: "suggest_actions",
+      input: { actionIds: ["add_as_evidence"] },
+    });
+
+    function offeredActionIds(events: EngineEvent[]): string[] {
+      return events
+        .filter((event) => event.type === "actions")
+        .flatMap((event) => event.actions.map((action) => action.id));
+    }
+
+    it("withholds add_as_evidence when the model suggests it after research ran with nothing in focus", async () => {
+      const { events, hooks } = harness();
+      const stub = stubClient([
+        { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+        {
+          blocks: [suggestAddAsEvidenceBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      // Plain `input`, no context — the same no-focus fixture round 7/8 use.
+      await engine.runTurn(input, hooks);
+
+      expect(offeredActionIds(events)).not.toContain("add_as_evidence");
+    });
+
+    it("withholds add_as_evidence from a same-batch suggest_actions call, whichever order the model sent the blocks in", async () => {
+      const suggestBeforeResearch = stubClient([
+        {
+          blocks: [suggestAddAsEvidenceBlock("t1"), startResearchBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const { events: eventsA, hooks: hooksA } = harness();
+      await new AnthropicDiscoveryEngine({
+        client: suggestBeforeResearch.client,
+      }).runTurn(inputWithFocus, hooksA);
+      expect(offeredActionIds(eventsA)).not.toContain("add_as_evidence");
+
+      const researchBeforeSuggest = stubClient([
+        {
+          blocks: [startResearchBlock("t1"), suggestAddAsEvidenceBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const { events: eventsB, hooks: hooksB } = harness();
+      await new AnthropicDiscoveryEngine({
+        client: researchBeforeSuggest.client,
+      }).runTurn(inputWithFocus, hooksB);
+      expect(offeredActionIds(eventsB)).not.toContain("add_as_evidence");
+    });
+
+    it("offers add_as_evidence once a focused research pass has actually completed in an earlier round", async () => {
+      const { events, hooks } = harness();
+      const stub = stubClient([
+        { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+        {
+          blocks: [suggestAddAsEvidenceBlock("t2")],
+          stopReason: "tool_use",
+        },
+        { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+      ]);
+      const engine = new AnthropicDiscoveryEngine({ client: stub.client });
+      await engine.runTurn(inputWithFocus, hooks);
+
+      expect(offeredActionIds(events)).toContain("add_as_evidence");
+    });
+  });
+
   describe("add_evidence direction is grounded, not asserted (T10 review round 3, P0-1)", () => {
     const addEvidenceTurn = (direction: string): StubTurn => ({
       blocks: [

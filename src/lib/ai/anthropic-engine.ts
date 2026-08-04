@@ -238,6 +238,26 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         ? context.researchGrounding.text
         : null;
 
+    /*
+      Whether `suggest_actions` may honour a model-supplied `add_as_evidence`
+      id (T10 review round 9, P1). A closed action id only proves the model
+      named a real action, not that pressing the resulting button can
+      succeed — the application owns the label, so it owns this promise too,
+      the same way it already owns the tool-result wording (above) and reload
+      hydration (`project-model-store.ts`'s `loadLatestResearchReceipt`).
+      Starts true only when the request already carried a genuinely current,
+      targeted receipt (`groundingText`) — the same signal `add_evidence`'s
+      own `direction` trust is gated on. Updated once per provider round, at
+      the end of that round's tool processing (see `addEvidenceEligibleNextRound`
+      below) rather than as each tool result is produced, so a
+      `start_research` call and a `suggest_actions` call in the *same* batch
+      cannot make each other true: the model generated both without seeing
+      either result, so a `suggest_actions` call in that batch is filtered
+      against eligibility as it stood before the round started, never against
+      what the round itself just produced.
+    */
+    let addEvidenceEligible = groundingText !== null;
+
     messages.push({
       role: "user",
       content: [
@@ -541,6 +561,9 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       }
 
       const results: Anthropic.ToolResultBlockParam[] = [];
+      // Frozen for the duration of this round's processing (T10 review
+      // round 9, P1) — see `addEvidenceEligible` above.
+      let addEvidenceEligibleNextRound = addEvidenceEligible;
       for (const { use, validation } of validations) {
         if (!validation.ok) continue;
         toolCalls += 1;
@@ -555,12 +578,19 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
           await hooks.recommendScene(use.input);
         } else if (validation.tool === "suggest_actions") {
           // Resolved to application-owned labels; the ids are all the model
-          // supplied and all it could supply.
+          // supplied and all it could supply. `add_as_evidence` is withheld
+          // unless eligibility was already established before this round —
+          // a closed action id proves the model named a real action, not
+          // that this one can actually succeed right now (T10 review
+          // round 9, P1).
+          const requestedIds = (validation.value as { actionIds: string[] })
+            .actionIds;
+          const allowedIds = addEvidenceEligible
+            ? requestedIds
+            : requestedIds.filter((id) => id !== "add_as_evidence");
           hooks.emit({
             type: "actions",
-            actions: resolveActions(
-              (validation.value as { actionIds: string[] }).actionIds,
-            ),
+            actions: resolveActions(allowedIds),
           });
         } else if (validation.tool === "start_research") {
           /*
@@ -603,6 +633,10 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
               reason: `Showing what was found: "${outcome.findingTitle}". This is demonstration data.`,
               transition: "replace",
             });
+            // Takes effect from the next round onward, once the model has
+            // actually seen this result — never within this same batch
+            // (T10 review round 9, P1; see `addEvidenceEligibleNextRound`).
+            addEvidenceEligibleNextRound = true;
           }
           /*
             A successful pass with no focal object queues no scene at all
@@ -657,6 +691,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       }
 
       messages.push({ role: "user", content: results });
+      addEvidenceEligible = addEvidenceEligibleNextRound;
 
       /*
         A genuine step boundary, which is what makes "next step" an honest

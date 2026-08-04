@@ -612,6 +612,14 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
             the model a view is ready and offering "Add as evidence" would
             be describing a scene that was never queued and inviting an add
             the database will refuse.
+
+            The receipt's target is fixed at the moment it is recorded, and
+            currency retires it the instant any later turn is accepted (see
+            `complete_turn`'s round-5 rule) — so establishing or selecting a
+            claim in a later turn can never make *this* receipt addable; it
+            would already be superseded by the turn that did the
+            establishing. The honest next step is a fresh pass, not a
+            promise this one will become usable (T10 review round 8, P1).
           */
           content = !outcome.ok
             ? outcome.reason === "stopped"
@@ -619,7 +627,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
               : "Research could not run — none of the demonstration sources were available. Tell the person plainly; nothing was added."
             : focalObjectId
               ? `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. A validated research view is ready on the canvas; the person can select "Show it" to open it — do not claim it is already visible. Briefly state the conclusion and offer to add it as evidence if that follows, without restating the full research detail.`
-              : `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. No project object was in focus, so no research view was queued and this result cannot yet be added as evidence — do not offer to add it as evidence. Briefly summarise the finding and ask the person to establish or select the claim it should relate to.`;
+              : `Research complete. Finding: "${outcome.findingTitle}". This is demonstration data — say so plainly. No project object was in focus, so no research view was queued and this result cannot be added as evidence — do not offer to add it as evidence, and do not imply it could become addable later. Briefly summarise the finding, and tell the person to establish or focus the relevant claim or object, then run the research again.`;
         } else if (validation.tool === "add_evidence") {
           /*
             The model's `direction` is only ever trusted when this request

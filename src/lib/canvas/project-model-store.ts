@@ -263,6 +263,7 @@ interface LatestMessageRow {
 interface LatestFindingRow {
   id: string;
   turn_id: string;
+  focal_object_id: string | null;
   title: string;
   key_finding: string;
   why_it_matters: string;
@@ -288,6 +289,17 @@ interface LatestFindingRow {
  * most recent message must be the assistant turn that produced it. Once a
  * later turn has happened, this returns nothing rather than resurrecting
  * older research as though it were current.
+ *
+ * Currency alone is not enough to offer "Add as evidence" (T10 review
+ * round 8, P1): a pass that ran with nothing in focus stores a receipt
+ * with `focal_object_id = null`, which `complete_turn` always refuses as
+ * `no_focal_object` — the live turn already knows this and never offers
+ * the action for it. A reload must reach the same answer, so the latest
+ * *current* receipt is still the one selected (never falling back to an
+ * older, focused one — that would resurrect research this project has
+ * moved past), but this returns nothing hydrated when it has no target,
+ * rather than handing the client a receipt it can only submit for a
+ * guaranteed refusal.
  */
 export async function loadLatestResearchReceipt(
   supabase: SupabaseClient,
@@ -314,7 +326,7 @@ export async function loadLatestResearchReceipt(
     supabase
       .from("research_findings")
       .select(
-        "id, turn_id, title, key_finding, why_it_matters, visualisation, sources, methodology, limitations, retrieved_at, is_demo, conflicting, unavailable_sources",
+        "id, turn_id, focal_object_id, title, key_finding, why_it_matters, visualisation, sources, methodology, limitations, retrieved_at, is_demo, conflicting, unavailable_sources",
       )
       .eq("project_id", projectId)
       .order("created_at", { ascending: false })
@@ -331,6 +343,12 @@ export async function loadLatestResearchReceipt(
   ) {
     return null;
   }
+  // The latest receipt is current, but it has nothing to add evidence
+  // to — complete_turn would only ever refuse it as no_focal_object, so
+  // this reports no hydrated research rather than offering an add that
+  // cannot succeed (T10 review round 8, P1). Never falls back to an
+  // older, focused receipt: that receipt is no longer current either.
+  if (latestFinding.focal_object_id === null) return null;
 
   return {
     finding: {

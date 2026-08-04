@@ -386,8 +386,14 @@ describe("AnthropicDiscoveryEngine", () => {
       Reachable whenever the model runs `start_research` with nothing in
       focus — e.g. an empty/new project — via the plain `input` fixture,
       which carries no `context`.
+
+      Round 8, P1: the receipt's target is fixed at the moment it is
+      recorded and currency retires it the instant any later turn is
+      accepted, so establishing or selecting a claim afterwards can never
+      make *this* receipt addable — the wording must say to run the
+      research again, not imply this one could become usable later.
     */
-    it("tells the model no view was queued and not to offer adding as evidence, when nothing was in focus", async () => {
+    it("tells the model no view was queued, not to offer adding as evidence, and to rerun research rather than wait, when nothing was in focus", async () => {
       const { scenes, hooks } = harness();
       const stub = stubClient([
         {
@@ -431,6 +437,12 @@ describe("AnthropicDiscoveryEngine", () => {
         /do not offer to add it as evidence/i,
       );
       expect(toolResult?.content).toMatch(/no project object was in focus/i);
+      // Round 8, P1: never implies this same receipt could become addable
+      // once a target exists — that would be untrue, since currency retires
+      // it the moment any later turn is accepted. The honest next step is a
+      // fresh pass.
+      expect(toolResult?.content).not.toMatch(/cannot yet be added/i);
+      expect(toolResult?.content).toMatch(/run the research again/i);
     });
   });
 

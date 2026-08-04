@@ -545,6 +545,122 @@ describe("AnthropicDiscoveryEngine", () => {
 
       expect(offeredActionIds(events)).toContain("add_as_evidence");
     });
+
+    /*
+      T10 review round 10, P1: `researchGrounding` answers a different
+      question than contextual-action eligibility. It says this turn may
+      trust a comparison against the receipt it was sent, for its own
+      `add_evidence` call — not that a button offered for a *later* turn
+      will still work. Even a genuinely grounded prior receipt is retired by
+      this very turn: the client clears `activeResearch` the moment a turn
+      other than the receipt's own is identified, which happens as this turn
+      starts. Seeding eligibility from `groundingText` therefore offered a
+      button the receipt could no longer back by the time this turn's answer
+      reached the person.
+    */
+    describe("eligibility is not inherited from a grounded prior receipt", () => {
+      const groundedBuildContext = () => ({
+        fields: [],
+        objects: [],
+        relationshipIds: [],
+        focalObjectId: null,
+        recentMessages: [],
+        researchGrounding: {
+          grounded: true as const,
+          text: "Key finding: dispute rates differ by agency size.",
+        },
+      });
+
+      it("withholds add_as_evidence when the turn merely re-suggests it, without running fresh research", async () => {
+        const { events, hooks } = harness();
+        const stub = stubClient([
+          {
+            blocks: [suggestAddAsEvidenceBlock("t1")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("As you saw earlier.")], stopReason: "end_turn" },
+        ]);
+        const engine = new AnthropicDiscoveryEngine({
+          client: stub.client,
+          buildContext: groundedBuildContext,
+        });
+        await engine.runTurn(input, hooks);
+
+        expect(offeredActionIds(events)).not.toContain("add_as_evidence");
+      });
+
+      it("withholds add_as_evidence from a same-batch research/suggestion pair, either order, even though the turn started grounded", async () => {
+        const suggestBeforeResearch = stubClient([
+          {
+            blocks: [suggestAddAsEvidenceBlock("t1"), startResearchBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+        ]);
+        const { events: eventsA, hooks: hooksA } = harness();
+        await new AnthropicDiscoveryEngine({
+          client: suggestBeforeResearch.client,
+          buildContext: groundedBuildContext,
+        }).runTurn(inputWithFocus, hooksA);
+        expect(offeredActionIds(eventsA)).not.toContain("add_as_evidence");
+
+        const researchBeforeSuggest = stubClient([
+          {
+            blocks: [startResearchBlock("t1"), suggestAddAsEvidenceBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+        ]);
+        const { events: eventsB, hooks: hooksB } = harness();
+        await new AnthropicDiscoveryEngine({
+          client: researchBeforeSuggest.client,
+          buildContext: groundedBuildContext,
+        }).runTurn(inputWithFocus, hooksB);
+        expect(offeredActionIds(eventsB)).not.toContain("add_as_evidence");
+      });
+
+      it("withholds add_as_evidence when a grounded turn's own fresh research fails to produce a target", async () => {
+        const { events, hooks } = harness({
+          runResearch: async () => ({ ok: false, reason: "unavailable" }),
+        });
+        const stub = stubClient([
+          { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+          {
+            blocks: [suggestAddAsEvidenceBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Research could not run.")], stopReason: "end_turn" },
+        ]);
+        const engine = new AnthropicDiscoveryEngine({
+          client: stub.client,
+          buildContext: groundedBuildContext,
+        });
+        // Plain `input`: nothing in focus for this turn's own fresh pass,
+        // despite the grounded prior receipt.
+        await engine.runTurn(input, hooks);
+
+        expect(offeredActionIds(events)).not.toContain("add_as_evidence");
+      });
+
+      it("allows add_as_evidence once a grounded turn's own fresh research succeeds against a focal object", async () => {
+        const { events, hooks } = harness();
+        const stub = stubClient([
+          { blocks: [startResearchBlock("t1")], stopReason: "tool_use" },
+          {
+            blocks: [suggestAddAsEvidenceBlock("t2")],
+            stopReason: "tool_use",
+          },
+          { blocks: [text("Here is what I found.")], stopReason: "end_turn" },
+        ]);
+        const engine = new AnthropicDiscoveryEngine({
+          client: stub.client,
+          buildContext: groundedBuildContext,
+        });
+        await engine.runTurn(inputWithFocus, hooks);
+
+        expect(offeredActionIds(events)).toContain("add_as_evidence");
+      });
+    });
   });
 
   describe("add_evidence direction is grounded, not asserted (T10 review round 3, P0-1)", () => {

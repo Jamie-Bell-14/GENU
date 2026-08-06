@@ -995,6 +995,80 @@ describe("AnthropicDiscoveryEngine", () => {
     // Everything logged is a code, a count or an id (§12).
     expect(JSON.stringify(diagnostics)).not.toContain("Landlords");
     expect(JSON.stringify(diagnostics)).not.toContain("An answer");
+    expect(diagnostics.toolNames).toEqual([]);
+  });
+
+  /*
+    T11 entry-gate live smoke test (issue #14): validated tool names are safe
+    diagnostics — a closed, application-recognised vocabulary — but the
+    arguments a model sent for them never are. This turn stages a real
+    `update_project_model` call carrying a field value, and the assertion is
+    that the name survives into diagnostics while the value never does.
+  */
+  it("reports which validated tools ran without recording what they were called with", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const stub = stubClient([
+      {
+        blocks: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "update_project_model",
+            input: validUpdate,
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { blocks: [text("Recorded.")], stopReason: "end_turn" },
+    ]);
+    const engine = new AnthropicDiscoveryEngine({
+      client: stub.client,
+      onDiagnostics,
+    });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.toolNames).toEqual(["update_project_model"]);
+    expect(diagnostics.toolCalls).toBe(1);
+    // The argument value the model sent must never reach diagnostics, only
+    // the tool's own validated name.
+    expect(JSON.stringify(diagnostics)).not.toContain(
+      "Deposit disputes at tenancy end.",
+    );
+    expect(JSON.stringify(diagnostics)).not.toContain("primary_pain");
+  });
+});
+
+/*
+  T11 entry-gate live smoke test (issue #14): `DISCOVERY_MODEL` is pinned to
+  Claude Haiku 4.5 on this branch, and Haiku does not accept
+  `output_config.effort` — sending it would fail every live request before
+  the smoke test could observe anything else about the provider boundary.
+*/
+describe("the live request shape matches what the pinned model accepts", () => {
+  it("sends the pinned Haiku 4.5 model identifier", async () => {
+    const { hooks } = harness();
+    const { stub, result } = run(
+      [{ blocks: [text("An answer.")], stopReason: "end_turn" }],
+      hooks,
+    );
+    await result;
+
+    const request = stub.requests[0] as { model: string };
+    expect(request.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("omits output_config, which Haiku does not support", async () => {
+    const { hooks } = harness();
+    const { stub, result } = run(
+      [{ blocks: [text("An answer.")], stopReason: "end_turn" }],
+      hooks,
+    );
+    await result;
+
+    const request = stub.requests[0] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("output_config");
   });
 });
 

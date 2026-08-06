@@ -13,7 +13,6 @@ import type {
   TurnResult,
 } from "./discovery-engine";
 import {
-  DISCOVERY_EFFORT,
   DISCOVERY_MODEL,
   MAX_CONTEXT_TOKENS,
   MAX_PROVIDER_ROUNDS,
@@ -67,6 +66,13 @@ export interface TurnDiagnostics {
   turnId: string;
   /** Tool blocks actually executed, which is what the cap counts. */
   toolCalls: number;
+  /**
+   * The validated tool name for each executed block, in call order (T11
+   * entry-gate smoke test, issue #14). Always one of the closed set
+   * `validateToolInput` recognises — never the model's raw input, so this can
+   * never carry an argument or message body regardless of what the model sent.
+   */
+  toolNames: string[];
   /** Provider round-trips the turn made. */
   providerRounds: number;
   schemaRetries: number;
@@ -121,6 +127,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
   ): Promise<TurnResult> {
     const startedAt = Date.now();
     let toolCalls = 0;
+    /** Validated tool names only — see `TurnDiagnostics.toolNames`. */
+    const toolNames: string[] = [];
     let providerRounds = 0;
     let schemaRetries = 0;
     /** What the engine has committed to sending, checked before each request. */
@@ -137,6 +145,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         model: DISCOVERY_MODEL,
         turnId: input.turnId,
         toolCalls,
+        toolNames: [...toolNames],
         providerRounds,
         schemaRetries,
         inputTokens,
@@ -413,7 +422,13 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
           {
             model: DISCOVERY_MODEL,
             max_tokens: Math.min(MAX_REQUEST_OUTPUT_TOKENS, remaining),
-            output_config: { effort: DISCOVERY_EFFORT },
+            /*
+              No `output_config.effort`: `DISCOVERY_MODEL` is pinned to Claude
+              Haiku 4.5 for the T11 entry-gate live smoke test (issue #14),
+              and Haiku does not support the effort parameter — sending it
+              would fail every live request before the smoke test could
+              observe anything else about the provider boundary.
+            */
             system: DISCOVERY_SYSTEM_PROMPT,
             tools: DISCOVERY_TOOLS as unknown as Anthropic.Tool[],
             messages,
@@ -581,6 +596,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       for (const { use, validation } of validations) {
         if (!validation.ok) continue;
         toolCalls += 1;
+        toolNames.push(validation.tool);
         let content: string = STAGED;
         if (validation.tool === "recommend_canvas_scene") {
           /*

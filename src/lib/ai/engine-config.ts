@@ -13,8 +13,14 @@
  * Held as a constant rather than read from the environment: a model change
  * alters behaviour, cost and prompt-cache identity, so it is a code change with
  * a diff, not configuration that can drift between environments unnoticed.
+ *
+ * Pinned to Claude Haiku 4.5 on the T11 entry-gate branch (issue #14): the
+ * live-provider smoke test is a controlled, low-cost check that the real
+ * provider boundary works — model, prompt and strict tool schemas — not a
+ * product model decision. `DISCOVERY_EFFORT` is not sent with this model;
+ * see its own comment.
  */
-export const DISCOVERY_MODEL = "claude-opus-5";
+export const DISCOVERY_MODEL = "claude-haiku-4-5-20251001";
 
 /**
  * Output ceiling for a single provider request, covering everything the model
@@ -72,6 +78,11 @@ export const MAX_CONTEXT_TOKENS = 30_000;
  * starting point for a sweep, not a tuned value: this model performs strongly
  * at lower effort, and a discovery turn is a conversation rather than a
  * long-horizon agentic run.
+ *
+ * Not sent while `DISCOVERY_MODEL` is pinned to Claude Haiku 4.5 (T11
+ * entry-gate branch, issue #14): Haiku does not support `output_config.effort`,
+ * and sending an unsupported field would fail every live request before the
+ * smoke test could observe anything else about the provider boundary.
  */
 export const DISCOVERY_EFFORT = "medium" as const;
 

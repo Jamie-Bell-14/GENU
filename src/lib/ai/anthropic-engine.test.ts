@@ -1038,6 +1038,76 @@ describe("AnthropicDiscoveryEngine", () => {
     );
     expect(JSON.stringify(diagnostics)).not.toContain("primary_pain");
   });
+
+  /*
+    T11 entry-gate review finding: `toolNames` only ever reflects blocks that
+    validated and ran, so a real tool requested with arguments the schema
+    rejects — a provider/schema incompatibility, exactly what this gate
+    exists to catch — left no trace of which tool was ever asked for.
+    `requestedToolNames` is recorded before validation, from the same closed
+    catalogue, so it survives this case while still never carrying arguments.
+  */
+  it("records the requested tool's name even when its arguments fail schema validation", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const stub = stubClient([
+      {
+        blocks: [
+          {
+            type: "tool_use",
+            id: "t1",
+            // Missing required fields — the same malformed shape the retry
+            // tests below use.
+            name: "update_project_model",
+            input: { updates: [{ area: "problem", approved: true }] },
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { blocks: [text("Recorded.")], stopReason: "end_turn" },
+    ]);
+    const engine = new AnthropicDiscoveryEngine({
+      client: stub.client,
+      onDiagnostics,
+    });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.requestedToolNames).toEqual(["update_project_model"]);
+    // Never validated, so it never ran — absent from the executed-only list.
+    expect(diagnostics.toolNames).toEqual([]);
+    // The malformed argument itself must never reach diagnostics.
+    expect(JSON.stringify(diagnostics)).not.toContain("approved");
+  });
+
+  it("never records an unrecognised tool name, requested or otherwise", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const stub = stubClient([
+      {
+        blocks: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "delete_everything",
+            input: {},
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { blocks: [text("Recorded.")], stopReason: "end_turn" },
+    ]);
+    const engine = new AnthropicDiscoveryEngine({
+      client: stub.client,
+      onDiagnostics,
+    });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.requestedToolNames).toEqual([]);
+    expect(diagnostics.toolNames).toEqual([]);
+    expect(JSON.stringify(diagnostics)).not.toContain("delete_everything");
+  });
 });
 
 /*

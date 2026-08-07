@@ -589,6 +589,22 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): ToolValidation<T> {
 }
 
 /**
+ * Whether `name` is one of the application's own tool identifiers.
+ *
+ * A closed check against `DISCOVERY_TOOLS` — the same list the provider is
+ * given — rather than a hardcoded copy of it, so the two cannot drift apart.
+ * Exists so a caller can safely record *which* tool a request named before
+ * (or instead of) validating its arguments: `validateToolInput` only returns
+ * a tool name on success, so a malformed-argument call for a real tool would
+ * otherwise leave no safe trace of which tool was ever asked for (T11 entry
+ * gate, issue #14 — the exact class of provider/schema incompatibility the
+ * live smoke test exists to catch).
+ */
+export function isDiscoveryToolName(name: string): name is DiscoveryToolName {
+  return DISCOVERY_TOOLS.some((tool) => tool.name === name);
+}
+
+/**
  * Validates a tool call by name. An unknown tool name is a failure rather than
  * a no-op — the model reaching for a tool that does not exist is worth
  * knowing about, not worth silently absorbing.

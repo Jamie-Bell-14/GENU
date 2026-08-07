@@ -23,8 +23,13 @@
 3. If any step fails or the provider behaves incompatibly, stop, leave this
    template unfilled (or mark it failed), and open a separately classified
    issue describing the failure. Do not close #14.
-4. If every step passes, fill this file in completely, commit it on the T11
-   implementation branch's first PR, and reference/close #14 from that PR.
+4. If every step passes, fill this file in completely and commit it on
+   **this gate branch/PR** (`gate/t11-live-provider-smoke`), then close #14
+   from here. #14 itself is explicit that no T11 implementation branch may
+   be created and no T11 implementation PR may be opened while it remains
+   open — evidence and closure have to happen before that branch exists, not
+   inside it. Only once #14 is closed does T11 implementation begin, on a
+   fresh branch, in a separate PR.
 
 ---
 

@@ -24,9 +24,15 @@ export const DISCOVERY_MODEL = "claude-haiku-4-5-20251001";
 
 /**
  * Output ceiling for a single provider request, covering everything the model
- * generates on that request — thinking is on by default on this model and is
- * bounded by the same allowance as the visible answer, so a limit sized only
- * for the prose a user reads truncates the answer mid-sentence.
+ * generates on that request.
+ *
+ * On the model this was originally sized for, thinking was on by default and
+ * bounded by this same allowance, so a limit sized only for the prose a user
+ * reads would truncate the answer mid-sentence. `DISCOVERY_MODEL` is
+ * currently pinned to Claude Haiku 4.5 (T11 entry-gate branch, issue #14),
+ * which is not sent a `thinking`/`output_config` parameter at all — the cap
+ * still bounds the visible answer correctly, but the "thinking" rationale
+ * does not apply to a live request on this branch.
  *
  * This is *not* the turn's budget. A turn may make several requests, so a
  * per-request ceiling bounds none of them collectively; see

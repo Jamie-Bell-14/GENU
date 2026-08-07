@@ -29,7 +29,11 @@ import {
   DISCOVERY_SYSTEM_PROMPT,
 } from "./prompts/discovery";
 import type { AddEvidence } from "./tools/discovery-tools";
-import { DISCOVERY_TOOLS, validateToolInput } from "./tools/discovery-tools";
+import {
+  DISCOVERY_TOOLS,
+  isDiscoveryToolName,
+  validateToolInput,
+} from "./tools/discovery-tools";
 import type { SafeError } from "./turn-events";
 
 /**
@@ -71,8 +75,24 @@ export interface TurnDiagnostics {
    * entry-gate smoke test, issue #14). Always one of the closed set
    * `validateToolInput` recognises — never the model's raw input, so this can
    * never carry an argument or message body regardless of what the model sent.
+   *
+   * Populated only for blocks that actually ran, which excludes a real tool
+   * requested with arguments that failed schema validation — exactly the
+   * provider/schema incompatibility this gate exists to catch. See
+   * `requestedToolNames` for that case.
    */
   toolNames: string[];
+  /**
+   * The application-recognised tool name for every `tool_use` block a
+   * response contained this turn, in the order the provider sent them —
+   * recorded *before* argument validation, so a known tool named with
+   * malformed arguments still leaves a safe trace here even though it never
+   * reaches `toolNames` (T11 entry gate, issue #14). Checked against the same
+   * closed catalogue `validateToolInput` uses (`isDiscoveryToolName`), so an
+   * unrecognised name is never recorded and this can never carry an argument
+   * or message body regardless of what the model sent.
+   */
+  requestedToolNames: string[];
   /** Provider round-trips the turn made. */
   providerRounds: number;
   schemaRetries: number;
@@ -129,6 +149,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     let toolCalls = 0;
     /** Validated tool names only — see `TurnDiagnostics.toolNames`. */
     const toolNames: string[] = [];
+    /** Every requested tool, pre-validation — see `TurnDiagnostics.requestedToolNames`. */
+    const requestedToolNames: string[] = [];
     let providerRounds = 0;
     let schemaRetries = 0;
     /** What the engine has committed to sending, checked before each request. */
@@ -146,6 +168,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         turnId: input.turnId,
         toolCalls,
         toolNames: [...toolNames],
+        requestedToolNames: [...requestedToolNames],
         providerRounds,
         schemaRetries,
         inputTokens,
@@ -499,6 +522,16 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       const toolUses = final.content.filter(
         (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
       );
+      /*
+        Recorded before argument validation and independent of whatever
+        happens to this round next (cap, retry, success) — this is what the
+        provider actually asked for, not what survived (T11 entry gate,
+        issue #14). `isDiscoveryToolName` is the same closed catalogue check
+        `validateToolInput` uses, so an unrecognised name is never recorded.
+      */
+      for (const use of toolUses) {
+        if (isDiscoveryToolName(use.name)) requestedToolNames.push(use.name);
+      }
 
       if (final.stop_reason !== "tool_use" || toolUses.length === 0) {
         /*

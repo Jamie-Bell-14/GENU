@@ -13,6 +13,7 @@ import type {
   TurnResult,
 } from "./discovery-engine";
 import {
+  DISCOVERY_EFFORT,
   DISCOVERY_MODEL,
   MAX_CONTEXT_TOKENS,
   MAX_PROVIDER_ROUNDS,
@@ -445,13 +446,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
           {
             model: DISCOVERY_MODEL,
             max_tokens: Math.min(MAX_REQUEST_OUTPUT_TOKENS, remaining),
-            /*
-              No `output_config.effort`: `DISCOVERY_MODEL` is pinned to Claude
-              Haiku 4.5 for the T11 entry-gate live smoke test (issue #14),
-              and Haiku does not support the effort parameter — sending it
-              would fail every live request before the smoke test could
-              observe anything else about the provider boundary.
-            */
+            output_config: { effort: DISCOVERY_EFFORT },
             system: DISCOVERY_SYSTEM_PROMPT,
             tools: DISCOVERY_TOOLS as unknown as Anthropic.Tool[],
             messages,

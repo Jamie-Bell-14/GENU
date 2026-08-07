@@ -16,8 +16,9 @@
 
 1. Run the smoke-test procedure from issue #14 against a disposable project
    and a non-production account/environment, using this gate branch
-   (`gate/t11-live-provider-smoke`) so the request is shaped for the pinned
-   Claude Haiku 4.5 model.
+   (`gate/t11-live-provider-smoke`) so the request is shaped exactly as the
+   product's actual configuration sends it — GENU's selected model, current
+   prompt and strict tool schemas, unmodified for the test.
 2. Fill in every field below from what actually happened — not from what was
    expected to happen.
 3. If any step fails or the provider behaves incompatibly, stop, leave this

@@ -1111,13 +1111,16 @@ describe("AnthropicDiscoveryEngine", () => {
 });
 
 /*
-  T11 entry-gate live smoke test (issue #14): `DISCOVERY_MODEL` is pinned to
-  Claude Haiku 4.5 on this branch, and Haiku does not accept
-  `output_config.effort` — sending it would fail every live request before
-  the smoke test could observe anything else about the provider boundary.
+  T11 entry-gate live smoke test (issue #14): the gate exists to exercise the
+  actual GENU discovery model and request shape — `DISCOVERY_MODEL` and
+  `DISCOVERY_EFFORT` from `engine-config.ts` — not a substitute chosen for
+  the test itself. An earlier version of this branch pinned the live request
+  to Claude Haiku 4.5 for the smoke test; that was reverted, since the point
+  of #14 is to prove the model and prompt the product is actually designed
+  to run, with its own strict tool schemas, not a different one.
 */
-describe("the live request shape matches what the pinned model accepts", () => {
-  it("sends the pinned Haiku 4.5 model identifier", async () => {
+describe("the live request shape matches the product's actual model configuration", () => {
+  it("sends the configured Opus 5 model identifier", async () => {
     const { hooks } = harness();
     const { stub, result } = run(
       [{ blocks: [text("An answer.")], stopReason: "end_turn" }],
@@ -1126,10 +1129,10 @@ describe("the live request shape matches what the pinned model accepts", () => {
     await result;
 
     const request = stub.requests[0] as { model: string };
-    expect(request.model).toBe("claude-haiku-4-5-20251001");
+    expect(request.model).toBe("claude-opus-5");
   });
 
-  it("omits output_config, which Haiku does not support", async () => {
+  it("sends the configured medium effort", async () => {
     const { hooks } = harness();
     const { stub, result } = run(
       [{ blocks: [text("An answer.")], stopReason: "end_turn" }],
@@ -1137,8 +1140,10 @@ describe("the live request shape matches what the pinned model accepts", () => {
     );
     await result;
 
-    const request = stub.requests[0] as Record<string, unknown>;
-    expect(request).not.toHaveProperty("output_config");
+    const request = stub.requests[0] as {
+      output_config?: { effort?: string };
+    };
+    expect(request.output_config).toEqual({ effort: "medium" });
   });
 });
 

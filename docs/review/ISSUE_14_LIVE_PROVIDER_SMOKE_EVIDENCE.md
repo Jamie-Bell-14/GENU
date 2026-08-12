@@ -103,4 +103,14 @@ _(None recorded yet — fill in after the run, or state "none found.")_
       acceptance result without message bodies.
 - [ ] Any failure discovered becomes a separately classified issue before T11
       implementation proceeds.
-- [ ] The first T11 PR explicitly references and closes #14.
+- [ ] This gate PR/branch (`gate/t11-live-provider-smoke`) explicitly
+      references and closes #14, before any T11 implementation branch or PR
+      is created.[^1]
+
+[^1]: Issue #14's own body still states "The first T11 PR explicitly
+    references and closes #14," which contradicts its own rule against
+    opening a T11 implementation PR while #14 is open. This checklist item
+    has been reworded here to the sequence actually usable under that rule.
+    The issue's own wording has not been changed — that requires an
+    explicit issue-body update, which is Jamie's call, not something a PR
+    comment or this template can resolve on #14's behalf.

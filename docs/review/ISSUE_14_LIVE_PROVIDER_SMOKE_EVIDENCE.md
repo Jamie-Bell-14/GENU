@@ -1,10 +1,13 @@
 # Issue #14 — T11 Entry Gate: Live-Provider Smoke Test Evidence
 
-> Status: **NOT PASSING.** One live attempt has been made and failed (see
-> "Attempt log" below). The "Run metadata" / "Acceptance criteria checklist"
-> sections remain unfilled — they exist only so the evidence issue #14
-> requires has a fixed, reviewable shape to fill in once a controlled
-> live-provider test genuinely passes.
+> Status: **NOT PASSING.** Two live attempts have been made and failed (see
+> "Attempt log" below). Attempt 2's cause is identified and fixed on this
+> branch (an unsupported JSON Schema keyword in the strict tool
+> definitions); the fix has not yet been re-verified against a live turn.
+> The "Run metadata" / "Acceptance criteria checklist" sections remain
+> unfilled — they exist only so the evidence issue #14 requires has a
+> fixed, reviewable shape to fill in once a controlled live-provider test
+> genuinely passes.
 >
 > Do **not** record credentials, message bodies, or any user-sensitive content
 > in this file. Only the structured fields below.
@@ -70,6 +73,52 @@ genuine **passing** run only, and stay unfilled until one occurs.
   once against the corrected Preview and the new diagnostic read to
   identify the actual incompatibility, per Jamie's instruction not to
   re-attempt repeatedly without a diagnosis in hand.
+
+### Attempt 2 — FAILED (Turn 1)
+
+- Result: **FAILED.** Not passing evidence. Does not satisfy #14.
+- Model: `claude-opus-5` (GENU's actual configured model, unmodified for
+  the test)
+- Prompt version: `discovery/2026-07-30.1`
+- Project: `752b11f8-c4fb-4aac-b30b-9a25cb5572b3` (fresh disposable project)
+- Turn: `b14b78d1-b65c-4434-bd95-5d4b25b76c54`
+- Sanitised diagnostics: `toolCalls: 0`, `toolNames: []`,
+  `requestedToolNames: []`, `providerRounds: 1`, `schemaRetries: 0`,
+  `inputTokens: 0`, `outputTokens: 0`, `latencyMs: 179`, `outcome: failed`,
+  `errorCode: engine_unavailable`, `providerFailure: { status: 400,
+  errorType: "invalid_request_error", requestId:
+  "req_011Ce58J7WNRpkbaD7VzUNED" }`
+- Cause, confirmed: the new `providerFailure` diagnostic showed Anthropic
+  rejecting the request itself — a 400 `invalid_request_error` before any
+  tokens were processed (fast, 179ms). Compared the live request shape
+  against Anthropic's documented strict-tool-use JSON Schema subset
+  (`platform.claude.com/docs/en/build-with-claude/structured-outputs`,
+  fetched directly rather than assumed from training data). Confirmed:
+  `maxItems` — and `minItems` above 1 — are outside the supported subset
+  ("array constraints beyond minItems of 0 or 1" are not supported) and
+  reject the *entire* request, not just the array carrying them. Five of
+  `DISCOVERY_TOOLS`' eight provider-facing schemas
+  (`update_project_model`, `record_assumption`, `propose_connected_change`,
+  `suggest_actions`, `recommend_canvas_scene`) used `maxItems`, so every
+  live request — which always sends the full tool catalogue — was rejected
+  before inference could begin, independent of anything in the message or
+  the conversation.
+- Fix: removed `maxItems` (and no `minItems` above 1 remained) from all six
+  affected array schemas in `DISCOVERY_TOOLS`
+  (`src/lib/ai/tools/discovery-tools.ts`). The equivalent bounds are
+  unchanged and still enforced at the Zod validation boundary
+  (`.max(8)`/`.max(5)`/`.max(12)`/`.max(3)`/`.max(60)`/`.max(200)`), which
+  was always the real enforcement point per this file's own documented
+  design (the provider schema is a hint, not the boundary) — so this is a
+  pure request-shape fix with no change to what a turn may actually do.
+  Added a regression test suite (`discovery-tools.test.ts`) that walks
+  every provider-facing schema and asserts it stays inside the documented
+  strict-mode subset (no `maxItems`, no `minItems` above 1, no unsupported
+  numeric/string-length constraints, `additionalProperties: false` and a
+  complete `required` list on every object), so this class of
+  incompatibility cannot silently return.
+- Status: fix pushed to this gate branch. Turn 1 has not yet been rerun
+  against the corrected Preview.
 
 ---
 

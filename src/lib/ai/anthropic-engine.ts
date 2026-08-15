@@ -102,6 +102,58 @@ export interface TurnDiagnostics {
   latencyMs: number;
   outcome: "completed" | "failed";
   errorCode?: SafeError["code"];
+  /**
+   * Present only when `outcome` is `"failed"` and the failure came from a
+   * provider request (T11 entry-gate live smoke test, issue #14).
+   * `errorCode` alone collapses every non-rate-limit, non-auth provider
+   * failure into `"engine_unavailable"` — a 400, a 404, a 5xx and a
+   * connection failure are all indistinguishable from each other on that
+   * field. This adds the SDK's own safe classification of the exception so a
+   * real incompatibility can be told apart from a transient outage without
+   * ever touching provider-authored text. See `classifyProviderError`.
+   */
+  providerFailure?: ProviderFailureDiagnostics;
+}
+
+/**
+ * Safe, non-content classification of a provider request failure (T11
+ * entry-gate live smoke test, issue #14).
+ *
+ * Every error the Anthropic SDK throws for a failed request is an
+ * `Anthropic.APIError`, which exposes `status`, `requestID` and a
+ * closed-vocabulary `type` string from the API's own error envelope (e.g.
+ * `"overloaded_error"`, `"invalid_request_error"`) as distinct properties
+ * from `.message` and `.error` (the parsed response body). The latter two
+ * can carry provider-authored text and are never read here or forwarded
+ * anywhere (SECURITY_STANDARDS §14.1) — only the class name, status,
+ * request id and closed-vocabulary type are recorded.
+ */
+export interface ProviderFailureDiagnostics {
+  /** The SDK exception's own class name, e.g. `"RateLimitError"`, `"APIConnectionError"`. */
+  errorClass: string;
+  /** HTTP status code, when the failure reached the API at all. */
+  status?: number;
+  /** The API's own closed-vocabulary error type from its response envelope. */
+  errorType?: string;
+  /** Anthropic's request id, for correlating with their side out of band. */
+  requestId?: string;
+}
+
+export function classifyProviderError(
+  error: unknown,
+): ProviderFailureDiagnostics {
+  if (error instanceof Anthropic.APIError) {
+    return {
+      errorClass: error.constructor.name,
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+      ...(error.type ? { errorType: error.type } : {}),
+      ...(error.requestID ? { requestId: error.requestID } : {}),
+    };
+  }
+  if (error instanceof Error) {
+    return { errorClass: error.constructor.name };
+  }
+  return { errorClass: "unknown" };
 }
 
 /**
@@ -158,6 +210,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
     let plannedInputTokens = 0;
     let inputTokens = 0;
     let outputTokens = 0;
+    /** Set only on a provider-request failure — see `TurnDiagnostics.providerFailure`. */
+    let providerFailure: ProviderFailureDiagnostics | undefined;
 
     const report = (
       outcome: "completed" | "failed",
@@ -177,6 +231,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         latencyMs: Date.now() - startedAt,
         outcome,
         errorCode,
+        ...(providerFailure ? { providerFailure } : {}),
       });
 
     const fail = (error: SafeError): TurnResult => {
@@ -472,6 +527,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       } catch (error) {
         if (signal?.aborted) return interrupted();
         if (timeout.aborted) return fail(TIMED_OUT);
+        providerFailure = classifyProviderError(error);
         return fail(providerError(error));
       }
 

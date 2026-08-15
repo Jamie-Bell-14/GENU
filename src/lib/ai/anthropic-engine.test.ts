@@ -1,4 +1,4 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { AnthropicDiscoveryEngine } from "./anthropic-engine";
 import type { TurnHooks } from "./discovery-engine";
@@ -929,6 +929,101 @@ describe("AnthropicDiscoveryEngine", () => {
     // Internal addresses and provider wording stay server-side (§14.1).
     expect(JSON.stringify(failure)).not.toContain("ECONNREFUSED");
     expect(JSON.stringify(failure)).not.toContain("10.0.0.7");
+  });
+
+  /*
+    T11 entry-gate live smoke test (issue #14): a first live attempt failed
+    with `errorCode: "engine_unavailable"` and no way to tell a genuine
+    outage apart from a 400/404/422 request-shape incompatibility, since
+    `providerError` only special-cases `RateLimitError` and
+    `AuthenticationError` and collapses every other SDK error class into the
+    same generic code. These three tests are the regression coverage for
+    `classifyProviderError`: the safe classification (SDK class, HTTP
+    status, the API's own closed-vocabulary error type, request id) must
+    reach diagnostics, while the error's message and response body — which
+    can carry provider-authored text — must never appear anywhere in them.
+  */
+  it("records a safe provider-error classification in diagnostics, distinct from the generic errorCode", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const providerError = new Anthropic.InternalServerError(
+      503,
+      {
+        type: "overloaded_error",
+        message: "Overloaded: upstream host db-shard-7 is unreachable",
+      },
+      "503 Overloaded: upstream host db-shard-7 is unreachable",
+      new Headers({ "request-id": "req_test_abc123" }),
+      "overloaded_error",
+    );
+    const client = {
+      messages: {
+        stream() {
+          throw providerError;
+        },
+      },
+    } as unknown as Anthropic;
+    const engine = new AnthropicDiscoveryEngine({ client, onDiagnostics });
+    const turn = await engine.runTurn(input, hooks);
+
+    expect(turn.assistantText).toBe("");
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.outcome).toBe("failed");
+    // The generic user-facing code alone cannot distinguish this from an
+    // outage — that is exactly the gap this classification closes.
+    expect(diagnostics.errorCode).toBe("engine_unavailable");
+    expect(diagnostics.providerFailure).toEqual({
+      errorClass: "InternalServerError",
+      status: 503,
+      errorType: "overloaded_error",
+      requestId: "req_test_abc123",
+    });
+    // The response body and message are provider-authored text and must
+    // never reach diagnostics, only the safe classification of them.
+    expect(JSON.stringify(diagnostics)).not.toContain("Overloaded");
+    expect(JSON.stringify(diagnostics)).not.toContain("db-shard-7");
+  });
+
+  it("classifies a connection failure without a status, since none was ever returned", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const client = {
+      messages: {
+        stream() {
+          throw new Anthropic.APIConnectionError({
+            message: "Connection error.",
+          });
+        },
+      },
+    } as unknown as Anthropic;
+    const engine = new AnthropicDiscoveryEngine({ client, onDiagnostics });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    // No response ever arrived, so there is no status, type or request id to
+    // report — only the SDK's own class name for what kind of failure this was.
+    expect(diagnostics.providerFailure).toEqual({
+      errorClass: "APIConnectionError",
+    });
+  });
+
+  it("classifies a non-SDK error using its own class name, with no status, type or id to report", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const client = {
+      messages: {
+        stream() {
+          throw new Error("connect ECONNREFUSED 10.0.0.7:443");
+        },
+      },
+    } as unknown as Anthropic;
+    const engine = new AnthropicDiscoveryEngine({ client, onDiagnostics });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.providerFailure).toEqual({ errorClass: "Error" });
+    expect(JSON.stringify(diagnostics)).not.toContain("ECONNREFUSED");
+    expect(JSON.stringify(diagnostics)).not.toContain("10.0.0.7");
   });
 
   it("delimits the user's message as data rather than instruction", async () => {

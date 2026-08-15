@@ -1,9 +1,10 @@
 # Issue #14 — T11 Entry Gate: Live-Provider Smoke Test Evidence
 
-> Status: **EMPTY TEMPLATE.** Not run. No fields below are filled in — this file
-> exists only so the evidence issue #14 requires has a fixed, reviewable shape
-> to fill in once the controlled live-provider test is run in a secure
-> non-production deployment environment.
+> Status: **NOT PASSING.** One live attempt has been made and failed (see
+> "Attempt log" below). The "Run metadata" / "Acceptance criteria checklist"
+> sections remain unfilled — they exist only so the evidence issue #14
+> requires has a fixed, reviewable shape to fill in once a controlled
+> live-provider test genuinely passes.
 >
 > Do **not** record credentials, message bodies, or any user-sensitive content
 > in this file. Only the structured fields below.
@@ -31,6 +32,44 @@
    open — evidence and closure have to happen before that branch exists, not
    inside it. Only once #14 is closed does T11 implementation begin, on a
    fresh branch, in a separate PR.
+
+---
+
+## Attempt log
+
+Failed or inconclusive attempts are recorded here as they happen, and are
+never removed or overwritten by a later attempt — including a later passing
+one. This section is evidence of what was actually tried; the "Run metadata"
+/ "Acceptance criteria checklist" sections below remain reserved for a
+genuine **passing** run only, and stay unfilled until one occurs.
+
+### Attempt 1 — FAILED (Turn 1)
+
+- Result: **FAILED.** Not passing evidence. Does not satisfy #14.
+- Model: `claude-opus-5` (GENU's actual configured model, unmodified for
+  the test)
+- Prompt version: `discovery/2026-07-30.1`
+- Project: `b03c0633-cc1f-4f6e-9faa-2c07625154e7` (disposable)
+- Turn: `3c3ce9d9-0178-435e-9908-984edcee9850`
+- Observed UI outcome: "The response could not be completed. Your message
+  is saved — try again in a moment."
+- Sanitised diagnostics: `toolCalls: 0`, `toolNames: []`,
+  `requestedToolNames: []`, `providerRounds: 1`, `schemaRetries: 0`,
+  `inputTokens: 0`, `outputTokens: 0`, `latencyMs: 180`, `outcome: failed`,
+  `errorCode: engine_unavailable`
+- Cause: not yet determined at the time of this attempt. `errorCode:
+  engine_unavailable` was the only classification available —
+  `providerError()` collapsed every provider failure other than a rate
+  limit or an authentication failure into that single code, so a genuine
+  request-shape incompatibility (400/404/422), a provider-side outage
+  (5xx) and a connection failure were indistinguishable from each other.
+- Follow-up: added `TurnDiagnostics.providerFailure` (SDK error class, HTTP
+  status, the API's own closed-vocabulary error type, request id — never
+  provider-authored message/body text) so a rerun can identify which of
+  these this was. See commit history on this branch. Turn 1 will be rerun
+  once against the corrected Preview and the new diagnostic read to
+  identify the actual incompatibility, per Jamie's instruction not to
+  re-attempt repeatedly without a diagnosis in hand.
 
 ---
 

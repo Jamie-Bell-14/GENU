@@ -30,7 +30,11 @@ import {
   DISCOVERY_SYSTEM_PROMPT,
 } from "./prompts/discovery";
 import type { AddEvidence } from "./tools/discovery-tools";
-import { DISCOVERY_TOOLS, validateToolInput } from "./tools/discovery-tools";
+import {
+  DISCOVERY_TOOLS,
+  isDiscoveryToolName,
+  validateToolInput,
+} from "./tools/discovery-tools";
 import type { SafeError } from "./turn-events";
 
 /**
@@ -67,6 +71,29 @@ export interface TurnDiagnostics {
   turnId: string;
   /** Tool blocks actually executed, which is what the cap counts. */
   toolCalls: number;
+  /**
+   * The validated tool name for each executed block, in call order (T11
+   * entry-gate smoke test, issue #14). Always one of the closed set
+   * `validateToolInput` recognises — never the model's raw input, so this can
+   * never carry an argument or message body regardless of what the model sent.
+   *
+   * Populated only for blocks that actually ran, which excludes a real tool
+   * requested with arguments that failed schema validation — exactly the
+   * provider/schema incompatibility this gate exists to catch. See
+   * `requestedToolNames` for that case.
+   */
+  toolNames: string[];
+  /**
+   * The application-recognised tool name for every `tool_use` block a
+   * response contained this turn, in the order the provider sent them —
+   * recorded *before* argument validation, so a known tool named with
+   * malformed arguments still leaves a safe trace here even though it never
+   * reaches `toolNames` (T11 entry gate, issue #14). Checked against the same
+   * closed catalogue `validateToolInput` uses (`isDiscoveryToolName`), so an
+   * unrecognised name is never recorded and this can never carry an argument
+   * or message body regardless of what the model sent.
+   */
+  requestedToolNames: string[];
   /** Provider round-trips the turn made. */
   providerRounds: number;
   schemaRetries: number;
@@ -75,6 +102,58 @@ export interface TurnDiagnostics {
   latencyMs: number;
   outcome: "completed" | "failed";
   errorCode?: SafeError["code"];
+  /**
+   * Present only when `outcome` is `"failed"` and the failure came from a
+   * provider request (T11 entry-gate live smoke test, issue #14).
+   * `errorCode` alone collapses every non-rate-limit, non-auth provider
+   * failure into `"engine_unavailable"` — a 400, a 404, a 5xx and a
+   * connection failure are all indistinguishable from each other on that
+   * field. This adds the SDK's own safe classification of the exception so a
+   * real incompatibility can be told apart from a transient outage without
+   * ever touching provider-authored text. See `classifyProviderError`.
+   */
+  providerFailure?: ProviderFailureDiagnostics;
+}
+
+/**
+ * Safe, non-content classification of a provider request failure (T11
+ * entry-gate live smoke test, issue #14).
+ *
+ * Every error the Anthropic SDK throws for a failed request is an
+ * `Anthropic.APIError`, which exposes `status`, `requestID` and a
+ * closed-vocabulary `type` string from the API's own error envelope (e.g.
+ * `"overloaded_error"`, `"invalid_request_error"`) as distinct properties
+ * from `.message` and `.error` (the parsed response body). The latter two
+ * can carry provider-authored text and are never read here or forwarded
+ * anywhere (SECURITY_STANDARDS §14.1) — only the class name, status,
+ * request id and closed-vocabulary type are recorded.
+ */
+export interface ProviderFailureDiagnostics {
+  /** The SDK exception's own class name, e.g. `"RateLimitError"`, `"APIConnectionError"`. */
+  errorClass: string;
+  /** HTTP status code, when the failure reached the API at all. */
+  status?: number;
+  /** The API's own closed-vocabulary error type from its response envelope. */
+  errorType?: string;
+  /** Anthropic's request id, for correlating with their side out of band. */
+  requestId?: string;
+}
+
+export function classifyProviderError(
+  error: unknown,
+): ProviderFailureDiagnostics {
+  if (error instanceof Anthropic.APIError) {
+    return {
+      errorClass: error.constructor.name,
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+      ...(error.type ? { errorType: error.type } : {}),
+      ...(error.requestID ? { requestId: error.requestID } : {}),
+    };
+  }
+  if (error instanceof Error) {
+    return { errorClass: error.constructor.name };
+  }
+  return { errorClass: "unknown" };
 }
 
 /**
@@ -121,12 +200,18 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
   ): Promise<TurnResult> {
     const startedAt = Date.now();
     let toolCalls = 0;
+    /** Validated tool names only — see `TurnDiagnostics.toolNames`. */
+    const toolNames: string[] = [];
+    /** Every requested tool, pre-validation — see `TurnDiagnostics.requestedToolNames`. */
+    const requestedToolNames: string[] = [];
     let providerRounds = 0;
     let schemaRetries = 0;
     /** What the engine has committed to sending, checked before each request. */
     let plannedInputTokens = 0;
     let inputTokens = 0;
     let outputTokens = 0;
+    /** Set only on a provider-request failure — see `TurnDiagnostics.providerFailure`. */
+    let providerFailure: ProviderFailureDiagnostics | undefined;
 
     const report = (
       outcome: "completed" | "failed",
@@ -137,6 +222,8 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         model: DISCOVERY_MODEL,
         turnId: input.turnId,
         toolCalls,
+        toolNames: [...toolNames],
+        requestedToolNames: [...requestedToolNames],
         providerRounds,
         schemaRetries,
         inputTokens,
@@ -144,6 +231,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
         latencyMs: Date.now() - startedAt,
         outcome,
         errorCode,
+        ...(providerFailure ? { providerFailure } : {}),
       });
 
     const fail = (error: SafeError): TurnResult => {
@@ -439,6 +527,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       } catch (error) {
         if (signal?.aborted) return interrupted();
         if (timeout.aborted) return fail(TIMED_OUT);
+        providerFailure = classifyProviderError(error);
         return fail(providerError(error));
       }
 
@@ -484,6 +573,16 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       const toolUses = final.content.filter(
         (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
       );
+      /*
+        Recorded before argument validation and independent of whatever
+        happens to this round next (cap, retry, success) — this is what the
+        provider actually asked for, not what survived (T11 entry gate,
+        issue #14). `isDiscoveryToolName` is the same closed catalogue check
+        `validateToolInput` uses, so an unrecognised name is never recorded.
+      */
+      for (const use of toolUses) {
+        if (isDiscoveryToolName(use.name)) requestedToolNames.push(use.name);
+      }
 
       if (final.stop_reason !== "tool_use" || toolUses.length === 0) {
         /*
@@ -581,6 +680,7 @@ export class AnthropicDiscoveryEngine implements DiscoveryEngine {
       for (const { use, validation } of validations) {
         if (!validation.ok) continue;
         toolCalls += 1;
+        toolNames.push(validation.tool);
         let content: string = STAGED;
         if (validation.tool === "recommend_canvas_scene") {
           /*

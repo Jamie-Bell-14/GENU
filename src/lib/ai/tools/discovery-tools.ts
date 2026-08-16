@@ -314,6 +314,18 @@ export type DiscoveryToolName =
  * them together invites the assumption that passing the first means passing
  * the second. Every tool result is parsed with Zod regardless of what the
  * provider validated.
+ *
+ * Every tool here sets `strict: true`, which constrains input to a specific
+ * subset of JSON Schema — grammar-constrained sampling, not a validator that
+ * degrades gracefully on an unsupported keyword. `maxItems`, and `minItems`
+ * above 1, are outside that subset ("array constraints beyond minItems of 0
+ * or 1" are not supported) and reject the *entire* request with a 400 before
+ * any inference happens, not just the array in question (T11 entry-gate live
+ * smoke test, issue #14, Attempt 2 — confirmed against
+ * platform.claude.com/docs/en/build-with-claude/structured-outputs). Bounds
+ * on how many items a model may send are enforced by the Zod schema alone;
+ * see `discovery-tools.test.ts` for the regression check that keeps this
+ * file from drifting back into the unsupported subset.
  */
 export const DISCOVERY_TOOLS = [
   {
@@ -329,7 +341,6 @@ export const DISCOVERY_TOOLS = [
         updates: {
           type: "array",
           minItems: 1,
-          maxItems: 8,
           items: {
             type: "object",
             additionalProperties: false,
@@ -404,7 +415,6 @@ export const DISCOVERY_TOOLS = [
         whyItMatters: { type: "string" },
         alternatives: {
           type: "array",
-          maxItems: 5,
           items: { type: "string" },
         },
         importance: { type: "string", enum: [...ASSUMPTION_IMPORTANCE] },
@@ -431,7 +441,6 @@ export const DISCOVERY_TOOLS = [
         items: {
           type: "array",
           minItems: 1,
-          maxItems: 12,
           items: {
             type: "object",
             additionalProperties: false,
@@ -479,7 +488,6 @@ export const DISCOVERY_TOOLS = [
       properties: {
         actionIds: {
           type: "array",
-          maxItems: 3,
           items: { type: "string", enum: [...ACTION_IDS] },
         },
       },
@@ -514,12 +522,10 @@ export const DISCOVERY_TOOLS = [
         visibleObjectIds: {
           type: "array",
           minItems: 1,
-          maxItems: 60,
           items: { type: "string" },
         },
         visibleRelationshipIds: {
           type: "array",
-          maxItems: 200,
           items: { type: "string" },
         },
         emphasis: { type: "string", enum: [...EMPHASIS_STATES] },
@@ -586,6 +592,22 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): ToolValidation<T> {
     // nothing about the project: this string is sent back to the provider.
     issue: path ? `${path}: ${issue.message}` : issue.message,
   };
+}
+
+/**
+ * Whether `name` is one of the application's own tool identifiers.
+ *
+ * A closed check against `DISCOVERY_TOOLS` — the same list the provider is
+ * given — rather than a hardcoded copy of it, so the two cannot drift apart.
+ * Exists so a caller can safely record *which* tool a request named before
+ * (or instead of) validating its arguments: `validateToolInput` only returns
+ * a tool name on success, so a malformed-argument call for a real tool would
+ * otherwise leave no safe trace of which tool was ever asked for (T11 entry
+ * gate, issue #14 — the exact class of provider/schema incompatibility the
+ * live smoke test exists to catch).
+ */
+export function isDiscoveryToolName(name: string): name is DiscoveryToolName {
+  return DISCOVERY_TOOLS.some((tool) => tool.name === name);
 }
 
 /**

@@ -1,4 +1,4 @@
-import type Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { AnthropicDiscoveryEngine } from "./anthropic-engine";
 import type { TurnHooks } from "./discovery-engine";
@@ -931,6 +931,101 @@ describe("AnthropicDiscoveryEngine", () => {
     expect(JSON.stringify(failure)).not.toContain("10.0.0.7");
   });
 
+  /*
+    T11 entry-gate live smoke test (issue #14): a first live attempt failed
+    with `errorCode: "engine_unavailable"` and no way to tell a genuine
+    outage apart from a 400/404/422 request-shape incompatibility, since
+    `providerError` only special-cases `RateLimitError` and
+    `AuthenticationError` and collapses every other SDK error class into the
+    same generic code. These three tests are the regression coverage for
+    `classifyProviderError`: the safe classification (SDK class, HTTP
+    status, the API's own closed-vocabulary error type, request id) must
+    reach diagnostics, while the error's message and response body — which
+    can carry provider-authored text — must never appear anywhere in them.
+  */
+  it("records a safe provider-error classification in diagnostics, distinct from the generic errorCode", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const providerError = new Anthropic.InternalServerError(
+      503,
+      {
+        type: "overloaded_error",
+        message: "Overloaded: upstream host db-shard-7 is unreachable",
+      },
+      "503 Overloaded: upstream host db-shard-7 is unreachable",
+      new Headers({ "request-id": "req_test_abc123" }),
+      "overloaded_error",
+    );
+    const client = {
+      messages: {
+        stream() {
+          throw providerError;
+        },
+      },
+    } as unknown as Anthropic;
+    const engine = new AnthropicDiscoveryEngine({ client, onDiagnostics });
+    const turn = await engine.runTurn(input, hooks);
+
+    expect(turn.assistantText).toBe("");
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.outcome).toBe("failed");
+    // The generic user-facing code alone cannot distinguish this from an
+    // outage — that is exactly the gap this classification closes.
+    expect(diagnostics.errorCode).toBe("engine_unavailable");
+    expect(diagnostics.providerFailure).toEqual({
+      errorClass: "InternalServerError",
+      status: 503,
+      errorType: "overloaded_error",
+      requestId: "req_test_abc123",
+    });
+    // The response body and message are provider-authored text and must
+    // never reach diagnostics, only the safe classification of them.
+    expect(JSON.stringify(diagnostics)).not.toContain("Overloaded");
+    expect(JSON.stringify(diagnostics)).not.toContain("db-shard-7");
+  });
+
+  it("classifies a connection failure without a status, since none was ever returned", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const client = {
+      messages: {
+        stream() {
+          throw new Anthropic.APIConnectionError({
+            message: "Connection error.",
+          });
+        },
+      },
+    } as unknown as Anthropic;
+    const engine = new AnthropicDiscoveryEngine({ client, onDiagnostics });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    // No response ever arrived, so there is no status, type or request id to
+    // report — only the SDK's own class name for what kind of failure this was.
+    expect(diagnostics.providerFailure).toEqual({
+      errorClass: "APIConnectionError",
+    });
+  });
+
+  it("classifies a non-SDK error using its own class name, with no status, type or id to report", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const client = {
+      messages: {
+        stream() {
+          throw new Error("connect ECONNREFUSED 10.0.0.7:443");
+        },
+      },
+    } as unknown as Anthropic;
+    const engine = new AnthropicDiscoveryEngine({ client, onDiagnostics });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.providerFailure).toEqual({ errorClass: "Error" });
+    expect(JSON.stringify(diagnostics)).not.toContain("ECONNREFUSED");
+    expect(JSON.stringify(diagnostics)).not.toContain("10.0.0.7");
+  });
+
   it("delimits the user's message as data rather than instruction", async () => {
     const { hooks } = harness();
     const stub = stubClient([{ blocks: [text("ok")], stopReason: "end_turn" }]);
@@ -995,6 +1090,155 @@ describe("AnthropicDiscoveryEngine", () => {
     // Everything logged is a code, a count or an id (§12).
     expect(JSON.stringify(diagnostics)).not.toContain("Landlords");
     expect(JSON.stringify(diagnostics)).not.toContain("An answer");
+    expect(diagnostics.toolNames).toEqual([]);
+  });
+
+  /*
+    T11 entry-gate live smoke test (issue #14): validated tool names are safe
+    diagnostics — a closed, application-recognised vocabulary — but the
+    arguments a model sent for them never are. This turn stages a real
+    `update_project_model` call carrying a field value, and the assertion is
+    that the name survives into diagnostics while the value never does.
+  */
+  it("reports which validated tools ran without recording what they were called with", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const stub = stubClient([
+      {
+        blocks: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "update_project_model",
+            input: validUpdate,
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { blocks: [text("Recorded.")], stopReason: "end_turn" },
+    ]);
+    const engine = new AnthropicDiscoveryEngine({
+      client: stub.client,
+      onDiagnostics,
+    });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.toolNames).toEqual(["update_project_model"]);
+    expect(diagnostics.toolCalls).toBe(1);
+    // The argument value the model sent must never reach diagnostics, only
+    // the tool's own validated name.
+    expect(JSON.stringify(diagnostics)).not.toContain(
+      "Deposit disputes at tenancy end.",
+    );
+    expect(JSON.stringify(diagnostics)).not.toContain("primary_pain");
+  });
+
+  /*
+    T11 entry-gate review finding: `toolNames` only ever reflects blocks that
+    validated and ran, so a real tool requested with arguments the schema
+    rejects — a provider/schema incompatibility, exactly what this gate
+    exists to catch — left no trace of which tool was ever asked for.
+    `requestedToolNames` is recorded before validation, from the same closed
+    catalogue, so it survives this case while still never carrying arguments.
+  */
+  it("records the requested tool's name even when its arguments fail schema validation", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const stub = stubClient([
+      {
+        blocks: [
+          {
+            type: "tool_use",
+            id: "t1",
+            // Missing required fields — the same malformed shape the retry
+            // tests below use.
+            name: "update_project_model",
+            input: { updates: [{ area: "problem", approved: true }] },
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { blocks: [text("Recorded.")], stopReason: "end_turn" },
+    ]);
+    const engine = new AnthropicDiscoveryEngine({
+      client: stub.client,
+      onDiagnostics,
+    });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.requestedToolNames).toEqual(["update_project_model"]);
+    // Never validated, so it never ran — absent from the executed-only list.
+    expect(diagnostics.toolNames).toEqual([]);
+    // The malformed argument itself must never reach diagnostics.
+    expect(JSON.stringify(diagnostics)).not.toContain("approved");
+  });
+
+  it("never records an unrecognised tool name, requested or otherwise", async () => {
+    const onDiagnostics = vi.fn();
+    const { hooks } = harness();
+    const stub = stubClient([
+      {
+        blocks: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "delete_everything",
+            input: {},
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { blocks: [text("Recorded.")], stopReason: "end_turn" },
+    ]);
+    const engine = new AnthropicDiscoveryEngine({
+      client: stub.client,
+      onDiagnostics,
+    });
+    await engine.runTurn(input, hooks);
+
+    const diagnostics = onDiagnostics.mock.calls[0][0];
+    expect(diagnostics.requestedToolNames).toEqual([]);
+    expect(diagnostics.toolNames).toEqual([]);
+    expect(JSON.stringify(diagnostics)).not.toContain("delete_everything");
+  });
+});
+
+/*
+  T11 entry-gate live smoke test (issue #14): the gate exists to exercise the
+  actual GENU discovery model and request shape — `DISCOVERY_MODEL` and
+  `DISCOVERY_EFFORT` from `engine-config.ts` — not a substitute chosen for
+  the test itself. An earlier version of this branch pinned the live request
+  to Claude Haiku 4.5 for the smoke test; that was reverted, since the point
+  of #14 is to prove the model and prompt the product is actually designed
+  to run, with its own strict tool schemas, not a different one.
+*/
+describe("the live request shape matches the product's actual model configuration", () => {
+  it("sends the configured Opus 5 model identifier", async () => {
+    const { hooks } = harness();
+    const { stub, result } = run(
+      [{ blocks: [text("An answer.")], stopReason: "end_turn" }],
+      hooks,
+    );
+    await result;
+
+    const request = stub.requests[0] as { model: string };
+    expect(request.model).toBe("claude-opus-5");
+  });
+
+  it("sends the configured medium effort", async () => {
+    const { hooks } = harness();
+    const { stub, result } = run(
+      [{ blocks: [text("An answer.")], stopReason: "end_turn" }],
+      hooks,
+    );
+    await result;
+
+    const request = stub.requests[0] as {
+      output_config?: { effort?: string };
+    };
+    expect(request.output_config).toEqual({ effort: "medium" });
   });
 });
 

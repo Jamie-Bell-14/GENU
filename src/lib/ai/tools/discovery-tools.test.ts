@@ -378,3 +378,83 @@ describe("provider tool definitions", () => {
     });
   });
 });
+
+/*
+  T11 entry-gate live smoke test (issue #14), Attempt 2: a live request was
+  rejected with `providerFailure: { status: 400, errorType:
+  "invalid_request_error" }` before any tokens were processed. Confirmed
+  against Anthropic's documented strict-mode JSON Schema subset
+  (platform.claude.com/docs/en/build-with-claude/structured-outputs):
+  `maxItems`, and `minItems` above 1, are outside that subset and reject the
+  *entire* request, not just the array carrying them — as do numeric bounds
+  (minimum/maximum/multipleOf) and string-length bounds (minLength/maxLength).
+  Every `DISCOVERY_TOOLS` entry sets `strict: true`, so this walks each
+  provider-facing schema and guards against the unsupported subset drifting
+  back in — easy to do by analogy with the Zod schemas, which legitimately
+  use these keywords at the application boundary.
+*/
+describe("provider-facing schemas stay inside Anthropic's strict tool-use subset", () => {
+  const UNSUPPORTED_KEYS = [
+    "maxItems",
+    "minimum",
+    "maximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+  ] as const;
+
+  function walk(
+    schema: unknown,
+    path: string,
+    visit: (node: Record<string, unknown>, path: string) => void,
+  ): void {
+    if (schema === null || typeof schema !== "object") return;
+    const node = schema as Record<string, unknown>;
+    visit(node, path);
+    if (node.properties && typeof node.properties === "object") {
+      for (const [key, value] of Object.entries(
+        node.properties as Record<string, unknown>,
+      )) {
+        walk(value, `${path}.${key}`, visit);
+      }
+    }
+    if (node.items) walk(node.items, `${path}[]`, visit);
+  }
+
+  for (const tool of DISCOVERY_TOOLS) {
+    it(`${tool.name}: never uses a JSON Schema keyword outside the strict-mode subset`, () => {
+      walk(tool.input_schema, tool.name, (node, path) => {
+        for (const key of UNSUPPORTED_KEYS) {
+          expect(
+            node,
+            `${path} used unsupported keyword "${key}"`,
+          ).not.toHaveProperty(key);
+        }
+        if (typeof node.minItems === "number") {
+          expect(
+            node.minItems,
+            `${path}.minItems must be 0 or 1, not ${node.minItems}`,
+          ).toBeLessThanOrEqual(1);
+        }
+      });
+    });
+
+    it(`${tool.name}: every object schema sets additionalProperties: false and requires every property`, () => {
+      walk(tool.input_schema, tool.name, (node, path) => {
+        if (node.type !== "object") return;
+        expect(
+          node.additionalProperties,
+          `${path} must set additionalProperties: false`,
+        ).toBe(false);
+        const propertyNames = Object.keys(
+          (node.properties as Record<string, unknown>) ?? {},
+        ).sort();
+        const required = ((node.required as string[]) ?? []).slice().sort();
+        expect(
+          required,
+          `${path}: required must list exactly ${JSON.stringify(propertyNames)}`,
+        ).toEqual(propertyNames);
+      });
+    });
+  }
+});

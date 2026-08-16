@@ -54,6 +54,8 @@ declare
   v_object_ids uuid[];
   v_field_id uuid;
   v_field_value text;
+  v_field_origin public.field_origin;
+  v_field_support public.support_state;
 begin
   perform private.assert_project_actor(p_project_id, p_actor_id);
 
@@ -403,25 +405,37 @@ begin
       /*
         A non-strict `select ... into` leaves its targets at their *previous*
         value when zero rows match — it does not clear them. v_field_id and
-        v_field_value are declared once for the whole function and reused by
-        every item in every proposal, so without this reset a field that does
-        not exist yet would silently inherit an earlier item's real id/value
-        as its "before" instead of being recorded as null.
+        friends are declared once for the whole function and reused by every
+        item in every proposal, so without this reset a field that does not
+        exist yet would silently inherit an earlier item's real id/value/
+        origin/support as its "before" instead of being recorded as null.
       */
       v_field_id := null;
       v_field_value := null;
-      select id, value into v_field_id, v_field_value
+      v_field_origin := null;
+      v_field_support := null;
+      select id, value, origin, support
+      into v_field_id, v_field_value, v_field_origin, v_field_support
       from public.project_fields
       where project_id = p_project_id
         and area = (change_item ->> 'area')::public.project_area
         and key = change_item ->> 'key';
 
-      insert into public.change_items (proposal_id, area, key, before, after)
+      /*
+        `before_origin`/`before_support` snapshot the same real row `before`
+        does, at the same instant (T11 review round 2, P1) — so
+        `undo_change_proposal` can restore what an approval overwrites in
+        full, not only the text.
+      */
+      insert into public.change_items
+        (proposal_id, area, key, before, before_origin, before_support, after)
       values (
         v_proposal_id,
         (change_item ->> 'area')::public.project_area,
         change_item ->> 'key',
         v_field_value,
+        v_field_origin,
+        v_field_support,
         change_item ->> 'after'
       );
       v_areas := array_append(v_areas, change_item ->> 'area');
@@ -546,6 +560,11 @@ revoke all on function private.document_title_for_slug(public.document_slug) fro
     an item nobody is asking to apply. The same reasoning extends to partial
     approval: an excluded item's own drift never blocks the items that are
     actually being written.
+
+  Duplicate or unknown item ids in `p_decisions` cannot corrupt the result
+  (T11 review round 2, P0): both passes below iterate the proposal's own
+  `change_items`, never the caller's array, so `v_included_count` can only
+  ever reach as high as the proposal's real, distinct item count.
 */
 create or replace function public.apply_change_proposal(
   p_proposal_id uuid,
@@ -560,7 +579,8 @@ declare
   v_actor uuid := auth.uid();
   v_proposal record;
   v_item record;
-  v_decision jsonb;
+  v_decision_included boolean;
+  v_decision_after text;
   v_current text;
   v_after text;
   v_included_count integer := 0;
@@ -600,20 +620,40 @@ begin
   select count(*) into v_total_count
   from public.change_items where proposal_id = p_proposal_id;
 
+  /*
+    Both passes below loop over `change_items` — the proposal's own bounded,
+    already-distinct set of targets — rather than over `p_decisions` directly
+    (T11 review round 2, P0). Looping the caller's own array let a client
+    submit the same item_id more than once and inflate `v_included_count`
+    past a real distinct approval, double-write a document version for one
+    item, or otherwise manufacture approval state this function never
+    intended a malformed request to reach. `change_items` is the authority on
+    what a decision can possibly be about; `p_decisions` is only consulted
+    per item, and `order by ord desc limit 1` takes the *last* matching entry
+    if a duplicate item_id slipped through anyway (the request schema also
+    rejects duplicates before this function is ever called, so this is
+    defence in depth, not the primary guard).
+  */
+
   -- Staleness is checked only for items this decision includes — see the
   -- function's own header for why an excluded item's drift must never block
   -- a rejection or the rest of a partial approval.
-  for v_decision in select * from jsonb_array_elements(coalesce(p_decisions, '[]'::jsonb))
+  for v_item in
+    select * from public.change_items where proposal_id = p_proposal_id
   loop
-    if coalesce((v_decision ->> 'included')::boolean, false) is not true then
-      continue;
-    end if;
+    -- Same non-strict-select reset complete_turn's own comment explains:
+    -- these must be cleared every iteration, not left at the previous item's
+    -- decision when this item has none of its own.
+    v_decision_included := null;
+    v_decision_after := null;
+    select (d.value ->> 'included')::boolean, d.value ->> 'after'
+    into v_decision_included, v_decision_after
+    from jsonb_array_elements(coalesce(p_decisions, '[]'::jsonb)) with ordinality as d(value, ord)
+    where (d.value ->> 'item_id')::uuid = v_item.id
+    order by d.ord desc
+    limit 1;
 
-    select * into v_item
-    from public.change_items
-    where id = (v_decision ->> 'item_id')::uuid and proposal_id = p_proposal_id;
-
-    if not found then
+    if coalesce(v_decision_included, false) is not true then
       continue;
     end if;
 
@@ -629,28 +669,50 @@ begin
     end if;
   end loop;
 
-  for v_decision in select * from jsonb_array_elements(coalesce(p_decisions, '[]'::jsonb))
+  for v_item in
+    select * from public.change_items where proposal_id = p_proposal_id
   loop
-    select * into v_item
-    from public.change_items
-    where id = (v_decision ->> 'item_id')::uuid and proposal_id = p_proposal_id;
+    v_decision_included := null;
+    v_decision_after := null;
+    select (d.value ->> 'included')::boolean, d.value ->> 'after'
+    into v_decision_included, v_decision_after
+    from jsonb_array_elements(coalesce(p_decisions, '[]'::jsonb)) with ordinality as d(value, ord)
+    where (d.value ->> 'item_id')::uuid = v_item.id
+    order by d.ord desc
+    limit 1;
 
-    if not found then
-      continue;
-    end if;
-
-    if coalesce((v_decision ->> 'included')::boolean, false) is not true then
+    /*
+      An item with no decision, or an explicit `included: false`, is excluded
+      — silence is not consent (see the function's header) — and is recorded
+      as such rather than left at `change_items.included`'s creation default
+      of `true` (T11 review round 2, P1: a rejected or partially-approved
+      proposal's own item rows must say what actually happened, not merely
+      whatever they defaulted to when the proposal was staged).
+    */
+    if coalesce(v_decision_included, false) is not true then
       update public.change_items set included = false where id = v_item.id;
       continue;
     end if;
 
-    v_after := coalesce(v_decision ->> 'after', v_item.after);
+    v_after := coalesce(v_decision_after, v_item.after);
     v_included_count := v_included_count + 1;
 
     update public.change_items
     set included = true, after = v_after, applied_at = now()
     where id = v_item.id;
 
+    /*
+      Origin/support are set unconditionally on both branches of this upsert
+      (T11 review round 2, P1). Approving a connected-change proposal is the
+      one route by which an AI-originated value is allowed to supersede
+      protected wording — including a field the person themselves stated —
+      so the field's metadata must say what actually happened: an approved
+      AI-proposed value, never a stale claim that the text is still "user
+      stated" or still carries the support level earned by whatever it used
+      to say. `undo_change_proposal` restores the prior origin/support from
+      `before_origin`/`before_support`, snapshotted at proposal-creation
+      time, so this is not a one-way loss of provenance.
+    */
     insert into public.project_fields
       (project_id, area, key, label, value, origin, support)
     values (
@@ -658,7 +720,10 @@ begin
       'ai_inferred', 'hypothesis'
     )
     on conflict (project_id, area, key) do update
-    set value = excluded.value, updated_at = now();
+    set value = excluded.value,
+        origin = excluded.origin,
+        support = excluded.support,
+        updated_at = now();
 
     v_doc_slug := private.document_slug_for_area(v_item.area);
     insert into public.documents (project_id, slug, title)
@@ -744,7 +809,7 @@ revoke all on function public.apply_change_proposal(uuid, jsonb) from public;
 grant execute on function public.apply_change_proposal(uuid, jsonb) to authenticated;
 
 comment on function public.apply_change_proposal(uuid, jsonb) is
-  'Approves (fully or partially) or rejects a connected-change proposal, transactionally: field writes, a new document_versions row per affected document, a decisions row (unless rejected) and an audit_events row. Refuses with conflict rather than writing if the proposal is no longer proposed or any field it targets has changed since the proposal was created.';
+  'Approves (fully or partially) or rejects a connected-change proposal, transactionally: field writes (value, origin and support all overwritten to reflect the approved AI-proposed value), a new document_versions row per affected document, a decisions row (unless rejected) and an audit_events row. Every change_items row is set to included=true or false to match what was actually decided, never left at its creation default. Refuses with conflict rather than writing if the proposal is no longer proposed or any field an included item targets has changed since the proposal was created. Iterates change_items rather than the caller''s own decisions array, so a duplicate or unknown item id in the request cannot inflate the approval count.';
 
 -- ---------------------------------------------------------------------------
 -- Undoing an applied proposal
@@ -760,7 +825,9 @@ comment on function public.apply_change_proposal(uuid, jsonb) is
 
   A `before` of null means the proposal created the field; undo deletes it
   rather than writing back an empty value the field could never legitimately
-  hold.
+  hold. Otherwise it restores `before_origin`/`before_support` alongside
+  `before` (T11 review round 2, P1) — approval overwrites all three, so undo
+  restores all three.
 */
 create or replace function public.undo_change_proposal(
   p_proposal_id uuid
@@ -825,8 +892,18 @@ begin
       delete from public.project_fields
       where project_id = v_proposal.project_id and area = v_item.area and key = v_item.key;
     else
+      /*
+        Restores the field's prior origin/support along with its text (T11
+        review round 2, P1) — approval overwrote all three (see
+        apply_change_proposal), so undoing it has to restore all three, not
+        leave the field's provenance saying "approved AI-proposed value"
+        for wording that is once again exactly what it was beforehand.
+      */
       update public.project_fields
-      set value = v_item.before, updated_at = now()
+      set value = v_item.before,
+          origin = v_item.before_origin,
+          support = v_item.before_support,
+          updated_at = now()
       where project_id = v_proposal.project_id and area = v_item.area and key = v_item.key;
     end if;
 
@@ -881,4 +958,4 @@ revoke all on function public.undo_change_proposal(uuid) from public;
 grant execute on function public.undo_change_proposal(uuid) to authenticated;
 
 comment on function public.undo_change_proposal(uuid) is
-  'Reverts an approved or partially-approved proposal''s included items to their prior values, as new writes and new document versions - never rewriting the approval itself. Refuses with conflict if a field has changed again since the approval it would undo, or if the proposal is not in an undoable state.';
+  'Reverts an approved or partially-approved proposal''s included items to their prior value, origin and support, as new writes and new document versions - never rewriting the approval itself. Refuses with conflict if a field has changed again since the approval it would undo, or if the proposal is not in an undoable state.';

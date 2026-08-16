@@ -19,7 +19,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const DB_NAME = "ppm_change_proposals_rls_test";
 const USER_A = "11111111-1111-4111-8111-111111111111";
@@ -225,6 +225,26 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db?.end();
+});
+
+/*
+  Every test starts from an empty `project_fields` for both projects (T11
+  review round 2, CI finding): `before` is now snapshotted from real project
+  state, so a value an earlier test approved would otherwise leak into a
+  later test's "before" snapshot for the same (area, key) — both projects are
+  reused across the whole file rather than recreated per test. This is
+  "equivalent deterministic cleanup" to a fresh project per test, without the
+  cost of re-running every migration per test.
+*/
+beforeEach(async () => {
+  await impersonate(USER_A);
+  await db.query("delete from project_fields where project_id = $1", [
+    projectA,
+  ]);
+  await impersonate(USER_B);
+  await db.query("delete from project_fields where project_id = $1", [
+    projectB,
+  ]);
 });
 
 describe.skipIf(skip)("change_proposals / change_items", () => {
@@ -477,6 +497,48 @@ describe.skipIf(skip)("apply_change_proposal", () => {
     );
   });
 
+  it("approving replaces a pre-existing field's origin and support, never leaving stale provenance on the approved text", async () => {
+    await impersonate(USER_A);
+    await db.query(
+      `insert into project_fields (project_id, area, key, label, value, origin, support)
+       values ($1, 'mvp_scope', 'core_feature', 'core_feature', 'Manual tracking', 'user_stated', 'credible')`,
+      [projectA],
+    );
+
+    const turnId = await openRun(projectA);
+    const result = await completeTurnWithProposal(projectA, turnId, USER_A, [
+      {
+        area: "mvp_scope",
+        key: "core_feature",
+        before: null,
+        after: "Deposit dispute tracker",
+      },
+    ]);
+    const summary = result.proposals!["0"];
+    const items = await db.query(
+      "select id from change_items where proposal_id = $1",
+      [summary.id],
+    );
+    const itemId = items.rows[0].id as string;
+
+    await impersonate(USER_A);
+    await applyProposal(summary.id, [{ itemId, included: true }]);
+
+    const field = await db.query(
+      `select value, origin, support from project_fields
+       where project_id = $1 and area = 'mvp_scope' and key = 'core_feature'`,
+      [projectA],
+    );
+    // A person-approved AI proposal, not a value the person typed themselves
+    // — and its support reflects what was evidenced for this new wording
+    // (none yet), never the prior text's earned 'credible'.
+    expect(field.rows[0]).toMatchObject({
+      value: "Deposit dispute tracker",
+      origin: "ai_inferred",
+      support: "hypothesis",
+    });
+  });
+
   it("exclude-all is recorded as a rejection, not a silent no-op", async () => {
     const { proposalId } = await stageProposal({ title: "Exclude-all check" });
 
@@ -577,6 +639,85 @@ describe.skipIf(skip)("apply_change_proposal", () => {
     expect(status.rows[0].status).toBe("proposed");
   });
 
+  it("a duplicate item id in the decisions array cannot inflate the included count", async () => {
+    const { proposalId, customerItemId, valuePropItemId } = await stageProposal(
+      { title: "Duplicate decision check" },
+    );
+
+    // The request schema rejects this before it ever reaches the database
+    // (change-proposals.test.ts); this proves the RPC itself is also robust
+    // to a malformed or bypassing caller (T11 review round 2, P0).
+    await impersonate(USER_A);
+    const result = await applyProposal(proposalId, [
+      { itemId: customerItemId, included: true },
+      { itemId: customerItemId, included: true },
+      { itemId: valuePropItemId, included: false },
+    ]);
+    expect(result).toMatchObject({
+      outcome: "completed",
+      status: "partially_approved",
+      included: 1,
+      total: 2,
+    });
+
+    const documents = await db.query(
+      "select slug from documents where project_id = $1 and slug = 'target_customer'",
+      [projectA],
+    );
+    // One document_versions row, not two — the duplicate was never applied
+    // a second time.
+    const versions = await db.query(
+      `select count(*)::int as n from document_versions dv
+       join documents d on d.id = dv.document_id
+       where d.project_id = $1 and d.slug = 'target_customer'`,
+      [projectA],
+    );
+    expect(documents.rowCount).toBe(1);
+    expect(versions.rows[0].n).toBe(1);
+  });
+
+  it("an unknown item id in the decisions array is silently ignored, not applied or errored on", async () => {
+    const { proposalId, customerItemId, valuePropItemId } = await stageProposal(
+      { title: "Unknown item check" },
+    );
+
+    await impersonate(USER_A);
+    const result = await applyProposal(proposalId, [
+      { itemId: customerItemId, included: true },
+      { itemId: "99999999-0000-4000-8000-000000000099", included: true },
+      { itemId: valuePropItemId, included: false },
+    ]);
+    expect(result).toMatchObject({
+      outcome: "completed",
+      status: "partially_approved",
+      included: 1,
+      total: 2,
+    });
+  });
+
+  it("stores what was actually decided on every item, not the creation default, including for a full rejection", async () => {
+    const { proposalId, customerItemId, valuePropItemId } = await stageProposal(
+      { title: "Rejection item-flag check" },
+    );
+
+    // "Keep current direction" submits no decisions at all — silence is
+    // excluded, and that must be what change_items itself records, not the
+    // `included = true` every row is created with (T11 review round 2, P1).
+    await impersonate(USER_A);
+    const result = await applyProposal(proposalId, []);
+    expect(result).toMatchObject({ outcome: "completed", status: "rejected" });
+
+    const items = await db.query(
+      "select id, included from change_items where proposal_id = $1",
+      [proposalId],
+    );
+    expect(items.rows).toHaveLength(2);
+    expect(items.rows.every((row) => row.included === false)).toBe(true);
+    expect(items.rows.map((row) => row.id).sort()).toEqual(
+      [customerItemId, valuePropItemId].sort(),
+    );
+  });
+
   it("only the project's owner can apply; a foreign or unknown proposal answers uniformly", async () => {
     const { proposalId, customerItemId } = await stageProposal({
       title: "Ownership check",
@@ -643,6 +784,51 @@ describe.skipIf(skip)("undo_change_proposal", () => {
       [projectA],
     );
     expect(audit.rowCount).toBe(1);
+  });
+
+  it("restores the field's prior origin and support, not only its value", async () => {
+    await impersonate(USER_A);
+    await db.query(
+      `insert into project_fields (project_id, area, key, label, value, origin, support)
+       values ($1, 'mvp_scope', 'core_feature', 'core_feature', 'Manual tracking', 'user_stated', 'credible')`,
+      [projectA],
+    );
+
+    const turnId = await openRun(projectA);
+    const result = await completeTurnWithProposal(projectA, turnId, USER_A, [
+      {
+        area: "mvp_scope",
+        key: "core_feature",
+        before: null,
+        after: "Deposit dispute tracker",
+      },
+    ]);
+    const summary = result.proposals!["0"];
+    const items = await db.query(
+      "select id from change_items where proposal_id = $1",
+      [summary.id],
+    );
+    const itemId = items.rows[0].id as string;
+
+    await impersonate(USER_A);
+    await applyProposal(summary.id, [{ itemId, included: true }]);
+    await undoProposal(summary.id);
+
+    const field = await db.query(
+      `select value, origin, support from project_fields
+       where project_id = $1 and area = 'mvp_scope' and key = 'core_feature'`,
+      [projectA],
+    );
+    // Approval overwrote value, origin and support; undo has to restore all
+    // three — leaving "ai_inferred"/"hypothesis" behind would say the
+    // reverted text is still an unvalidated AI proposal, when it is once
+    // again exactly what the person themselves stated (T11 review round 2,
+    // P1).
+    expect(field.rows[0]).toMatchObject({
+      value: "Manual tracking",
+      origin: "user_stated",
+      support: "credible",
+    });
   });
 
   it("refuses — writing nothing — when the field has changed again since the approval it would undo", async () => {

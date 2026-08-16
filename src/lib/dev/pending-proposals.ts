@@ -1,4 +1,10 @@
-import type { ChangeProposalDetail } from "@/lib/services/change-proposals";
+import {
+  deleteDevField,
+  getDevField,
+  upsertDevField,
+  type DevFieldOrigin,
+  type DevFieldSupport,
+} from "./dev-project-fields";
 
 /**
  * In-memory connected-change proposal store for the development-only turn and
@@ -17,10 +23,35 @@ import type { ChangeProposalDetail } from "@/lib/services/change-proposals";
  * that an in-memory store with a single writer cannot honestly reproduce.
  * That contract is proved against Postgres in
  * supabase/tests/change-proposals-rls.test.ts; this store only has to prove
- * the review sheet and outcome mechanics an e2e run can actually observe.
+ * the review sheet, canvas and outcome mechanics an e2e run can actually
+ * observe.
  */
 
-type StoredProposal = ChangeProposalDetail;
+interface StoredProposalItem {
+  id: string;
+  area: string;
+  key: string;
+  before: string | null;
+  after: string;
+  included: boolean;
+  /**
+   * The field's own origin/support at the same moment `before` was
+   * snapshotted (mirrors `change_items.before_origin`/`before_support`) — so
+   * undo can restore what approval overwrites in full, not only the text.
+   */
+  beforeOrigin: DevFieldOrigin | null;
+  beforeSupport: DevFieldSupport | null;
+}
+
+interface StoredProposal {
+  id: string;
+  title: string;
+  rationale: string;
+  remainingUncertainty: string | null;
+  status:
+    "proposed" | "approved" | "partially_approved" | "rejected" | "undone";
+  items: StoredProposalItem[];
+}
 
 const proposals = new Map<string, StoredProposal>();
 
@@ -29,7 +60,6 @@ const MAX_PROPOSALS_TRACKED = 20;
 export interface NewProposalItemInput {
   area: string;
   key: string;
-  before: string | null;
   after: string;
 }
 
@@ -40,6 +70,12 @@ export interface NewProposalInput {
   items: NewProposalItemInput[];
 }
 
+/**
+ * `before`/`beforeOrigin`/`beforeSupport` are never taken from the caller
+ * (mirrors `complete_turn`: an engine's own claimed "current value" is not
+ * trusted) — each item's snapshot is read fresh from the dev field store at
+ * the instant the proposal is created.
+ */
 export function createDevProposal(input: NewProposalInput): StoredProposal {
   // Bounded so a long-running dev server cannot accumulate proposals without end.
   if (proposals.size >= MAX_PROPOSALS_TRACKED) {
@@ -52,17 +88,19 @@ export function createDevProposal(input: NewProposalInput): StoredProposal {
     rationale: input.rationale,
     remainingUncertainty: input.remainingUncertainty,
     status: "proposed",
-    items: input.items.map((item) => ({
-      id: crypto.randomUUID(),
-      area: item.area,
-      key: item.key,
-      before: item.before,
-      after: item.after,
-      // Matches `change_items.included`'s own default (T11 review round 1's
-      // fix to `complete_turn` stores the same default) — undecided reads as
-      // "as proposed" until the person changes their mind, not as excluded.
-      included: true,
-    })),
+    items: input.items.map((item) => {
+      const existing = getDevField(item.area, item.key);
+      return {
+        id: crypto.randomUUID(),
+        area: item.area,
+        key: item.key,
+        before: existing?.value ?? null,
+        after: item.after,
+        included: true,
+        beforeOrigin: existing?.origin ?? null,
+        beforeSupport: existing?.support ?? null,
+      };
+    }),
   };
   proposals.set(proposal.id, proposal);
   return proposal;
@@ -74,7 +112,8 @@ export function createDevProposal(input: NewProposalInput): StoredProposal {
  * real `StagedOperation` does, and this narrows it by hand rather than
  * trusting the shape (SECURITY_STANDARDS.md §11: model output is not
  * authorised by construction). Returns null on anything malformed rather than
- * fabricating a partial proposal.
+ * fabricating a partial proposal. A candidate's own `before` (if present) is
+ * read and discarded — see `createDevProposal`.
  */
 export function createDevProposalFromCandidate(
   candidate: unknown,
@@ -101,12 +140,7 @@ export function createDevProposalFromCandidate(
     ) {
       return null;
     }
-    items.push({
-      area: item.area,
-      key: item.key,
-      before: typeof item.before === "string" ? item.before : null,
-      after: item.after,
-    });
+    items.push({ area: item.area, key: item.key, after: item.after });
   }
 
   return createDevProposal({
@@ -141,7 +175,10 @@ export type DevDecideResult =
  * staleness check (see the module doc), otherwise the same rule: an item with
  * no matching decision is excluded, exclude-all is a rejection, and a
  * proposal already decided refuses with `already_decided` rather than
- * silently re-deciding it.
+ * silently re-deciding it. An included item's field is upserted with
+ * origin='ai_inferred'/support='hypothesis' (T11 review round 2, P1), the
+ * same values `apply_change_proposal` writes, so the dev canvas visibly
+ * reflects what the person actually approved.
  */
 export function decideDevProposal(
   proposalId: string,
@@ -169,6 +206,13 @@ export function decideDevProposal(
     if (item.included) {
       includedCount += 1;
       includedAreas.add(item.area);
+      upsertDevField({
+        area: item.area,
+        key: item.key,
+        value: item.after,
+        origin: "ai_inferred",
+        support: "hypothesis",
+      });
     }
   }
 
@@ -197,7 +241,10 @@ export type DevUndoResult =
 /**
  * The dev equivalent of `undo_change_proposal` — undoable only from a decided
  * (non-rejected) state, same as the real RPC; no "changed_since" conflict for
- * the same reason `decideDevProposal` has no staleness check.
+ * the same reason `decideDevProposal` has no staleness check. Restores each
+ * included item's field to its `before` value, origin and support — or
+ * deletes it, when `before` is null (the proposal created the field) — the
+ * same restore `undo_change_proposal` performs.
  */
 export function undoDevProposal(proposalId: string): DevUndoResult {
   const proposal = proposals.get(proposalId);
@@ -217,6 +264,20 @@ export function undoDevProposal(proposalId: string): DevUndoResult {
       proposal.items.filter((item) => item.included).map((item) => item.area),
     ),
   );
+  for (const item of proposal.items) {
+    if (!item.included) continue;
+    if (item.before === null || !item.beforeOrigin || !item.beforeSupport) {
+      deleteDevField(item.area, item.key);
+    } else {
+      upsertDevField({
+        area: item.area,
+        key: item.key,
+        value: item.before,
+        origin: item.beforeOrigin,
+        support: item.beforeSupport,
+      });
+    }
+  }
   proposal.status = "undone";
   return { outcome: "completed", areas };
 }

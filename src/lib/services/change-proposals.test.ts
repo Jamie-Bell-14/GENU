@@ -63,6 +63,31 @@ describe("ChangeProposalActionRequestSchema", () => {
     ).toBe(false);
   });
 
+  it("rejects a duplicate item id, which apply_change_proposal would otherwise let inflate the included count", () => {
+    expect(
+      ApplyChangeProposalRequestSchema.safeParse({
+        action: "approve",
+        decisions: [
+          { itemId: ITEM, included: true },
+          { itemId: ITEM, included: false },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects more decisions than a proposal can ever have items", () => {
+    const decisions = Array.from({ length: 13 }, (_, i) => ({
+      itemId: `dddddddd-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      included: true,
+    }));
+    expect(
+      ApplyChangeProposalRequestSchema.safeParse({
+        action: "approve",
+        decisions,
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts an undo action with no other fields", () => {
     expect(
       UndoChangeProposalRequestSchema.safeParse({ action: "undo" }).success,

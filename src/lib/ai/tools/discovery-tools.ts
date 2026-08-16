@@ -187,10 +187,11 @@ export const ProposeConnectedChangeSchema = z
             area: z.enum(PROJECT_AREAS),
             key: z.string().trim().min(1).max(64),
             /**
-             * What the model believes is there now. Recorded as the model's
-             * claim and re-derived from the database before anything is
-             * applied — a proposal built on a stale reading must not silently
-             * overwrite the current value.
+             * What the model believes is there now, for its own reasoning
+             * only — `complete_turn` discards this the moment the proposal
+             * is staged and snapshots the field's real value instead (T11
+             * review round 1, P1), so a proposal built on a stale reading
+             * can never silently overwrite the current value.
              */
             before: safeText(2_000),
             after: safeText(2_000),

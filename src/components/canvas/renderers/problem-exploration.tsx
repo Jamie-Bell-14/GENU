@@ -97,6 +97,7 @@ function BranchRow({
   member,
   pinned,
   dimmed,
+  onPath,
   operations,
 }: Readonly<{
   member: Branch["members"][number];
@@ -108,6 +109,15 @@ function BranchRow({
    * unreachable.
    */
   dimmed: boolean;
+  /**
+   * This row's own stored relationship connects two objects the proposal
+   * touches (T11 review round 2, P1) — the actual path from the change to
+   * an affected project area, never a synthetic one: a relationship earns
+   * this mark only because it is a real, committed edge between two
+   * genuinely affected objects, not because the renderer inferred a
+   * connection that was never stored.
+   */
+  onPath: boolean;
   operations: MapOperations;
 }>) {
   const { object, relationship } = member;
@@ -119,10 +129,18 @@ function BranchRow({
         className={cn(
           "border-edge-subtle hover:bg-surface-secondary flex items-start justify-between gap-2 border-b py-2 last:border-b-0",
           dimmed && "opacity-50",
+          onPath && "border-l-edge-focus border-l-2 pl-2",
         )}
       >
         <div className="min-w-0">
-          <p className="text-sm break-words">{object.title}</p>
+          <p className="text-sm break-words">
+            {object.title}
+            {onPath && (
+              <span className="text-fg-tertiary ml-2 text-xs font-medium tracking-wide uppercase">
+                Part of this change
+              </span>
+            )}
+          </p>
           <StatusLine object={object} relationship={relationship} />
         </div>
         <div className="flex shrink-0 gap-0.5">
@@ -164,6 +182,7 @@ export function ProblemExplorationRenderer({
   pinned,
   emphasis,
   affectedObjectIds = [],
+  affectedRelationshipIds = [],
   onReviewProposal,
   operations,
 }: Readonly<{
@@ -171,11 +190,19 @@ export function ProblemExplorationRenderer({
   pinned: string[];
   emphasis: "none" | "impact_review";
   /**
-   * The proposed change's own objects (T11) — the scene's `visibleObjectIds`
-   * when the model recommended this impact-review state, never inferred by
-   * the renderer itself. Ignored outside `emphasis === "impact_review"`.
+   * The proposed change's own objects (T11) — a pending proposal's actually-
+   * committed targets, never inferred by the renderer itself. Ignored
+   * outside `emphasis === "impact_review"`.
    */
   affectedObjectIds?: string[];
+  /**
+   * Stored relationships whose *both* endpoints are in `affectedObjectIds`
+   * (T11 review round 2, P1) — the real path from the proposed change to the
+   * project areas it touches, computed by the caller from genuine stored
+   * edges only. Empty when no such edge exists; the renderer never draws a
+   * path it cannot back with a real relationship.
+   */
+  affectedRelationshipIds?: string[];
   /**
    * Opens the focused before/after proposal review
    * (docs/ADAPTIVE_CANVAS_MVP.md §4.3: "links to the focused before/after
@@ -200,6 +227,8 @@ export function ProblemExplorationRenderer({
 
   const reviewingImpact = emphasis === "impact_review";
   const isAffected = (objectId: string) => affectedObjectIds.includes(objectId);
+  const isOnPath = (relationshipId: string) =>
+    affectedRelationshipIds.includes(relationshipId);
   const hasBranches = map.branches.length > 0;
 
   return (
@@ -255,6 +284,9 @@ export function ProblemExplorationRenderer({
                       member={member}
                       pinned={pinned.includes(member.object.id)}
                       dimmed={reviewingImpact && !isAffected(member.object.id)}
+                      onPath={
+                        reviewingImpact && isOnPath(member.relationship.id)
+                      }
                       operations={operations}
                     />
                   ))}

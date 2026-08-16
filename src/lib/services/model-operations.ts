@@ -203,10 +203,13 @@ interface EvidenceRow {
 }
 
 /**
- * A staged connected-change proposal (T11). Stores intent only — `before` is
- * the model's own claim of the field's current value, kept for display and
- * staleness-checking; `apply_change_proposal` re-reads the live value at
- * approval time rather than trusting this (docs/ARCHITECTURE.md §11).
+ * A staged connected-change proposal (T11). Stores intent only — the
+ * engine's own `before` here is its claim of the field's current value, sent
+ * so the model can reason about the change, but `complete_turn` discards it
+ * on arrival and snapshots the field's real value instead (T11 review round
+ * 1, P1). Neither the review sheet's "Currently" display nor
+ * `apply_change_proposal`'s later staleness check ever sees this engine
+ * claim (docs/ARCHITECTURE.md §11).
  */
 interface ProposalRow {
   slot: number;

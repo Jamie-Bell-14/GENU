@@ -66,6 +66,7 @@ export function ConversationPane({
                 ? () => void proposalActions.undo(proposalActions.outcome!)
                 : undefined
             }
+            onRetryRefresh={() => void proposalActions.retryRefresh()}
             onDismiss={proposalActions.dismissOutcome}
             pending={proposalActions.pending}
             error={proposalActions.error}

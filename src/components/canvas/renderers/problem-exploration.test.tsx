@@ -136,6 +136,57 @@ describe("ProblemExplorationRenderer impact-review emphasis (T11)", () => {
     expect(unrelatedRow?.firstElementChild?.className).toContain("opacity-50");
   });
 
+  it("marks a branch row on the affected path, and never marks one that is merely affected but unconnected by a stored relationship", () => {
+    render(
+      <ProblemExplorationRenderer
+        map={map}
+        pinned={[]}
+        emphasis="impact_review"
+        affectedObjectIds={[FOCAL, AFFECTED]}
+        affectedRelationshipIds={[relationships[0].id]}
+        operations={operations}
+      />,
+    );
+    const affectedRow = screen.getByText("Affected concept").closest("li");
+    const unrelatedRow = screen.getByText("Unrelated concept").closest("li");
+    expect(affectedRow?.firstElementChild?.className).toContain(
+      "border-l-edge-focus",
+    );
+    expect(
+      screen.getByText("Affected concept").parentElement,
+    ).toHaveTextContent("Part of this change");
+    expect(unrelatedRow?.firstElementChild?.className).not.toContain(
+      "border-l-edge-focus",
+    );
+  });
+
+  it("marks no path at all when affectedRelationshipIds is empty, rather than inventing one", () => {
+    render(
+      <ProblemExplorationRenderer
+        map={map}
+        pinned={[]}
+        emphasis="impact_review"
+        affectedObjectIds={[FOCAL, AFFECTED]}
+        operations={operations}
+      />,
+    );
+    expect(screen.queryByText("Part of this change")).not.toBeInTheDocument();
+  });
+
+  it("never marks the path outside impact-review, whatever affectedRelationshipIds says", () => {
+    render(
+      <ProblemExplorationRenderer
+        map={map}
+        pinned={[]}
+        emphasis="none"
+        affectedObjectIds={[FOCAL, AFFECTED]}
+        affectedRelationshipIds={[relationships[0].id]}
+        operations={operations}
+      />,
+    );
+    expect(screen.queryByText("Part of this change")).not.toBeInTheDocument();
+  });
+
   it("never dims anything outside impact-review, whatever affectedObjectIds says", () => {
     render(
       <ProblemExplorationRenderer

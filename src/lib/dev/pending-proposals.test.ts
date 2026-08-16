@@ -7,17 +7,24 @@ import {
   resetDevProposals,
   undoDevProposal,
 } from "./pending-proposals";
+import {
+  getDevField,
+  resetDevFields,
+  upsertDevField,
+} from "./dev-project-fields";
 
 /**
  * The in-memory connected-change proposal store behind the dev-only turn and
  * decision endpoints (T11) — the decision rules `apply_change_proposal` /
  * `undo_change_proposal` enforce in Postgres, minus staleness (a genuine
  * database property this single-writer store cannot reproduce; see the
- * module doc).
+ * module doc), plus the dev field store (`dev-project-fields.ts`) a decision
+ * actually mutates so the dev canvas has something real to show.
  */
 
 afterEach(() => {
   resetDevProposals();
+  resetDevFields();
 });
 
 function proposal() {
@@ -29,13 +36,11 @@ function proposal() {
       {
         area: "customer",
         key: "primary_customer",
-        before: "Letting agencies",
         after: "Letting agencies under 20 staff",
       },
       {
         area: "problem",
         key: "core_problem",
-        before: null,
         after: "Faster deposit disputes for small agencies",
       },
     ],
@@ -48,6 +53,29 @@ describe("createDevProposal", () => {
     expect(created.status).toBe("proposed");
     expect(created.items.every((item) => item.included)).toBe(true);
   });
+
+  it("snapshots before/beforeOrigin/beforeSupport from the real dev field store, never from the caller", () => {
+    upsertDevField({
+      area: "customer",
+      key: "primary_customer",
+      value: "Letting agencies",
+      origin: "user_stated",
+      support: "credible",
+    });
+    const created = proposal();
+    const customerItem = created.items.find(
+      (item) => item.area === "customer",
+    )!;
+    expect(customerItem.before).toBe("Letting agencies");
+    expect(customerItem.beforeOrigin).toBe("user_stated");
+    expect(customerItem.beforeSupport).toBe("credible");
+
+    // The other item's field does not exist yet.
+    const problemItem = created.items.find((item) => item.area === "problem")!;
+    expect(problemItem.before).toBeNull();
+    expect(problemItem.beforeOrigin).toBeNull();
+    expect(problemItem.beforeSupport).toBeNull();
+  });
 });
 
 describe("createDevProposalFromCandidate", () => {
@@ -56,11 +84,14 @@ describe("createDevProposalFromCandidate", () => {
       title: "T",
       rationale: "R",
       remainingUncertainty: "U",
-      items: [{ area: "customer", key: "k", before: "b", after: "a" }],
+      items: [{ area: "customer", key: "k", before: "ignored", after: "a" }],
     });
     expect(created).not.toBeNull();
     expect(created!.title).toBe("T");
     expect(created!.items).toHaveLength(1);
+    // The candidate's own "before" is discarded — never trusted from the
+    // engine, the same rule complete_turn applies.
+    expect(created!.items[0].before).toBeNull();
   });
 
   it("refuses a malformed candidate rather than fabricating a partial proposal", () => {
@@ -135,6 +166,20 @@ describe("decideDevProposal", () => {
   it("reports a proposal that does not exist as not_found", () => {
     expect(decideDevProposal("missing", [])).toEqual({ outcome: "not_found" });
   });
+
+  it("upserts the dev field store for every included item, with ai_inferred/hypothesis provenance", () => {
+    const created = proposal();
+    decideDevProposal(created.id, [
+      { itemId: created.items[0].id, included: true },
+      { itemId: created.items[1].id, included: false },
+    ]);
+    expect(getDevField("customer", "primary_customer")).toMatchObject({
+      value: "Letting agencies under 20 staff",
+      origin: "ai_inferred",
+      support: "hypothesis",
+    });
+    expect(getDevField("problem", "core_problem")).toBeNull();
+  });
 });
 
 describe("undoDevProposal", () => {
@@ -169,5 +214,31 @@ describe("undoDevProposal", () => {
       reason: "not_undoable",
       status: "proposed",
     });
+  });
+
+  it("deletes a field the proposal itself created, and restores one that pre-existed with its own origin/support", () => {
+    upsertDevField({
+      area: "customer",
+      key: "primary_customer",
+      value: "Letting agencies",
+      origin: "user_stated",
+      support: "credible",
+    });
+    const created = proposal();
+    decideDevProposal(
+      created.id,
+      created.items.map((item) => ({ itemId: item.id, included: true })),
+    );
+
+    undoDevProposal(created.id);
+
+    expect(getDevField("customer", "primary_customer")).toMatchObject({
+      value: "Letting agencies",
+      origin: "user_stated",
+      support: "credible",
+    });
+    // "problem" was created by this proposal (no field existed before) — undo
+    // deletes it rather than leaving an empty value behind.
+    expect(getDevField("problem", "core_problem")).toBeNull();
   });
 });

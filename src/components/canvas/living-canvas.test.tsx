@@ -551,6 +551,40 @@ describe("impact-review emphasis is driven by the pending proposal, never the sc
     expect(screen.getByText("Missing check-in evidence")).toBeInTheDocument();
   });
 
+  it("marks a real stored relationship between two affected objects as part of the change's own path (T11 review round 2, P1)", () => {
+    // PROBLEM is the focal object (always "affected" by construction here)
+    // and CAUSE is the proposal's own affected object — the relationship
+    // between them is a genuine stored edge, so it should be marked. The
+    // CONSEQUENCE branch is not part of the proposal at all and must not be.
+    renderCanvas({
+      pendingProposal: {
+        id: "proposal-1",
+        affectedObjectIds: [CAUSE, PROBLEM],
+      },
+      onReviewProposal: vi.fn(),
+    });
+    expect(
+      screen.getByText("Missing check-in evidence").parentElement,
+    ).toHaveTextContent("Part of this change");
+    expect(
+      screen.getByText("Deposit disputes follow").parentElement,
+    ).not.toHaveTextContent("Part of this change");
+  });
+
+  it("marks no path when the proposal's affected objects share no stored relationship, rather than inventing one", () => {
+    // CAUSE and CONSEQUENCE are both "affected", but nothing connects them
+    // to each other directly — only each to PROBLEM, which is not affected
+    // here — so there is genuinely no path to show.
+    renderCanvas({
+      pendingProposal: {
+        id: "proposal-1",
+        affectedObjectIds: [CAUSE, CONSEQUENCE],
+      },
+      onReviewProposal: vi.fn(),
+    });
+    expect(screen.queryByText("Part of this change")).not.toBeInTheDocument();
+  });
+
   it("leaves the canvas out of impact-review once there is nothing pending to review", () => {
     renderCanvas({ pendingProposal: null });
     expect(

@@ -51,7 +51,8 @@ export interface TurnRuntime {
   /** Clears a pending proposal once it has genuinely been decided (T11). */
   resolveProposal: (proposalId: string) => void;
   /** Re-reads project truth after a write that happened outside a turn (T11). */
-  refreshProjectModel: () => Promise<void>;
+  /** Resolves false when the re-read failed; the caller's own write still stands. */
+  refreshProjectModel: () => Promise<boolean>;
 }
 
 /**
@@ -181,6 +182,9 @@ export function useTurnRuntime({
   const directionsEndpoint = isDemo
     ? "/api/dev/directions"
     : `/api/projects/${projectId}/directions`;
+  const modelEndpoint = isDemo
+    ? "/api/dev/project-model"
+    : `/api/projects/${projectId}/model`;
 
   /**
    * Recovers a turn whose stream was lost.
@@ -580,13 +584,21 @@ export function useTurnRuntime({
    * approving or undoing a connected-change proposal (T11) — the same
    * "canvas shows what the application's own tables now hold" rule a running
    * turn's `project_model_updated` event already follows, reached from a
-   * client component instead of the server route.
+   * client component instead of the server route. Runs in the dev workspace
+   * too (T11 review round 2, P1): the demo project has its own mutable field
+   * store now (`dev-project-fields.ts`), so there is something real to
+   * re-read there as well.
+   *
+   * Returns whether the refresh actually landed, so a caller can tell the
+   * person their decision was recorded but the view could not refresh — the
+   * decision itself is never reversed on a failed refresh, but silently
+   * leaving the canvas stale with no indication is its own kind of dishonest
+   * (T11 review round 2, P1).
    */
-  const refreshProjectModel = useCallback(async () => {
-    if (isDemo) return;
+  const refreshProjectModel = useCallback(async (): Promise<boolean> => {
     try {
-      const response = await fetch(`/api/projects/${projectId}/model`);
-      if (!response.ok) return;
+      const response = await fetch(modelEndpoint);
+      if (!response.ok) return false;
       const payload = (await response.json()) as {
         objects: CanvasObject[];
         relationships: ProjectRelationship[];
@@ -599,12 +611,11 @@ export function useTurnRuntime({
           relationships: payload.relationships,
         },
       });
+      return true;
     } catch {
-      // The approve/undo call itself already reported its own outcome; a
-      // failed refresh only means the canvas keeps showing its last known
-      // state until the next turn or reload re-reads it.
+      return false;
     }
-  }, [isDemo, projectId]);
+  }, [modelEndpoint]);
 
   return {
     state,

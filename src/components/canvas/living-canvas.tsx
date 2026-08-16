@@ -366,6 +366,28 @@ export function LivingCanvas({
     [objects, relationships, scene, mapView, pendingProposal],
   );
 
+  /*
+    The real path from a pending proposal to what it affects (T11 review
+    round 2, P1): every *stored* relationship whose both endpoints are among
+    the proposal's own affected objects, never a path the renderer infers or
+    fabricates. Empty when no such relationship exists — the renderer then
+    highlights the affected objects alone, which is the honest thing to show
+    when the change genuinely touches unconnected project areas.
+  */
+  const affectedRelationshipIds = useMemo(() => {
+    if (!pendingProposal || pendingProposal.affectedObjectIds.length === 0) {
+      return [];
+    }
+    const affected = new Set(pendingProposal.affectedObjectIds);
+    return relationships
+      .filter(
+        (relationship) =>
+          affected.has(relationship.fromObjectId) &&
+          affected.has(relationship.toObjectId),
+      )
+      .map((relationship) => relationship.id);
+  }, [relationships, pendingProposal]);
+
   const showVisual = sceneState.view === "visual";
 
   return (
@@ -481,6 +503,7 @@ export function LivingCanvas({
               pendingProposal ? "impact_review" : (scene?.emphasis ?? "none")
             }
             affectedObjectIds={pendingProposal?.affectedObjectIds ?? []}
+            affectedRelationshipIds={affectedRelationshipIds}
             onReviewProposal={pendingProposal ? onReviewProposal : undefined}
             operations={{
               onFocus: focusOn,

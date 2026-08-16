@@ -40,8 +40,24 @@ export const ApplyChangeProposalRequestSchema = z
      * entry is treated as excluded by the database function — silence is not
      * consent — so the client is expected to submit a decision for every
      * item, not only the ones the person changed.
+     *
+     * Bounded to the same 12 items `ProposeConnectedChangeSchema` allows a
+     * proposal to have, and every itemId must be distinct (T11 review round
+     * 2, P0): `apply_change_proposal` itself now iterates the proposal's own
+     * `change_items` rather than trusting this array's shape, so a duplicate
+     * or oversized request can no longer corrupt the approval state machine
+     * even if it reached the database — this is the first line of defence,
+     * not the only one.
      */
-    decisions: z.array(ChangeDecisionSchema),
+    decisions: z
+      .array(ChangeDecisionSchema)
+      .max(12)
+      .refine(
+        (decisions) =>
+          new Set(decisions.map((decision) => decision.itemId)).size ===
+          decisions.length,
+        "Each item may appear at most once.",
+      ),
   })
   .strict();
 
@@ -83,7 +99,12 @@ export interface ChangeProposalItemDetail {
   id: string;
   area: string;
   key: string;
-  /** Null means the model believes this field does not exist yet. */
+  /**
+   * The field's real value at the moment the proposal was staged — read
+   * fresh from `project_fields` by `complete_turn`, never the model's own
+   * claim (T11 review round 1, P1). Null means the field genuinely did not
+   * exist yet at that instant.
+   */
   before: string | null;
   after: string;
   included: boolean;

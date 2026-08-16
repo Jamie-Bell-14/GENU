@@ -107,15 +107,26 @@ create table public.change_items (
   area public.project_area not null,
   key text not null check (char_length(key) between 1 and 64),
   /*
-    The model's own claim of the field's current value, at proposal-creation
-    time — not the field's actual live value, which is read fresh at approval
-    (docs/ARCHITECTURE.md §11: "before values are recomputed at approval time
-    to avoid staleness"). Null means the model believes the field does not
-    exist yet: approval then creates it, and undo deletes it rather than
-    setting it back to an empty value.
+    The field's real value, read fresh from `project_fields` by
+    `complete_turn` the instant this row is created — never the model's own
+    claim (T11 review round 1, P1; docs/ARCHITECTURE.md §11: "before values
+    are recomputed at approval time to avoid staleness"). `apply_change_proposal`
+    later re-reads the field again and compares against this column, so the
+    whole staleness check is a genuine database-to-database diff. Null means
+    the field did not exist yet at that instant: approval then creates it,
+    and undo deletes it rather than setting it back to an empty value.
   */
   before text check (before is null or char_length(before) <= 2000),
   after text not null check (char_length(after) <= 2000),
+  /*
+    The field's own origin/support at the same moment `before` was snapshotted
+    (T11 review round 2, P1) — so `undo_change_proposal` can restore what
+    approval overwrote in full, not only the text. Null exactly when `before`
+    is null (the field did not exist yet, so it has no prior provenance to
+    restore).
+  */
+  before_origin public.field_origin,
+  before_support public.support_state,
   /*
     What the person decided for this item. Defaults to included, matching
     "the proposal is not automatically applied" being about the *proposal*,

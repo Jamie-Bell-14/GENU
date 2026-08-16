@@ -27,6 +27,7 @@ export function ProposalOutcomeBanner({
   onReview,
   onUndo,
   onOpenDocument,
+  onRetryRefresh,
   onDismiss,
   pending,
   error,
@@ -37,6 +38,8 @@ export function ProposalOutcomeBanner({
   /** Absent once already undone, or for a rejection there is nothing to undo. */
   onUndo?: () => void;
   onOpenDocument?: () => void;
+  /** Present only while `outcome.viewRefreshed` is false (T11 review round 2, P1). */
+  onRetryRefresh?: () => void;
   onDismiss: () => void;
   pending: boolean;
   error: string | null;
@@ -65,6 +68,25 @@ export function ProposalOutcomeBanner({
       {error && (
         <p role="alert" className="text-state-error text-xs">
           {error}
+        </p>
+      )}
+
+      {!outcome.viewRefreshed && (
+        <p role="alert" className="text-state-warning text-xs">
+          This was recorded, but the canvas could not refresh to show it.{" "}
+          {onRetryRefresh ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="h-auto p-0 underline"
+              onClick={onRetryRefresh}
+              disabled={pending}
+            >
+              Retry
+            </Button>
+          ) : (
+            "Reload to see the current project."
+          )}
         </p>
       )}
 

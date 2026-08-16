@@ -24,6 +24,14 @@ export interface ProposalOutcome {
   title: string;
   status: "approved" | "partially_approved" | "rejected" | "undone";
   areas: string[];
+  /**
+   * Whether the canvas/structured view actually re-read project truth after
+   * this decision (T11 review round 2, P1). The decision itself already
+   * committed by the time this is false — a failed refresh is never reversed
+   * — but the person needs to be told the view they're looking at may be
+   * stale, rather than silently trusting a canvas that never updated.
+   */
+  viewRefreshed: boolean;
 }
 
 type Decision = { itemId: string; included: boolean; after?: string };
@@ -90,6 +98,8 @@ export interface ChangeProposalActions {
     decisions: Decision[],
   ) => Promise<boolean>;
   undo: (outcome: ProposalOutcome) => Promise<void>;
+  /** Retries a failed view refresh without re-deciding anything. */
+  retryRefresh: () => Promise<void>;
 }
 
 /**
@@ -105,7 +115,8 @@ function isDevProject(projectId: string): boolean {
 export function useChangeProposalActions(
   projectId: string,
   onResolved: (proposalId: string) => void,
-  onProjectChanged: () => void | Promise<void>,
+  /** Resolves false when the re-read failed; the decision itself still stands. */
+  onProjectChanged: () => boolean | Promise<boolean>,
 ): ChangeProposalActions {
   const isDemo = isDevProject(projectId);
   const supabase = useMemo(
@@ -153,14 +164,15 @@ export function useChangeProposalActions(
           setError(describeApproveFailure(payload));
           return false;
         }
+        onResolved(proposal.id);
+        const viewRefreshed = await onProjectChanged();
         setOutcome({
           proposalId: proposal.id,
           title: proposal.title,
           status: payload.status as ProposalOutcome["status"],
           areas: payload.areas ?? [],
+          viewRefreshed,
         });
-        onResolved(proposal.id);
-        await onProjectChanged();
         return true;
       } catch {
         setError(GENERIC_UNAVAILABLE);
@@ -222,13 +234,14 @@ export function useChangeProposalActions(
           setError(describeUndoFailure(payload));
           return;
         }
+        const viewRefreshed = await onProjectChanged();
         setOutcome({
           proposalId: target.proposalId,
           title: target.title,
           status: "undone",
           areas: payload.areas ?? [],
+          viewRefreshed,
         });
-        await onProjectChanged();
       } catch {
         setError(GENERIC_UNAVAILABLE);
       } finally {
@@ -245,6 +258,14 @@ export function useChangeProposalActions(
   const closeSheet = useCallback(() => setSheetProposalId(null), []);
   const dismissOutcome = useCallback(() => setOutcome(null), []);
 
+  const retryRefresh = useCallback(async () => {
+    const viewRefreshed = await onProjectChanged();
+    if (!viewRefreshed) return;
+    setOutcome((current) =>
+      current ? { ...current, viewRefreshed } : current,
+    );
+  }, [onProjectChanged]);
+
   return {
     sheetProposalId,
     outcome,
@@ -258,5 +279,6 @@ export function useChangeProposalActions(
     keepCurrent,
     submitReview,
     undo,
+    retryRefresh,
   };
 }

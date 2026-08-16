@@ -10,6 +10,7 @@ function outcome(overrides: Partial<ProposalOutcome> = {}): ProposalOutcome {
     title: "Narrow the target customer",
     status: "approved",
     areas: ["customer", "value_proposition"],
+    viewRefreshed: true,
     ...overrides,
   };
 }
@@ -88,5 +89,35 @@ describe("ProposalOutcomeBanner (T11, docs/review/06-DESIGN_REVIEW.md §6)", () 
     );
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the change was recorded but the view could not refresh, and offers a retry", async () => {
+    const user = userEvent.setup();
+    const onRetryRefresh = vi.fn();
+    render(
+      <ProposalOutcomeBanner
+        outcome={outcome({ viewRefreshed: false })}
+        onRetryRefresh={onRetryRefresh}
+        onDismiss={vi.fn()}
+        pending={false}
+        error={null}
+      />,
+    );
+    const notice = screen.getByRole("alert");
+    expect(notice).toHaveTextContent(/could not refresh/i);
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetryRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about a stale view once it has actually refreshed", () => {
+    render(
+      <ProposalOutcomeBanner
+        outcome={outcome({ viewRefreshed: true })}
+        onDismiss={vi.fn()}
+        pending={false}
+        error={null}
+      />,
+    );
+    expect(screen.queryByText(/could not refresh/i)).not.toBeInTheDocument();
   });
 });

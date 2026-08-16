@@ -207,44 +207,36 @@ beforeAll(async () => {
     "insert into auth.users (id, email) values ($1, 'a@example.com'), ($2, 'b@example.com')",
     [USER_A, USER_B],
   );
-
-  await impersonate(USER_A);
-  projectA = (
-    await db.query(
-      "insert into projects (owner_id, name) values (auth.uid(), 'A') returning id",
-    )
-  ).rows[0].id;
-
-  await impersonate(USER_B);
-  projectB = (
-    await db.query(
-      "insert into projects (owner_id, name) values (auth.uid(), 'B') returning id",
-    )
-  ).rows[0].id;
 }, 30_000);
 
 afterAll(async () => {
   await db?.end();
 });
 
+async function createProject(ownerId: string, name: string): Promise<string> {
+  await impersonate(ownerId);
+  const { rows } = await db.query(
+    "insert into projects (owner_id, name) values (auth.uid(), $1) returning id",
+    [name],
+  );
+  return rows[0].id;
+}
+
 /*
-  Every test starts from an empty `project_fields` for both projects (T11
-  review round 2, CI finding): `before` is now snapshotted from real project
-  state, so a value an earlier test approved would otherwise leak into a
-  later test's "before" snapshot for the same (area, key) — both projects are
-  reused across the whole file rather than recreated per test. This is
-  "equivalent deterministic cleanup" to a fresh project per test, without the
-  cost of re-running every migration per test.
+  A fresh project A and B before every test (T11 review round 3, P0). Round
+  2's fix only cleared `project_fields`, but `change_proposals`, `change_items`,
+  `documents`, `document_versions`, `decisions` and `audit_events` all
+  accumulate on whichever project a test uses — reusing one project for the
+  whole file let an earlier test's documents/versions/history leak into a
+  later test's assertions even once fields themselves were cleared (e.g. a
+  document already existing where a test expects none, or extra
+  document_versions rows from an earlier approval). Recreating both projects
+  before every test is a genuinely clean slate rather than an ever-growing
+  list of tables to remember to clear.
 */
 beforeEach(async () => {
-  await impersonate(USER_A);
-  await db.query("delete from project_fields where project_id = $1", [
-    projectA,
-  ]);
-  await impersonate(USER_B);
-  await db.query("delete from project_fields where project_id = $1", [
-    projectB,
-  ]);
+  projectA = await createProject(USER_A, "A");
+  projectB = await createProject(USER_B, "B");
 });
 
 describe.skipIf(skip)("change_proposals / change_items", () => {
@@ -495,6 +487,144 @@ describe.skipIf(skip)("apply_change_proposal", () => {
     expect(await fieldValue(projectA, "customer", "primary_customer")).toBe(
       "Independent agencies with 5-20 staff",
     );
+  });
+
+  it("writes one document version per affected document, containing every included item's section, not one version per item", async () => {
+    // Two distinct items in the *same* document (T11 review round 3, P1) —
+    // a document version is the document's whole ordered section set, so
+    // approving both must produce a single new version containing both
+    // resulting sections, not two successive versions each missing the
+    // other's.
+    const turnId = await openRun(projectA);
+    const result = await completeTurnWithProposal(
+      projectA,
+      turnId,
+      USER_A,
+      [
+        {
+          area: "mvp_scope",
+          key: "core_feature",
+          before: null,
+          after: "Deposit dispute case tracking.",
+        },
+        {
+          area: "mvp_scope",
+          key: "secondary_feature",
+          before: null,
+          after: "Automated reminder emails.",
+        },
+      ],
+      { title: "Two sections, one document" },
+    );
+    const summary = result.proposals!["0"];
+    const items = await db.query(
+      "select id, key from change_items where proposal_id = $1",
+      [summary.id],
+    );
+    const decisions = items.rows.map((row) => ({
+      itemId: row.id as string,
+      included: true,
+    }));
+
+    await impersonate(USER_A);
+    const applied = await applyProposal(summary.id, decisions);
+    expect(applied).toMatchObject({ outcome: "completed", status: "approved" });
+
+    const versions = await db.query(
+      `select dv.id, dv.content from document_versions dv
+       join documents d on d.id = dv.document_id
+       where d.project_id = $1 and d.slug = 'mvp_scope'`,
+      [projectA],
+    );
+    expect(versions.rowCount).toBe(1);
+
+    const document = await db.query(
+      "select current_version_id from documents where project_id = $1 and slug = 'mvp_scope'",
+      [projectA],
+    );
+    expect(document.rows[0].current_version_id).toBe(versions.rows[0].id);
+
+    const sections = versions.rows[0].content.sections as {
+      key: string;
+      text: string;
+      state: string;
+    }[];
+    expect(sections).toHaveLength(2);
+    const byKey = Object.fromEntries(sections.map((s) => [s.key, s]));
+    expect(byKey.core_feature).toMatchObject({
+      text: "Deposit dispute case tracking.",
+      state: "approved",
+    });
+    expect(byKey.secondary_feature).toMatchObject({
+      text: "Automated reminder emails.",
+      state: "approved",
+    });
+  });
+
+  it("a later proposal to the same document preserves the earlier version's untouched sections", async () => {
+    // First approval creates the document with one section.
+    const firstTurn = await openRun(projectA);
+    const first = await completeTurnWithProposal(projectA, firstTurn, USER_A, [
+      {
+        area: "mvp_scope",
+        key: "core_feature",
+        before: null,
+        after: "Deposit dispute case tracking.",
+      },
+    ]);
+    const firstItems = await db.query(
+      "select id from change_items where proposal_id = $1",
+      [first.proposals!["0"].id],
+    );
+    await impersonate(USER_A);
+    await applyProposal(first.proposals!["0"].id, [
+      { itemId: firstItems.rows[0].id, included: true },
+    ]);
+
+    // Second, unrelated proposal touches a *different* key in the same
+    // document — the new version must still contain the first section.
+    const secondTurn = await openRun(projectA);
+    const second = await completeTurnWithProposal(
+      projectA,
+      secondTurn,
+      USER_A,
+      [
+        {
+          area: "mvp_scope",
+          key: "secondary_feature",
+          before: null,
+          after: "Automated reminder emails.",
+        },
+      ],
+    );
+    const secondItems = await db.query(
+      "select id from change_items where proposal_id = $1",
+      [second.proposals!["0"].id],
+    );
+    await impersonate(USER_A);
+    await applyProposal(second.proposals!["0"].id, [
+      { itemId: secondItems.rows[0].id, included: true },
+    ]);
+
+    const versions = await db.query(
+      `select count(*)::int as n from document_versions dv
+       join documents d on d.id = dv.document_id
+       where d.project_id = $1 and d.slug = 'mvp_scope'`,
+      [projectA],
+    );
+    expect(versions.rows[0].n).toBe(2);
+
+    const current = await db.query(
+      `select dv.content from documents d
+       join document_versions dv on dv.id = d.current_version_id
+       where d.project_id = $1 and d.slug = 'mvp_scope'`,
+      [projectA],
+    );
+    const sections = current.rows[0].content.sections as { key: string }[];
+    expect(sections.map((s) => s.key).sort()).toEqual([
+      "core_feature",
+      "secondary_feature",
+    ]);
   });
 
   it("approving replaces a pre-existing field's origin and support, never leaving stale provenance on the approved text", async () => {

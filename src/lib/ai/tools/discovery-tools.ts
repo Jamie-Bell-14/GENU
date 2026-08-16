@@ -199,7 +199,20 @@ export const ProposeConnectedChangeSchema = z
           .strict(),
       )
       .min(1)
-      .max(12),
+      .max(12)
+      .refine(
+        (items) =>
+          new Set(items.map((item) => `${item.area}:${item.key}`)).size ===
+          items.length,
+        /*
+         * `change_items` has its own `unique (proposal_id, area, key)`
+         * constraint as defence in depth, but a duplicate target should
+         * fail at this schema/guided-retry boundary, not surface as a raw
+         * database constraint violation from inside complete_turn's
+         * transaction (T11 review round 3, P1).
+         */
+        "Each item must target a distinct area/key pair.",
+      ),
     /** What stays unresolved even if this is approved in full. */
     remainingUncertainty: safeText(500),
   })

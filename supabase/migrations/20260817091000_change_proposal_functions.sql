@@ -372,10 +372,9 @@ begin
     longer mislabel it. Second, `apply_change_proposal`'s staleness check
     becomes a true database-to-database comparison across two points in
     time, so it can never manufacture a false conflict out of a merely
-    inaccurate model description (docs/ARCHITECTURE.md §11: "before values
-    are recomputed at approval time"). A null `before` means the field does
-    not exist yet in this project, exactly as an approval or an undo already
-    interprets it.
+    inaccurate model description (docs/ARCHITECTURE.md §11). A null `before`
+    means the field does not exist yet in this project, exactly as an
+    approval or an undo already interprets it.
 
     `v_object_ids` collects the canvas-object id (`project_fields.id`) of
     every item that already exists as a field, so the client can highlight
@@ -545,13 +544,13 @@ revoke all on function private.document_title_for_slug(public.document_slug) fro
     exists here.
   - **Currency.** `status` must still be `proposed`, and every field an
     *included* item targets must still hold the value `complete_turn`
-    recorded as `before` when the proposal was staged (docs/ARCHITECTURE.md
-    §11's "before values are recomputed at approval time" — `before` itself
-    is already trusted database state by the time it reaches this function;
-    see the previous migration's header). Either failing returns `conflict`
-    rather than raising — a stale proposal is an expected state to reach,
-    not a fault — and nothing is written: not even the items that would
-    still have been current.
+    recorded as `before` when the proposal was staged — already trusted
+    database state by the time it reaches this function, so this is a
+    genuine database-to-database comparison, not a check against a model's
+    claim (docs/ARCHITECTURE.md §11; see the previous migration's header).
+    Either failing returns `conflict` rather than raising — a stale proposal
+    is an expected state to reach, not a fault — and nothing is written: not
+    even the items that would still have been current.
 
     Staleness is checked only for items the decision actually includes
     (T11 review round 1, P2): rejecting a proposal writes nothing to project
@@ -589,9 +588,28 @@ declare
   v_decision_id uuid;
   v_doc_slug public.document_slug;
   v_doc_id uuid;
+  v_current_version_id uuid;
   v_version_id uuid;
   v_correlation uuid := gen_random_uuid();
   v_areas text[] := array[]::text[];
+  /*
+    Sections an included item contributes, grouped by the *document* it
+    belongs to rather than written one row per item (T11 review round 3, P1):
+    `{ "<document_slug>": { "<item key>": {"text": ..., "state": "approved"} } }`.
+    A document version is a document's whole ordered section set, so a
+    proposal touching two keys in the same document must produce one new
+    version containing both — never two successive versions each missing the
+    other's section, with `current_version_id` left pointing at whichever
+    happened to apply last.
+  */
+  v_doc_sections jsonb := '{}'::jsonb;
+  v_doc_slug_text text;
+  v_existing_sections jsonb;
+  v_ordered_sections jsonb;
+  v_section jsonb;
+  v_section_key text;
+  v_new_value jsonb;
+  v_seen_keys text[];
 begin
   if v_actor is null then
     raise exception 'not_authenticated' using errcode = 'insufficient_privilege';
@@ -725,32 +743,103 @@ begin
         support = excluded.support,
         updated_at = now();
 
-    v_doc_slug := private.document_slug_for_area(v_item.area);
+    -- Collected per document, not written yet — see the post-loop below for
+    -- why (T11 review round 3, P1).
+    v_doc_slug_text := private.document_slug_for_area(v_item.area)::text;
+    v_doc_sections := jsonb_set(
+      v_doc_sections,
+      array[v_doc_slug_text, v_item.key],
+      jsonb_build_object('text', v_after, 'state', 'approved'),
+      true
+    );
+
+    v_areas := array_append(v_areas, v_item.area::text);
+  end loop;
+
+  /*
+    One new document_versions row per *affected document*, not per item (T11
+    review round 3, P1): a document version is the document's whole ordered
+    section set, so two included items targeting the same document must
+    produce a single new version containing both resulting sections, built on
+    top of whatever sections the document's current version already had —
+    never two successive versions each overwriting `current_version_id` with
+    a payload that omits the other's section.
+  */
+  for v_doc_slug_text in select jsonb_object_keys(v_doc_sections)
+  loop
+    v_doc_slug := v_doc_slug_text::public.document_slug;
+
     insert into public.documents (project_id, slug, title)
     values (
       v_proposal.project_id, v_doc_slug, private.document_title_for_slug(v_doc_slug)
     )
     on conflict (project_id, slug) do nothing;
 
-    select id into v_doc_id from public.documents
+    select id, current_version_id into v_doc_id, v_current_version_id
+    from public.documents
     where project_id = v_proposal.project_id and slug = v_doc_slug;
+
+    /*
+      A brand-new document has no current version, so `v_current_version_id`
+      is null and this select matches zero rows — a non-strict select-into
+      leaves its target unchanged on zero rows (the same gotcha fixed
+      elsewhere in this file), so this reset is required, not defensive
+      decoration: without it, a document processed earlier in this loop that
+      *did* have existing sections would leak them onto a later, genuinely
+      new document in the same proposal.
+    */
+    v_existing_sections := null;
+    select content -> 'sections' into v_existing_sections
+    from public.document_versions
+    where id = v_current_version_id;
+
+    -- Existing sections keep their position, updated in place if this
+    -- proposal touches them; sections this proposal introduces for the
+    -- first time are appended in the order they were collected above.
+    v_ordered_sections := '[]'::jsonb;
+    v_seen_keys := array[]::text[];
+    for v_section in select * from jsonb_array_elements(coalesce(v_existing_sections, '[]'::jsonb))
+    loop
+      v_section_key := v_section ->> 'key';
+      v_new_value := v_doc_sections -> v_doc_slug_text -> v_section_key;
+      v_ordered_sections := v_ordered_sections || jsonb_build_array(
+        case
+          when v_new_value is not null then
+            jsonb_build_object(
+              'key', v_section_key,
+              'text', v_new_value ->> 'text',
+              'state', v_new_value ->> 'state'
+            )
+          else v_section
+        end
+      );
+      v_seen_keys := array_append(v_seen_keys, v_section_key);
+    end loop;
+
+    for v_section_key in select jsonb_object_keys(v_doc_sections -> v_doc_slug_text)
+    loop
+      if not (v_section_key = any(v_seen_keys)) then
+        v_new_value := v_doc_sections -> v_doc_slug_text -> v_section_key;
+        v_ordered_sections := v_ordered_sections || jsonb_build_array(
+          jsonb_build_object(
+            'key', v_section_key,
+            'text', v_new_value ->> 'text',
+            'state', v_new_value ->> 'state'
+          )
+        );
+      end if;
+    end loop;
 
     insert into public.document_versions (document_id, content, origin, change_proposal_id)
     values (
       v_doc_id,
-      jsonb_build_object(
-        'sections', jsonb_build_array(
-          jsonb_build_object('key', v_item.key, 'text', v_after, 'state', 'approved')
-        )
-      ),
+      jsonb_build_object('sections', v_ordered_sections),
       'ai_approved',
       p_proposal_id
     )
     returning id into v_version_id;
 
     update public.documents set current_version_id = v_version_id where id = v_doc_id;
-
-    v_areas := array_append(v_areas, v_item.area::text);
   end loop;
 
   v_status := case
@@ -809,19 +898,22 @@ revoke all on function public.apply_change_proposal(uuid, jsonb) from public;
 grant execute on function public.apply_change_proposal(uuid, jsonb) to authenticated;
 
 comment on function public.apply_change_proposal(uuid, jsonb) is
-  'Approves (fully or partially) or rejects a connected-change proposal, transactionally: field writes (value, origin and support all overwritten to reflect the approved AI-proposed value), a new document_versions row per affected document, a decisions row (unless rejected) and an audit_events row. Every change_items row is set to included=true or false to match what was actually decided, never left at its creation default. Refuses with conflict rather than writing if the proposal is no longer proposed or any field an included item targets has changed since the proposal was created. Iterates change_items rather than the caller''s own decisions array, so a duplicate or unknown item id in the request cannot inflate the approval count.';
+  'Approves (fully or partially) or rejects a connected-change proposal, transactionally: field writes (value, origin and support all overwritten to reflect the approved AI-proposed value), one new document_versions row per affected document — its full ordered section set, existing sections preserved and updated in place, new ones appended, never one row per item — a decisions row (unless rejected) and an audit_events row. Every change_items row is set to included=true or false to match what was actually decided, never left at its creation default. Refuses with conflict rather than writing if the proposal is no longer proposed or any field an included item targets has changed since the proposal was created. Iterates change_items rather than the caller''s own decisions array, so a duplicate or unknown item id in the request cannot inflate the approval count.';
 
 -- ---------------------------------------------------------------------------
 -- Undoing an applied proposal
 -- ---------------------------------------------------------------------------
 
 /*
-  Restores each included item's `before` value as a *new* write and a new
-  document version — never rewriting the approval that happened. Refuses,
-  again as `conflict` rather than a partial undo, if any field this proposal
-  wrote has since changed again: undoing must not silently discard an edit
-  that landed after the approval it is undoing (VERTICAL_SLICE_TASKS.md T11
-  edge case: "undo after further edits").
+  Restores each included item's `before` value as a *new* write, and writes
+  one new document version per affected document — its full ordered section
+  set, not one row per item (T11 review round 3, P1; see
+  apply_change_proposal for the same reasoning) — never rewriting the
+  approval that happened. Refuses, again as `conflict` rather than a partial
+  undo, if any field this proposal wrote has since changed again: undoing
+  must not silently discard an edit that landed after the approval it is
+  undoing (VERTICAL_SLICE_TASKS.md T11 edge case: "undo after further
+  edits").
 
   A `before` of null means the proposal created the field; undo deletes it
   rather than writing back an empty value the field could never legitimately
@@ -844,9 +936,21 @@ declare
   v_current text;
   v_doc_slug public.document_slug;
   v_doc_id uuid;
+  v_current_version_id uuid;
   v_version_id uuid;
   v_correlation uuid := gen_random_uuid();
   v_areas text[] := array[]::text[];
+  -- Same document-scoped accumulation apply_change_proposal uses, and for
+  -- the same reason (T11 review round 3, P1): one new version per affected
+  -- document, never one per item.
+  v_doc_sections jsonb := '{}'::jsonb;
+  v_doc_slug_text text;
+  v_existing_sections jsonb;
+  v_ordered_sections jsonb;
+  v_section jsonb;
+  v_section_key text;
+  v_new_value jsonb;
+  v_seen_keys text[];
 begin
   if v_actor is null then
     raise exception 'not_authenticated' using errcode = 'insufficient_privilege';
@@ -907,32 +1011,92 @@ begin
       where project_id = v_proposal.project_id and area = v_item.area and key = v_item.key;
     end if;
 
-    v_doc_slug := private.document_slug_for_area(v_item.area);
-    select id into v_doc_id from public.documents
-    where project_id = v_proposal.project_id and slug = v_doc_slug;
-
-    if v_doc_id is not null then
-      insert into public.document_versions (document_id, content, origin, change_proposal_id)
-      values (
-        v_doc_id,
-        jsonb_build_object(
-          'sections', jsonb_build_array(
-            jsonb_build_object(
-              'key', v_item.key,
-              'text', coalesce(v_item.before, ''),
-              'state', case when v_item.before is null then 'unvalidated' else 'working_draft' end
-            )
-          )
-        ),
-        'ai_approved',
-        p_proposal_id
-      )
-      returning id into v_version_id;
-
-      update public.documents set current_version_id = v_version_id where id = v_doc_id;
-    end if;
+    -- Collected per document, written once below — see apply_change_proposal
+    -- for why (T11 review round 3, P1). A document that was never created
+    -- (this proposal's own approval had no affected-document row for it,
+    -- which cannot happen for an included item, but kept as a defensive
+    -- no-op) simply contributes nothing further below.
+    v_doc_slug_text := private.document_slug_for_area(v_item.area)::text;
+    v_doc_sections := jsonb_set(
+      v_doc_sections,
+      array[v_doc_slug_text, v_item.key],
+      jsonb_build_object(
+        'text', coalesce(v_item.before, ''),
+        'state', case when v_item.before is null then 'unvalidated' else 'working_draft' end
+      ),
+      true
+    );
 
     v_areas := array_append(v_areas, v_item.area::text);
+  end loop;
+
+  for v_doc_slug_text in select jsonb_object_keys(v_doc_sections)
+  loop
+    v_doc_slug := v_doc_slug_text::public.document_slug;
+
+    -- Reset before each select-into below — see apply_change_proposal's own
+    -- comment on the same non-strict-select gotcha; a document/version
+    -- lookup matching zero rows must never inherit the previous document's
+    -- values.
+    v_doc_id := null;
+    v_current_version_id := null;
+    select id, current_version_id into v_doc_id, v_current_version_id
+    from public.documents
+    where project_id = v_proposal.project_id and slug = v_doc_slug;
+
+    if v_doc_id is null then
+      continue;
+    end if;
+
+    v_existing_sections := null;
+    select content -> 'sections' into v_existing_sections
+    from public.document_versions
+    where id = v_current_version_id;
+
+    v_ordered_sections := '[]'::jsonb;
+    v_seen_keys := array[]::text[];
+    for v_section in select * from jsonb_array_elements(coalesce(v_existing_sections, '[]'::jsonb))
+    loop
+      v_section_key := v_section ->> 'key';
+      v_new_value := v_doc_sections -> v_doc_slug_text -> v_section_key;
+      v_ordered_sections := v_ordered_sections || jsonb_build_array(
+        case
+          when v_new_value is not null then
+            jsonb_build_object(
+              'key', v_section_key,
+              'text', v_new_value ->> 'text',
+              'state', v_new_value ->> 'state'
+            )
+          else v_section
+        end
+      );
+      v_seen_keys := array_append(v_seen_keys, v_section_key);
+    end loop;
+
+    for v_section_key in select jsonb_object_keys(v_doc_sections -> v_doc_slug_text)
+    loop
+      if not (v_section_key = any(v_seen_keys)) then
+        v_new_value := v_doc_sections -> v_doc_slug_text -> v_section_key;
+        v_ordered_sections := v_ordered_sections || jsonb_build_array(
+          jsonb_build_object(
+            'key', v_section_key,
+            'text', v_new_value ->> 'text',
+            'state', v_new_value ->> 'state'
+          )
+        );
+      end if;
+    end loop;
+
+    insert into public.document_versions (document_id, content, origin, change_proposal_id)
+    values (
+      v_doc_id,
+      jsonb_build_object('sections', v_ordered_sections),
+      'ai_approved',
+      p_proposal_id
+    )
+    returning id into v_version_id;
+
+    update public.documents set current_version_id = v_version_id where id = v_doc_id;
   end loop;
 
   update public.change_proposals
@@ -958,4 +1122,4 @@ revoke all on function public.undo_change_proposal(uuid) from public;
 grant execute on function public.undo_change_proposal(uuid) to authenticated;
 
 comment on function public.undo_change_proposal(uuid) is
-  'Reverts an approved or partially-approved proposal''s included items to their prior value, origin and support, as new writes and new document versions - never rewriting the approval itself. Refuses with conflict if a field has changed again since the approval it would undo, or if the proposal is not in an undoable state.';
+  'Reverts an approved or partially-approved proposal''s included items to their prior value, origin and support, as new writes and one new document version per affected document (its full ordered section set, never one row per item) - never rewriting the approval itself. Refuses with conflict if a field has changed again since the approval it would undo, or if the proposal is not in an undoable state.';

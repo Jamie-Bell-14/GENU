@@ -109,8 +109,7 @@ create table public.change_items (
   /*
     The field's real value, read fresh from `project_fields` by
     `complete_turn` the instant this row is created — never the model's own
-    claim (T11 review round 1, P1; docs/ARCHITECTURE.md §11: "before values
-    are recomputed at approval time to avoid staleness"). `apply_change_proposal`
+    claim (T11 review round 1, P1; docs/ARCHITECTURE.md §11). `apply_change_proposal`
     later re-reads the field again and compares against this column, so the
     whole staleness check is a genuine database-to-database diff. Null means
     the field did not exist yet at that instant: approval then creates it,

@@ -220,6 +220,53 @@ describe("structured tool input", () => {
     // name the field that was wrong and nothing else.
     expect(result.ok ? "" : result.issue).not.toContain(secret);
   });
+
+  describe("propose_connected_change (T11 review round 3, P1)", () => {
+    const validProposal = {
+      title: "Narrow the target customer",
+      rationale: "The evidence points at smaller agencies.",
+      items: [
+        {
+          area: "customer",
+          key: "primary_customer",
+          before: "Letting agencies",
+          after: "Letting agencies under 20 staff",
+        },
+      ],
+      remainingUncertainty: "No pricing evidence yet.",
+    };
+
+    it("accepts a well-formed proposal", () => {
+      expect(
+        validateToolInput("propose_connected_change", validProposal).ok,
+      ).toBe(true);
+    });
+
+    it("refuses two items that target the same area/key", () => {
+      // change_items has its own unique (proposal_id, area, key) constraint
+      // as defence in depth, but a duplicate target must fail here — at the
+      // schema/guided-retry boundary — rather than surface as a raw database
+      // constraint violation from inside complete_turn's transaction.
+      const result = validateToolInput("propose_connected_change", {
+        ...validProposal,
+        items: [validProposal.items[0], { ...validProposal.items[0] }],
+      });
+      expect(result.ok).toBe(false);
+    });
+
+    it("allows the same key in a different area, and a different key in the same area", () => {
+      expect(
+        validateToolInput("propose_connected_change", {
+          ...validProposal,
+          items: [
+            validProposal.items[0],
+            { ...validProposal.items[0], area: "problem" },
+            { ...validProposal.items[0], key: "secondary_customer" },
+          ],
+        }).ok,
+      ).toBe(true);
+    });
+  });
 });
 
 describe("provider tool definitions", () => {

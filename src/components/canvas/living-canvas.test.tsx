@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { CanvasScene } from "@/lib/canvas/scene";
@@ -467,5 +467,94 @@ describe("recommended scenes", () => {
         "Missing check-in evidence",
       );
     });
+  });
+});
+
+describe("impact-review emphasis is driven by the pending proposal, never the scene (T11 review round 1, P1)", () => {
+  it("enters impact-review deterministically, with no scene recommended at all", () => {
+    renderCanvas({
+      pendingProposal: { id: "proposal-1", affectedObjectIds: [CAUSE] },
+      onReviewProposal: vi.fn(),
+    });
+    expect(screen.getByText(/Reviewing a proposed change/)).toBeInTheDocument();
+    // CAUSE is affected — full prominence; CONSEQUENCE is not — dimmed.
+    const affectedRow = screen
+      .getByText("Missing check-in evidence")
+      .closest("li");
+    const unrelatedRow = screen
+      .getByText("Deposit disputes follow")
+      .closest("li");
+    expect(affectedRow?.firstElementChild?.className).not.toContain(
+      "opacity-50",
+    );
+    expect(unrelatedRow?.firstElementChild?.className).toContain("opacity-50");
+  });
+
+  it("ignores the scene's own visibleObjectIds entirely — the proposal names its own affected objects", () => {
+    // The scene's own visibility list includes CONSEQUENCE but deliberately
+    // omits CAUSE, and is not itself in impact-review — if the renderer ever
+    // fell back to `scene.visibleObjectIds` for "affected", CONSEQUENCE
+    // would read as affected and CAUSE would not, the opposite of what the
+    // proposal actually says. Both relationships stay visible so both
+    // branches still lay out — this is about which one gets dimmed, not
+    // which one appears at all (a separate, pre-existing scene concern).
+    const unrelatedScene: CanvasScene = {
+      renderer: "problem_exploration",
+      purpose: "explore_problem",
+      focalObjectId: PROBLEM,
+      visibleObjectIds: [PROBLEM, CONSEQUENCE],
+      visibleRelationshipIds: [
+        "bbbbbbbb-0000-4000-8000-000000000001",
+        "bbbbbbbb-0000-4000-8000-000000000002",
+      ],
+      emphasis: "none",
+      reason: "Showing the problem currently being explored.",
+      transition: "preserve",
+    };
+    renderCanvas({
+      initialScene: unrelatedScene,
+      pendingProposal: { id: "proposal-1", affectedObjectIds: [CAUSE] },
+      onReviewProposal: vi.fn(),
+    });
+    const affectedRow = screen
+      .getByText("Missing check-in evidence")
+      .closest("li");
+    const unrelatedRow = screen
+      .getByText("Deposit disputes follow")
+      .closest("li");
+    expect(affectedRow?.firstElementChild?.className).not.toContain(
+      "opacity-50",
+    );
+    expect(unrelatedRow?.firstElementChild?.className).toContain("opacity-50");
+  });
+
+  it("shows the path to an affected object even when the last scene declared its relationship not visible", () => {
+    // docs/ADAPTIVE_CANVAS_MVP.md §4.3: impact review must show the path
+    // from the change to affected project areas — deterministically, not
+    // only when the model's last recommendation happened to include it.
+    // Here the scene explicitly excludes CAUSE's own relationship.
+    const narrowScene: CanvasScene = {
+      renderer: "problem_exploration",
+      purpose: "explore_problem",
+      focalObjectId: PROBLEM,
+      visibleObjectIds: [PROBLEM, CONSEQUENCE],
+      visibleRelationshipIds: ["bbbbbbbb-0000-4000-8000-000000000002"],
+      emphasis: "none",
+      reason: "Showing the problem currently being explored.",
+      transition: "preserve",
+    };
+    renderCanvas({
+      initialScene: narrowScene,
+      pendingProposal: { id: "proposal-1", affectedObjectIds: [CAUSE] },
+      onReviewProposal: vi.fn(),
+    });
+    expect(screen.getByText("Missing check-in evidence")).toBeInTheDocument();
+  });
+
+  it("leaves the canvas out of impact-review once there is nothing pending to review", () => {
+    renderCanvas({ pendingProposal: null });
+    expect(
+      screen.queryByText(/Reviewing a proposed change/),
+    ).not.toBeInTheDocument();
   });
 });

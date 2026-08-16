@@ -151,6 +151,7 @@ export async function finishTurn(
         title: outcome.proposal.title,
         rationale: outcome.proposal.rationale,
         affectedAreas: outcome.proposal.areas,
+        affectedObjectIds: outcome.proposal.objectIds,
       });
     }
   }

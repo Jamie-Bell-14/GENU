@@ -92,23 +92,42 @@ export interface ChangeProposalActions {
   undo: (outcome: ProposalOutcome) => Promise<void>;
 }
 
+/**
+ * The demo project has no database at all (see `src/lib/dev/pending-proposals.ts`),
+ * so every request this hook makes for it goes to the `/api/dev/*` mirror
+ * instead of Supabase — the same switch `useTurnRuntime` already makes for
+ * the turn endpoint itself.
+ */
+function isDevProject(projectId: string): boolean {
+  return projectId === "demo";
+}
+
 export function useChangeProposalActions(
   projectId: string,
   onResolved: (proposalId: string) => void,
   onProjectChanged: () => void | Promise<void>,
 ): ChangeProposalActions {
-  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+  const isDemo = isDevProject(projectId);
+  const supabase = useMemo(
+    () => (isDemo ? null : createSupabaseBrowserClient()),
+    [isDemo],
+  );
   const [sheetProposalId, setSheetProposalId] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<ProposalOutcome | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadDetail = useCallback(
-    (proposalId: string) => {
-      if (!supabase) return Promise.resolve(null);
+    async (proposalId: string) => {
+      if (isDemo) {
+        const response = await fetch(`/api/dev/change-proposals/${proposalId}`);
+        if (!response.ok) return null;
+        return (await response.json()) as ChangeProposalDetail;
+      }
+      if (!supabase) return null;
       return loadChangeProposalDetail(supabase, proposalId);
     },
-    [supabase],
+    [isDemo, supabase],
   );
 
   const approve = useCallback(
@@ -119,14 +138,14 @@ export function useChangeProposalActions(
       setPending(true);
       setError(null);
       try {
-        const response = await fetch(
-          `/api/projects/${projectId}/changes/${proposal.id}`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "approve", decisions }),
-          },
-        );
+        const url = isDemo
+          ? `/api/dev/change-proposals/${proposal.id}`
+          : `/api/projects/${projectId}/changes/${proposal.id}`;
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "approve", decisions }),
+        });
         const payload = (await response
           .json()
           .catch(() => null)) as ActionResponse | null;
@@ -150,7 +169,7 @@ export function useChangeProposalActions(
         setPending(false);
       }
     },
-    [projectId, onResolved, onProjectChanged],
+    [isDemo, projectId, onResolved, onProjectChanged],
   );
 
   const approveAll = useCallback(
@@ -188,14 +207,14 @@ export function useChangeProposalActions(
       setPending(true);
       setError(null);
       try {
-        const response = await fetch(
-          `/api/projects/${projectId}/changes/${target.proposalId}`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "undo" }),
-          },
-        );
+        const url = isDemo
+          ? `/api/dev/change-proposals/${target.proposalId}`
+          : `/api/projects/${projectId}/changes/${target.proposalId}`;
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "undo" }),
+        });
         const payload = (await response
           .json()
           .catch(() => null)) as ActionResponse | null;
@@ -216,7 +235,7 @@ export function useChangeProposalActions(
         setPending(false);
       }
     },
-    [projectId, onProjectChanged],
+    [isDemo, projectId, onProjectChanged],
   );
 
   const openSheet = useCallback((proposalId: string) => {

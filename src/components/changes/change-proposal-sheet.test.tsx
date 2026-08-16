@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChangeProposalDetail } from "@/lib/services/change-proposals";
@@ -102,9 +102,10 @@ describe("ChangeProposalSheet (T11, docs/review/06-DESIGN_REVIEW.md §6)", () =>
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     await user.click(screen.getAllByRole("button", { name: "Included" })[0]);
-    expect(
-      screen.getByText(/approving only part of this proposal/i),
-    ).toBeInTheDocument();
+    const warning = screen.getByRole("alert");
+    expect(warning).toHaveTextContent("Value proposition");
+    expect(warning).toHaveTextContent("Target customer");
+    expect(warning).toHaveTextContent("stays as it is");
   });
 
   it("relabels Approve as Reject proposal once every item is excluded", async () => {
@@ -193,5 +194,125 @@ describe("ChangeProposalSheet (T11, docs/review/06-DESIGN_REVIEW.md §6)", () =>
     expect(
       screen.getByText("The project has changed since this proposal was made."),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ChangeProposalSheet read-only mode for a decided proposal (T11 review round 1, P1)", () => {
+  it("shows the recorded status and no Approve action for an approved proposal", async () => {
+    render(
+      <ChangeProposalSheet
+        proposalId="proposal-1"
+        title="Narrow the target customer"
+        loadDetail={async () => detail({ status: "approved" })}
+        onApprove={vi.fn()}
+        onOpenChange={vi.fn()}
+        pending={false}
+        error={null}
+      />,
+    );
+    await screen.findByText("Letting agencies");
+
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject proposal" }),
+    ).not.toBeInTheDocument();
+    // Two "Close" buttons exist (the sheet's own dismiss icon plus the
+    // footer's), so scope to the footer to confirm it reads "Close" rather
+    // than "Cancel" once the proposal is decided.
+    const footer = document.querySelector('[data-slot="sheet-footer"]');
+    expect(footer).not.toBeNull();
+    expect(
+      within(footer as HTMLElement).getByRole("button", { name: "Close" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the recorded include/exclude state as static text, not toggleable controls", async () => {
+    render(
+      <ChangeProposalSheet
+        proposalId="proposal-1"
+        title="Narrow the target customer"
+        loadDetail={async () =>
+          detail({
+            status: "partially_approved",
+            items: [
+              {
+                id: "item-customer",
+                area: "customer",
+                key: "primary_customer",
+                before: "Letting agencies",
+                after: "Letting agencies under 20 staff",
+                included: true,
+              },
+              {
+                id: "item-value",
+                area: "value_proposition",
+                key: "core_value",
+                before: null,
+                after: "Faster deposit disputes",
+                included: false,
+              },
+            ],
+          })
+        }
+        onApprove={vi.fn()}
+        onOpenChange={vi.fn()}
+        pending={false}
+        error={null}
+      />,
+    );
+    await screen.findByText("Letting agencies");
+
+    expect(screen.getByText("Partially approved")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Included" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Excluded" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Letting agencies under 20 staff"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Faster deposit disputes")).toBeInTheDocument();
+    // No partial-approval warning — this is a settled record, not a live
+    // decision the user could still change their mind about.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("renders a rejected proposal read-only with no editable controls", async () => {
+    render(
+      <ChangeProposalSheet
+        proposalId="proposal-1"
+        title="Narrow the target customer"
+        loadDetail={async () =>
+          detail({
+            status: "rejected",
+            items: [
+              {
+                id: "item-customer",
+                area: "customer",
+                key: "primary_customer",
+                before: "Letting agencies",
+                after: "Letting agencies under 20 staff",
+                included: false,
+              },
+            ],
+          })
+        }
+        onApprove={vi.fn()}
+        onOpenChange={vi.fn()}
+        pending={false}
+        error={null}
+      />,
+    );
+    await screen.findByText("Letting agencies");
+
+    expect(screen.getByText("Rejected")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve" }),
+    ).not.toBeInTheDocument();
   });
 });

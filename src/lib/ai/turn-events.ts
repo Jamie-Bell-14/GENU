@@ -207,6 +207,12 @@ export type TurnEvent =
       title: string;
       rationale: string;
       affectedAreas: string[];
+      /**
+       * The canvas-object ids the proposal actually touches, computed
+       * server-side from real project truth — never the current scene's
+       * `visibleObjectIds` (T11 review round 1, P1).
+       */
+      affectedObjectIds: string[];
     }
   /**
    * Carries the failing turn's own id (issue #13, T10 exit gate) so the
@@ -384,6 +390,8 @@ export interface TurnState {
     title: string;
     rationale: string;
     affectedAreas: string[];
+    /** The canvas-object ids the proposal actually touches (T11 review round 1, P1). */
+    affectedObjectIds: string[];
     /** The turn that created it, so the in-stream card renders in that turn's own group. */
     turnId: string;
   } | null;
@@ -915,6 +923,7 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
                   title: action.event.title,
                   rationale: action.event.rationale,
                   affectedAreas: action.event.affectedAreas,
+                  affectedObjectIds: action.event.affectedObjectIds,
                   turnId: state.streaming.turnId,
                 },
               }

@@ -162,6 +162,12 @@ export interface PendingProposalHydration {
   title: string;
   rationale: string;
   areas: string[];
+  /**
+   * The canvas-object ids the proposal actually touches (T11 review round
+   * 1, P1) — matched against the project's own fields by (area, key), never
+   * a scene's `visibleObjectIds`.
+   */
+  objectIds: string[];
   /** The turn whose `complete_turn` call created it, for the in-stream card. */
   turnId: string;
 }
@@ -192,17 +198,34 @@ export async function loadPendingProposal(
     }>();
   if (!proposal) return null;
 
-  const { data: items } = await supabase
-    .from("change_items")
-    .select("area")
-    .eq("proposal_id", proposal.id)
-    .returns<{ area: string }[]>();
+  const [{ data: items }, { data: fields }] = await Promise.all([
+    supabase
+      .from("change_items")
+      .select("area, key")
+      .eq("proposal_id", proposal.id)
+      .returns<{ area: string; key: string }[]>(),
+    supabase
+      .from("project_fields")
+      .select("id, area, key")
+      .eq("project_id", projectId)
+      .returns<{ id: string; area: string; key: string }[]>(),
+  ]);
+
+  const fieldIdByAreaKey = new Map(
+    (fields ?? []).map((field) => [`${field.area}:${field.key}`, field.id]),
+  );
+  const objectIds: string[] = [];
+  for (const item of items ?? []) {
+    const objectId = fieldIdByAreaKey.get(`${item.area}:${item.key}`);
+    if (objectId) objectIds.push(objectId);
+  }
 
   return {
     id: proposal.id,
     title: proposal.title,
     rationale: proposal.rationale,
     areas: Array.from(new Set((items ?? []).map((row) => row.area))),
+    objectIds,
     turnId: proposal.source_turn_id,
   };
 }

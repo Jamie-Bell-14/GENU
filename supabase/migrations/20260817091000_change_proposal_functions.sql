@@ -44,8 +44,16 @@ declare
   v_evidence_id uuid;
   v_direction text;
   v_assumption_status public.assumption_status;
+  v_latest_other_turn uuid;
+  v_latest_other_role text;
+  v_finding_turn_has_answer boolean;
+  v_refusal_code text;
+  v_evidence_refused_reason text;
   v_proposal_id uuid;
   v_areas text[];
+  v_object_ids uuid[];
+  v_field_id uuid;
+  v_field_value text;
 begin
   perform private.assert_project_actor(p_project_id, p_actor_id);
 
@@ -168,6 +176,13 @@ begin
     );
   end loop;
 
+  /*
+    "Add as evidence" (T10 review round 2, P0-B/P0-C; round 3/4/5, currency).
+    Each item names a receipt, never a target — the target is the receipt's
+    own `focal_object_id`, so this cannot attach evidence to whatever object
+    happens to be in default focus when this turn, rather than the research
+    that produced the receipt, runs.
+  */
   for item in select * from jsonb_array_elements(coalesce(p_evidence, '[]'::jsonb))
   loop
     slot := coalesce(item ->> 'slot', '0');
@@ -177,23 +192,108 @@ begin
     where id = (item ->> 'receipt_id')::uuid and project_id = p_project_id;
 
     if not found then
+      -- Foreign, unknown or stale receipts are rejected identically
+      -- (T10 review round 1, P0-1): nothing about which is leaked.
+      v_refusal_code := 'no_active_research';
       refused := jsonb_set(
         refused, array[slot],
-        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb('no_active_research'::text),
+        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb(v_refusal_code),
         true
       );
+      v_evidence_refused_reason := coalesce(v_evidence_refused_reason, v_refusal_code);
+      continue;
+    end if;
+
+    /*
+      Already linked is checked *before* currency, on a plain read rather
+      than the insert-on-conflict below — a genuine idempotent repeat (the
+      same "Add as evidence" retried as a new turn after, say, a connection
+      loss the first attempt's own response never confirmed) must read as
+      "already done", not as "this research is now stale", which is a
+      confusing thing to tell someone about a request that in fact already
+      succeeded. Checking this first also avoids ever creating an
+      `evidence` row for a receipt currency will go on to refuse — that
+      would leave a disconnected object on the canvas with no relationship
+      to explain it, since `loadCanvasObjects` renders every `evidence` row
+      regardless of whether it ever gained one.
+    */
+    select id into v_evidence_id
+    from public.evidence
+    where project_id = p_project_id and source_receipt_id = finding.id;
+
+    if v_evidence_id is not null then
+      v_refusal_code := 'already_linked';
+      refused := jsonb_set(
+        refused, array[slot],
+        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb(v_refusal_code),
+        true
+      );
+      v_evidence_refused_reason := coalesce(v_evidence_refused_reason, v_refusal_code);
+      continue;
+    end if;
+
+    /*
+      Currency (T10 review round 5): current iff the single latest message
+      in the project *other than this turn's own* is both the receipt's own
+      turn and that turn's assistant answer — the same combined test
+      `loadLatestResearchReceipt` already applies on reload. `turn_id`
+      alone is not enough: `start_turn` stores the user's message the
+      instant a turn is accepted, before any research runs or any answer is
+      produced, so a turn that was accepted and then failed, was stopped,
+      or had its lease expire before reaching this function still leaves a
+      message row bearing its `turn_id` — a `role = 'user'` one. Requiring
+      `role = 'assistant'` here is what tells "this turn produced an
+      answer" apart from "this turn was merely accepted", the distinction
+      round 4's turn_id-only check could not make.
+
+      This turn's own message was already inserted above, so it is excluded
+      from "other" — otherwise this turn being the newest one in the
+      project would always make an older receipt look current merely by
+      comparison with itself.
+    */
+    select turn_id, role into v_latest_other_turn, v_latest_other_role
+    from public.messages
+    where project_id = p_project_id and turn_id <> p_turn_id
+    order by created_at desc
+    limit 1;
+
+    if v_latest_other_turn is distinct from finding.turn_id
+       or v_latest_other_role is distinct from 'assistant' then
+      select exists(
+        select 1 from public.messages
+        where project_id = p_project_id
+          and turn_id = finding.turn_id
+          and role = 'assistant'
+      ) into v_finding_turn_has_answer;
+
+      v_refusal_code := case
+        when finding.turn_id = p_turn_id then 'research_not_yet_complete'
+        when v_finding_turn_has_answer then 'research_superseded'
+        else 'research_incomplete'
+      end;
+      refused := jsonb_set(
+        refused, array[slot],
+        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb(v_refusal_code),
+        true
+      );
+      v_evidence_refused_reason := coalesce(v_evidence_refused_reason, v_refusal_code);
       continue;
     end if;
 
     if finding.focal_object_id is null then
+      v_refusal_code := 'no_focal_object';
       refused := jsonb_set(
         refused, array[slot],
-        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb('no_focal_object'::text),
+        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb(v_refusal_code),
         true
       );
+      v_evidence_refused_reason := coalesce(v_evidence_refused_reason, v_refusal_code);
       continue;
     end if;
 
+    -- No existing evidence row for this receipt (checked above) — a plain
+    -- insert is enough; the `already_linked` check already ruled out the
+    -- only case that could conflict.
     insert into public.evidence (
       project_id, title, summary, source_name, source_url, retrieved_at,
       methodology, limitations, kind, is_demo, source_receipt_id
@@ -211,21 +311,7 @@ begin
       finding.is_demo,
       finding.id
     )
-    on conflict (project_id, source_receipt_id)
-      do update set title = excluded.title
     returning id into v_evidence_id;
-
-    if exists (
-      select 1 from public.project_relationships
-      where from_object_id = v_evidence_id and to_object_id = finding.focal_object_id
-    ) then
-      refused := jsonb_set(
-        refused, array[slot],
-        coalesce(refused -> slot, '[]'::jsonb) || to_jsonb('already_linked'::text),
-        true
-      );
-      continue;
-    end if;
 
     v_direction := item ->> 'direction';
 
@@ -274,11 +360,26 @@ begin
   end loop;
 
   /*
-    Connected-change proposals (T11). Stored as intent only — nothing here
-    touches `project_fields`. `before` is the model's own claim of the
-    field's current value, kept for display and staleness-checking, never
-    trusted as the value to restore; `apply_change_proposal` re-reads the
-    live value at approval time (docs/ARCHITECTURE.md §11).
+    Connected-change proposals (T11 review round 1, P1). Stored as intent
+    only — nothing here touches `project_fields`. `before` is never the
+    model's own claim of the field's current value: it is read fresh from
+    `project_fields` here, by the server, for every item, the moment the
+    proposal is staged. Two things follow from that. First, the review
+    sheet's "Currently" column is always genuine project truth, never model
+    prose — a model that describes the existing value imperfectly can no
+    longer mislabel it. Second, `apply_change_proposal`'s staleness check
+    becomes a true database-to-database comparison across two points in
+    time, so it can never manufacture a false conflict out of a merely
+    inaccurate model description (docs/ARCHITECTURE.md §11: "before values
+    are recomputed at approval time"). A null `before` means the field does
+    not exist yet in this project, exactly as an approval or an undo already
+    interprets it.
+
+    `v_object_ids` collects the canvas-object id (`project_fields.id`) of
+    every item that already exists as a field, so the client can highlight
+    precisely the objects this proposal touches — never the scene's own
+    `visibleObjectIds`, which name everything a scene may show, not what a
+    proposal changes.
   */
   for proposal_item in select * from jsonb_array_elements(coalesce(p_proposals, '[]'::jsonb))
   loop
@@ -296,17 +397,27 @@ begin
     returning id into v_proposal_id;
 
     v_areas := array[]::text[];
+    v_object_ids := array[]::uuid[];
     for change_item in select * from jsonb_array_elements(coalesce(proposal_item -> 'items', '[]'::jsonb))
     loop
+      select id, value into v_field_id, v_field_value
+      from public.project_fields
+      where project_id = p_project_id
+        and area = (change_item ->> 'area')::public.project_area
+        and key = change_item ->> 'key';
+
       insert into public.change_items (proposal_id, area, key, before, after)
       values (
         v_proposal_id,
         (change_item ->> 'area')::public.project_area,
         change_item ->> 'key',
-        change_item ->> 'before',
+        v_field_value,
         change_item ->> 'after'
       );
       v_areas := array_append(v_areas, change_item ->> 'area');
+      if v_field_id is not null then
+        v_object_ids := array_append(v_object_ids, v_field_id);
+      end if;
     end loop;
 
     written := jsonb_set(
@@ -319,7 +430,8 @@ begin
         'id', v_proposal_id,
         'title', proposal_item ->> 'title',
         'rationale', proposal_item ->> 'rationale',
-        'areas', to_jsonb(array(select distinct unnest(v_areas)))
+        'areas', to_jsonb(array(select distinct unnest(v_areas))),
+        'object_ids', to_jsonb(coalesce(v_object_ids, array[]::uuid[]))
       ),
       true
     );
@@ -328,7 +440,8 @@ begin
   update public.turn_runs
   set state = 'completed',
       accepting_direction = false,
-      ended_at = now()
+      ended_at = now(),
+      evidence_refused_reason = v_evidence_refused_reason
   where turn_id = p_turn_id and state = 'running';
 
   return jsonb_build_object(
@@ -350,7 +463,7 @@ grant execute on function public.complete_turn(
 comment on function public.complete_turn(
   uuid, uuid, uuid, text, jsonb, jsonb, jsonb, jsonb
 ) is
-  'Stores a turn''s answer, applies its project-truth writes (fields, assumptions, evidence, connected-change proposals) and closes the run, in one transaction. Returns completed | not_running with per-slot written/refused counts and created proposal summaries.';
+  'Stores a turn''s answer, applies its project-truth writes (fields, assumptions, evidence, connected-change proposals) and closes the run, in one transaction. An evidence item''s receipt must belong to the project''s most recently *answered* turn (role = assistant, not merely a stored message), the same currency rule reload hydration applies; a refusal is also durably recorded on turn_runs.evidence_refused_reason. A proposal item''s before value is always read fresh from project_fields by this function, never trusted from the model. Returns completed | not_running with per-slot written/refused counts and created proposal summaries (including each proposal''s affected canvas-object ids).';
 
 -- ---------------------------------------------------------------------------
 -- Area -> document mapping
@@ -406,12 +519,23 @@ revoke all on function private.document_title_for_slug(public.document_slug) fro
     `assert_project_actor` uses for the service-role RPCs — this one just
     reads the actor from the session instead of a parameter, since a real one
     exists here.
-  - **Currency.** `status` must still be `proposed`, and every field this
-    proposal touches must still hold the value the proposal recorded as
-    `before` (docs/ARCHITECTURE.md §11's "before values are recomputed at
-    approval time"). Either failing returns `conflict` rather than raising —
-    a stale proposal is an expected state to reach, not a fault — and nothing
-    is written: not even the items that would still have been current.
+  - **Currency.** `status` must still be `proposed`, and every field an
+    *included* item targets must still hold the value `complete_turn`
+    recorded as `before` when the proposal was staged (docs/ARCHITECTURE.md
+    §11's "before values are recomputed at approval time" — `before` itself
+    is already trusted database state by the time it reaches this function;
+    see the previous migration's header). Either failing returns `conflict`
+    rather than raising — a stale proposal is an expected state to reach,
+    not a fault — and nothing is written: not even the items that would
+    still have been current.
+
+    Staleness is checked only for items the decision actually includes
+    (T11 review round 1, P2): rejecting a proposal writes nothing to project
+    truth at all, so a stale *excluded* item must never block it — "Keep
+    current direction" always has to work, whatever has drifted underneath
+    an item nobody is asking to apply. The same reasoning extends to partial
+    approval: an excluded item's own drift never blocks the items that are
+    actually being written.
 */
 create or replace function public.apply_change_proposal(
   p_proposal_id uuid,
@@ -463,9 +587,25 @@ begin
 
   perform 1 from public.change_items where proposal_id = p_proposal_id for update;
 
-  for v_item in select * from public.change_items where proposal_id = p_proposal_id
+  select count(*) into v_total_count
+  from public.change_items where proposal_id = p_proposal_id;
+
+  -- Staleness is checked only for items this decision includes — see the
+  -- function's own header for why an excluded item's drift must never block
+  -- a rejection or the rest of a partial approval.
+  for v_decision in select * from jsonb_array_elements(coalesce(p_decisions, '[]'::jsonb))
   loop
-    v_total_count := v_total_count + 1;
+    if coalesce((v_decision ->> 'included')::boolean, false) is not true then
+      continue;
+    end if;
+
+    select * into v_item
+    from public.change_items
+    where id = (v_decision ->> 'item_id')::uuid and proposal_id = p_proposal_id;
+
+    if not found then
+      continue;
+    end if;
 
     select value into v_current
     from public.project_fields
@@ -563,7 +703,12 @@ begin
     (project_id, actor_id, actor_kind, action, target, correlation_id, detail)
   values (
     v_proposal.project_id, v_actor, 'user',
-    case when v_status = 'rejected' then 'proposal_rejected' else 'proposal_approved' end,
+    -- A bare CASE resolves its branches' type as `text`, not the "unknown"
+    -- literal type a plain string gets — an explicit cast is required here,
+    -- unlike the direct 'proposal_undone' literal below (T11 review round 1,
+    -- P0: this was missing and raised 42804 against every apply/reject).
+    (case when v_status = 'rejected' then 'proposal_rejected' else 'proposal_approved' end)
+      ::public.audit_action,
     'change_proposal',
     v_correlation,
     jsonb_build_object(

@@ -145,7 +145,13 @@ export type CompleteTurnRecord =
        */
       proposals: Record<
         string,
-        { id: string; title: string; rationale: string; areas: string[] }
+        {
+          id: string;
+          title: string;
+          rationale: string;
+          areas: string[];
+          objectIds: string[];
+        }
       >;
     }
   /** The run was no longer this turn's to finish; nothing was written. */
@@ -209,7 +215,13 @@ export async function completeTurnRecord(input: {
     refused?: Record<string, string[]>;
     proposals?: Record<
       string,
-      { id: string; title: string; rationale: string; areas: string[] }
+      {
+        id: string;
+        title: string;
+        rationale: string;
+        areas: string[];
+        object_ids: string[];
+      }
     >;
   } | null;
   if (result?.outcome !== "completed") return { outcome: "not_running" };
@@ -217,7 +229,18 @@ export async function completeTurnRecord(input: {
     outcome: "completed",
     written: result.written ?? {},
     refused: result.refused ?? {},
-    proposals: result.proposals ?? {},
+    proposals: Object.fromEntries(
+      Object.entries(result.proposals ?? {}).map(([slot, proposal]) => [
+        slot,
+        {
+          id: proposal.id,
+          title: proposal.title,
+          rationale: proposal.rationale,
+          areas: proposal.areas,
+          objectIds: proposal.object_ids,
+        },
+      ]),
+    ),
   };
 }
 

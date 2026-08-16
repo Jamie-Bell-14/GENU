@@ -1069,6 +1069,7 @@ describe("research (T10)", () => {
           title: "Narrow the target customer",
           rationale: "The evidence points at smaller agencies.",
           affectedAreas: ["customer", "value_proposition"],
+          affectedObjectIds: ["field-1"],
         },
       });
       expect(state.pendingProposal).toEqual({
@@ -1076,6 +1077,7 @@ describe("research (T10)", () => {
         title: "Narrow the target customer",
         rationale: "The evidence points at smaller agencies.",
         affectedAreas: ["customer", "value_proposition"],
+        affectedObjectIds: ["field-1"],
         turnId: TURN,
       });
     });
@@ -1089,6 +1091,7 @@ describe("research (T10)", () => {
           title: "Narrow the target customer",
           rationale: "The evidence points at smaller agencies.",
           affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
         },
       });
       expect(state.pendingProposal).toBeNull();
@@ -1103,6 +1106,7 @@ describe("research (T10)", () => {
           title: "Narrow the target customer",
           rationale: "The evidence points at smaller agencies.",
           affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
         },
       });
       const state = send(withProposal);
@@ -1118,6 +1122,7 @@ describe("research (T10)", () => {
           title: "Narrow the target customer",
           rationale: "The evidence points at smaller agencies.",
           affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
         },
       });
       const state = turnReducer(withProposal, {
@@ -1136,6 +1141,7 @@ describe("research (T10)", () => {
           title: "Narrow the target customer",
           rationale: "The evidence points at smaller agencies.",
           affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
         },
       });
       const state = turnReducer(withProposal, {

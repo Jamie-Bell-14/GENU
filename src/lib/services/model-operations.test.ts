@@ -352,6 +352,7 @@ describe("commitTurn", () => {
             title: "Narrow the target customer",
             rationale: "The evidence points at smaller agencies.",
             areas: ["customer"],
+            objectIds: ["field-1"],
           },
         },
       }));
@@ -386,6 +387,7 @@ describe("commitTurn", () => {
             title: "Narrow the target customer",
             rationale: "The evidence points at smaller agencies.",
             areas: ["customer"],
+            objectIds: ["field-1"],
           },
         },
       ]);

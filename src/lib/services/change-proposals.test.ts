@@ -365,21 +365,32 @@ describe("loadChangeProposalDetail", () => {
 });
 
 describe("loadPendingProposal", () => {
-  it("returns the most recent still-proposed proposal, with its distinct areas", async () => {
+  it("returns the most recent still-proposed proposal, with its distinct areas and matched object ids", async () => {
     const client = {
-      from: (table: string) =>
-        table === "change_proposals"
-          ? chainReturning({
-              id: PROPOSAL,
-              title: "Narrow the target customer",
-              rationale: "The evidence points at smaller agencies.",
-              source_turn_id: "turn-1",
-            })
-          : chainReturning(null, [
-              { area: "customer" },
-              { area: "value_proposition" },
-              { area: "customer" },
-            ]),
+      from: (table: string) => {
+        if (table === "change_proposals") {
+          return chainReturning({
+            id: PROPOSAL,
+            title: "Narrow the target customer",
+            rationale: "The evidence points at smaller agencies.",
+            source_turn_id: "turn-1",
+          });
+        }
+        if (table === "change_items") {
+          // Realistic data: `change_items` has a unique (proposal_id, area,
+          // key) constraint, so a proposal never repeats the same target.
+          return chainReturning(null, [
+            { area: "customer", key: "primary_customer" },
+            { area: "value_proposition", key: "core_value" },
+          ]);
+        }
+        // project_fields — only the customer field already exists; the
+        // value-proposition item is a new field the proposal would create,
+        // so it has no canvas object to match.
+        return chainReturning(null, [
+          { id: "field-1", area: "customer", key: "primary_customer" },
+        ]);
+      },
     } as unknown as SupabaseClient;
 
     await expect(loadPendingProposal(client, "project-1")).resolves.toEqual({
@@ -387,6 +398,7 @@ describe("loadPendingProposal", () => {
       title: "Narrow the target customer",
       rationale: "The evidence points at smaller agencies.",
       areas: ["customer", "value_proposition"],
+      objectIds: ["field-1"],
       turnId: "turn-1",
     });
   });

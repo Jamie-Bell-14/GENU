@@ -42,6 +42,15 @@ export interface CreatedProposal {
   rationale: string;
   /** Distinct project areas the proposal's items target, for the in-stream card. */
   areas: string[];
+  /**
+   * The canvas-object ids (`project_fields.id`) the proposal actually
+   * touches — computed server-side by `complete_turn` from real project
+   * truth, not from the scene's own `visibleObjectIds` (T11 review round 1,
+   * P1: those name everything a scene may show, not what a proposal
+   * changes). A newly-proposed field that does not exist yet contributes no
+   * id here, since it has no canvas object to highlight.
+   */
+  objectIds: string[];
 }
 
 export type OperationOutcome =

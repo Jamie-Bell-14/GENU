@@ -141,6 +141,7 @@ export function useTurnRuntime({
     title: string;
     rationale: string;
     affectedAreas: string[];
+    affectedObjectIds: string[];
     turnId: string;
   } | null;
 }>): TurnRuntime {

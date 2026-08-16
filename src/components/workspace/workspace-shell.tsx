@@ -105,6 +105,7 @@ export function WorkspaceShell({
     title: string;
     rationale: string;
     affectedAreas: string[];
+    affectedObjectIds: string[];
     turnId: string;
   } | null;
   onEditObject?: EditSubmit;
@@ -140,6 +141,12 @@ export function WorkspaceShell({
   const onReviewProposal = pendingProposalId
     ? () => proposalActions.openSheet(pendingProposalId)
     : undefined;
+  const canvasPendingProposal = runtime.state.pendingProposal
+    ? {
+        id: runtime.state.pendingProposal.id,
+        affectedObjectIds: runtime.state.pendingProposal.affectedObjectIds,
+      }
+    : null;
   /*
     The canvas draws from the server-rendered model until a turn changes
     something, at which point the server re-reads its own tables and sends the
@@ -281,6 +288,7 @@ export function WorkspaceShell({
                   unavailableSources={runtime.state.unavailableSources}
                   activity={runtime.state.activity.canvas}
                   onEdit={onEditObject}
+                  pendingProposal={canvasPendingProposal}
                   onReviewProposal={onReviewProposal}
                 />
               </ResizablePanel>
@@ -299,6 +307,7 @@ export function WorkspaceShell({
               unavailableSources={runtime.state.unavailableSources}
               activity={runtime.state.activity.canvas}
               onEdit={onEditObject}
+              pendingProposal={canvasPendingProposal}
               onReviewProposal={onReviewProposal}
             />
           )}

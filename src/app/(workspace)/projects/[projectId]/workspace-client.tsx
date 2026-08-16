@@ -47,6 +47,7 @@ export function WorkspaceClient({
     title: string;
     rationale: string;
     affectedAreas: string[];
+    affectedObjectIds: string[];
     turnId: string;
   } | null;
 }>) {

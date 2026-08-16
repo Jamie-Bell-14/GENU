@@ -95,6 +95,7 @@ export default async function ProjectPage({
               title: pendingProposal.title,
               rationale: pendingProposal.rationale,
               affectedAreas: pendingProposal.areas,
+              affectedObjectIds: pendingProposal.objectIds,
               turnId: pendingProposal.turnId,
             }
           : null

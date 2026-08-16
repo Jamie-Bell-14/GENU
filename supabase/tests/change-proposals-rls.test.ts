@@ -541,8 +541,12 @@ describe.skipIf(skip)("apply_change_proposal", () => {
     );
 
     // The person edits the customer field directly, out from under the
-    // proposal's own recorded "before", between proposal and decision.
-    await asTrustedWriter();
+    // proposal's own recorded "before", between proposal and decision — the
+    // same RLS-permitted owner write `evidence-rls.test.ts` uses, not
+    // `service_role` (which has no grant on `project_fields` at all; every
+    // real write to it goes through `complete_turn`/`apply_change_proposal`
+    // as the owner, never as the service role directly).
+    await impersonate(USER_A);
     await db.query(
       `insert into project_fields (project_id, area, key, label, value, origin)
        values ($1, 'customer', 'primary_customer', 'primary_customer', 'Edited independently', 'user_stated')
@@ -644,7 +648,9 @@ describe.skipIf(skip)("undo_change_proposal", () => {
   it("refuses — writing nothing — when the field has changed again since the approval it would undo", async () => {
     const { proposalId } = await stageAndApprove();
 
-    await asTrustedWriter();
+    // Same reasoning as the stale-item test above: the owner's own direct
+    // edit, not a `service_role` write `project_fields` has no grant for.
+    await impersonate(USER_A);
     await db.query(
       `update project_fields set value = 'Edited again after approval'
        where project_id = $1 and area = 'mvp_scope' and key = 'core_feature'`,

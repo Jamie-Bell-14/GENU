@@ -400,6 +400,16 @@ begin
     v_object_ids := array[]::uuid[];
     for change_item in select * from jsonb_array_elements(coalesce(proposal_item -> 'items', '[]'::jsonb))
     loop
+      /*
+        A non-strict `select ... into` leaves its targets at their *previous*
+        value when zero rows match — it does not clear them. v_field_id and
+        v_field_value are declared once for the whole function and reused by
+        every item in every proposal, so without this reset a field that does
+        not exist yet would silently inherit an earlier item's real id/value
+        as its "before" instead of being recorded as null.
+      */
+      v_field_id := null;
+      v_field_value := null;
       select id, value into v_field_id, v_field_value
       from public.project_fields
       where project_id = p_project_id

@@ -743,13 +743,25 @@ begin
         support = excluded.support,
         updated_at = now();
 
-    -- Collected per document, not written yet — see the post-loop below for
-    -- why (T11 review round 3, P1).
+    /*
+      Collected per document, not written yet — see the post-loop below for
+      why (T11 review round 3, P1). A single-level `jsonb_set`, not a
+      two-level path straight into `v_doc_sections`: `jsonb_set` can only
+      create a *missing* key at the last path element — it will not
+      auto-vivify a missing intermediate container, so a two-level path into
+      a brand-new `v_doc_sections` (or a document not yet seen this call)
+      would silently no-op and leave `v_doc_sections` empty for that
+      document. Building the merged per-document object first sidesteps
+      that entirely.
+    */
     v_doc_slug_text := private.document_slug_for_area(v_item.area)::text;
     v_doc_sections := jsonb_set(
       v_doc_sections,
-      array[v_doc_slug_text, v_item.key],
-      jsonb_build_object('text', v_after, 'state', 'approved'),
+      array[v_doc_slug_text],
+      coalesce(v_doc_sections -> v_doc_slug_text, '{}'::jsonb)
+        || jsonb_build_object(
+             v_item.key, jsonb_build_object('text', v_after, 'state', 'approved')
+           ),
       true
     );
 
@@ -1011,19 +1023,28 @@ begin
       where project_id = v_proposal.project_id and area = v_item.area and key = v_item.key;
     end if;
 
-    -- Collected per document, written once below — see apply_change_proposal
-    -- for why (T11 review round 3, P1). A document that was never created
-    -- (this proposal's own approval had no affected-document row for it,
-    -- which cannot happen for an included item, but kept as a defensive
-    -- no-op) simply contributes nothing further below.
+    /*
+      Collected per document, written once below — see apply_change_proposal
+      for why, including why this has to be a single-level `jsonb_set` with
+      the per-document object merged first rather than a two-level path
+      straight into `v_doc_sections` (T11 review round 3, P1). A document
+      that was never created (this proposal's own approval had no
+      affected-document row for it, which cannot happen for an included
+      item, but kept as a defensive no-op) simply contributes nothing
+      further below.
+    */
     v_doc_slug_text := private.document_slug_for_area(v_item.area)::text;
     v_doc_sections := jsonb_set(
       v_doc_sections,
-      array[v_doc_slug_text, v_item.key],
-      jsonb_build_object(
-        'text', coalesce(v_item.before, ''),
-        'state', case when v_item.before is null then 'unvalidated' else 'working_draft' end
-      ),
+      array[v_doc_slug_text],
+      coalesce(v_doc_sections -> v_doc_slug_text, '{}'::jsonb)
+        || jsonb_build_object(
+             v_item.key,
+             jsonb_build_object(
+               'text', coalesce(v_item.before, ''),
+               'state', case when v_item.before is null then 'unvalidated' else 'working_draft' end
+             )
+           ),
       true
     );
 

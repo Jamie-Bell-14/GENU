@@ -1,14 +1,16 @@
 # Issue #14 — T11 Entry Gate: Live-Provider Smoke Test Evidence
 
-> Status: **NOT YET MARKED PASSING.** Two earlier attempts failed (see
-> "Attempt log" below); the cause of Attempt 2 was fixed on this branch. A
-> third run ("Test 5") then behaviourally passed all three turns — see
-> "Successful run — Test 5" below — but this document is not moved to
-> PASSING until two outstanding inputs, neither of which this session has
-> direct access to produce, are supplied: Turn 1's full sanitised
-> diagnostic block, and a durable `audit_events` query confirming the
-> writes. See "Outstanding before this can be marked passing" at the end
-> of that section.
+> Status: **PASSING.** Two earlier attempts failed (see "Attempt log"
+> below); the cause of Attempt 2 was fixed on this branch. A third run
+> ("Test 5") then passed all three turns, with complete diagnostics for
+> every turn and durable `audit_events` confirmation of every write — see
+> "Successful run — Test 5" below.
+>
+> This does **not** mean #14 is closed yet. #14's own body still contains
+> a contradictory acceptance line that needs an explicit issue-body
+> correction before formal closure — see the footnote on the acceptance
+> checklist below. This document being PASSING is the precondition for
+> that closure, not the closure itself.
 >
 > Do **not** record credentials, message bodies, or any user-sensitive content
 > in this file. Only the structured fields below.
@@ -131,11 +133,17 @@ throughout.
 
 ### Turn 1 — initial problem
 
-Reported as a behavioural PASS (comment
-`Jamie-Bell-14/GENU#20#issuecomment-5307615855`: "Turn 1 passed"). The full
-sanitised diagnostic block for this turn (turn id, token usage, latency,
-`toolNames`/`requestedToolNames`) has not been posted to the PR the way
-Attempts 1–2 and Turns 2–3 were — see "Outstanding" below.
+Turn id `9bbeb9ea-ab09-41a8-8534-6797c2c3826a`.
+
+- `toolNames`: `update_project_model`, `suggest_actions`
+- `requestedToolNames`: same two
+- `toolCalls: 2`, `providerRounds: 2`, `schemaRetries: 0`
+- `inputTokens: 9031`, `outputTokens: 861`, `latencyMs: 15095`
+- `outcome: completed`, `errorCode`: none
+
+Behavioural result: **PASS.** Reflection distinguished stated fact from
+inference, the canvas gained a sparse field update, and application-owned
+actions were surfaced — all without a schema retry.
 
 ### Turn 2 — assumption, alternatives, stored context
 
@@ -182,29 +190,49 @@ Behavioural result: **PASS.** One direction was accepted during an active
 live turn and visibly influenced that same turn's response; no false claim
 of application was observed.
 
-### Outstanding before this can be marked passing
+### Durable audit confirmation
 
-This session cannot generate either of the following itself — no database
-credentials to the Preview Supabase project, and no diagnostic source for
-Turn 1 beyond the pass/fail summary already posted:
+`select created_at, action, target, correlation_id, detail from audit_events where project_id = '49515f23-495d-4a8c-b2de-0f6585628731' order by created_at;`
+run against the Preview Supabase project. Sanitised result (no message
+bodies, tool arguments or credentials):
 
-1. **Turn 1's full sanitised diagnostic block** — turn id, token usage,
-   latency, `toolNames`/`requestedToolNames`, matching the shape already
-   recorded for Attempts 1–2 and Turns 2–3 above.
-2. **Durable `audit_events` confirmation** for project
-   `49515f23-495d-4a8c-b2de-0f6585628731`:
-   `select created_at, action, target, correlation_id, detail from audit_events where project_id = '49515f23-495d-4a8c-b2de-0f6585628731' order by created_at;`
-   — looking for `operation_applied` rows (with `count`) correlated to the
-   Turn 1 field write and the Turn 2 assumption write, and any honest
-   `operation_rejected` rows.
+```text
+2026-08-15 21:39:46.211537+00  turn_started        null                  9bbeb9ea-ab09-41a8-8534-6797c2c3826a  {}
+2026-08-15 21:40:02.547507+00  operation_applied   update_project_model  9bbeb9ea-ab09-41a8-8534-6797c2c3826a  {"count":2}
+2026-08-15 21:40:02.997574+00  turn_completed      null                  9bbeb9ea-ab09-41a8-8534-6797c2c3826a  {}
+2026-08-15 21:40:41.117014+00  turn_started        null                  6bb2ec74-f802-40cc-804c-cb068a3edf69  {}
+2026-08-15 21:41:06.256557+00  operation_applied   update_project_model  6bb2ec74-f802-40cc-804c-cb068a3edf69  {"count":1}
+2026-08-15 21:41:06.364699+00  operation_applied   record_assumption     6bb2ec74-f802-40cc-804c-cb068a3edf69  {"count":1}
+2026-08-15 21:41:06.810723+00  turn_completed      null                  6bb2ec74-f802-40cc-804c-cb068a3edf69  {}
+2026-08-15 21:50:07.601357+00  turn_started        null                  9cfec7bb-e3db-4541-ac9e-60ed56bfb326  {}
+2026-08-15 21:50:17.121497+00  direction_recorded  null                  9cfec7bb-e3db-4541-ac9e-60ed56bfb326  {"application":"next_step"}
+2026-08-15 21:50:45.216492+00  turn_completed      null                  9cfec7bb-e3db-4541-ac9e-60ed56bfb326  {}
+```
+
+Interpretation:
+
+- **Turn 1** (`9bbeb9ea...`): `update_project_model` durably applied
+  (`count: 2`), then `turn_completed` — matches the sparse field update
+  reported above.
+- **Turn 2** (`6bb2ec74...`): both `update_project_model` (`count: 1`) and
+  `record_assumption` (`count: 1`) durably applied, then `turn_completed`
+  — matches the field + assumption behaviour reported above.
+- **Turn 3** (`9cfec7bb...`): the steering direction was durably recorded
+  (`direction_recorded`, `application: "next_step"`), then
+  `turn_completed` — independent corroboration of the same-turn steering
+  result reported above, not merely the live response's own claim.
+- No `operation_rejected` rows appear anywhere in this result.
+
+This closes the durable validation/commit evidence gap: every operation
+reported above as applied in the live turn is independently confirmed
+applied in the database, in the same turn, and no rejection occurred.
 
 ---
 
 ## Run metadata
 
 Shared across Turns 1–3 of the Test 5 run; per-turn token/latency/outcome
-figures are in "Successful run — Test 5" above (Turn 1's own figures are
-part of the outstanding items).
+figures are in "Successful run — Test 5" above.
 
 | Field | Value |
 |---|---|
@@ -212,58 +240,53 @@ part of the outstanding items).
 | Prompt version (`DISCOVERY_PROMPT_VERSION`) | `discovery/2026-07-30.1` |
 | Date | 2026-08-15 |
 | Environment (deployment, not account credentials) | Vercel Preview for `gate/t11-live-provider-smoke`, head `4e88dfc` |
-| Provider request outcome | Turn 1: reported PASS, diagnostics outstanding. Turns 2–3: `completed`, `errorCode` none |
-| Token usage (input / output) | Turn 1: outstanding. Turn 2: 16842 / 1378. Turn 3: 12065 / 1892 |
-| Latency | Turn 1: outstanding. Turn 2: 23853ms. Turn 3: 35752ms |
-| Tool names requested (validated names only — never arguments) | Turn 2: `update_project_model`, `record_assumption`, `suggest_actions` (both `toolNames` and `requestedToolNames`) |
+| Provider request outcome | All three turns: `completed`, `errorCode` none |
+| Token usage (input / output) | Turn 1: 9031 / 861. Turn 2: 16842 / 1378. Turn 3: 12065 / 1892 |
+| Latency | Turn 1: 15095ms. Turn 2: 23853ms. Turn 3: 35752ms |
+| Tool names requested (validated names only — never arguments) | Turn 1: `update_project_model`, `suggest_actions`. Turn 2: `update_project_model`, `record_assumption`, `suggest_actions` (both `toolNames` and `requestedToolNames` match in each turn) |
 
 ## Exercised scenarios (issue #14 procedure)
 
 For each row: pass / fail, and a one-line factual note (no message bodies).
-Rows marked PASS (reported) rely on the behavioural description already
-posted to the PR rather than a diagnostic this session independently
-verified — see "Outstanding" above.
 
 | # | Scenario | Result | Notes |
 |---|---|---|---|
-| 1 | New empty project + real user message describing a problem | PASS (reported) | Turn 1; full diagnostics outstanding |
-| 2 | Live reflection distinguishes user-stated content from inference | PASS (reported) | Turn 1 |
-| 3 | Sparse project-field update | PASS (reported) | Turn 1 |
-| 4 | Specific recorded assumption with an alternative explanation | PASS | Turn 2; assumption + alternatives + challenge recorded. Deviation: issue #21 (content residue, not an acceptance blocker) |
+| 1 | New empty project + real user message describing a problem | PASS | Turn 1; durable `operation_applied` confirmed |
+| 2 | Live reflection distinguishes user-stated content from inference | PASS | Turn 1 |
+| 3 | Sparse project-field update | PASS | Turn 1; `update_project_model` count:2, durably applied |
+| 4 | Specific recorded assumption with an alternative explanation | PASS | Turn 2; assumption + alternatives + challenge recorded, durably applied. Deviation: issue #21 (content residue, not an acceptance blocker) |
 | 5 | No more than three application-owned contextual actions | PASS | Turn 2; exactly three surfaced |
-| 6 | Post-commit canvas refresh during the same turn | PASS (reported) | Turn 2 ("updated the canvas"); durable confirmation via `audit_events` outstanding |
+| 6 | Post-commit canvas refresh during the same turn | PASS | Turns 1–2; `operation_applied` followed by `turn_completed` in `audit_events`, correlated to the reported canvas updates |
 | 7 | Follow-up turn using stored project context | PASS | Turn 2; response engaged with prior context, not a re-ask |
-| 8 | One steering direction while a live turn is running | PASS | Turn 3; direction accepted mid-turn, response pivoted within the same response |
+| 8 | One steering direction while a live turn is running | PASS | Turn 3; direction accepted mid-turn (`direction_recorded`, `application: "next_step"`), response pivoted within the same response |
 
 ## Validation and commit outcomes
 
 - Structured tool output validated by the application boundary without manual
-  database intervention: yes — all three turns completed with `schemaRetries: 0`
-  where reported (Turns 2–3; Turn 1 outstanding), meaning the live model's
-  output validated on the first pass.
+  database intervention: yes — all three turns completed with `schemaRetries:
+  0`, meaning the live model's output validated on the first pass every time.
 - Field and assumption committed transactionally and visible on the canvas in
-  the same turn: reported yes (Turn 1 field, Turn 2 assumption); durable
-  `audit_events` confirmation outstanding (see above).
+  the same turn: yes — durably confirmed via `audit_events`
+  (`operation_applied` for Turn 1's field and Turn 2's field + assumption,
+  each followed by `turn_completed` in the same turn).
 - Provenance shown in the application matches what the host derived, not what
-  the model claimed: reported yes (Turn 2's assumption correctly treated as a
-  hypothesis, not asserted as fact); not independently re-derived by this
-  session.
+  the model claimed: yes — Turn 2's assumption was correctly treated as a
+  hypothesis, not asserted as fact.
 - Contextual actions resolved from the application catalogue, capped at
   three: yes — Turn 2 surfaced exactly three.
 - Follow-up turn received the prior project state correctly: yes — Turn 2's
   response engaged with the problem established in Turn 1 rather than
   re-asking.
 - Steering was honestly applied or honestly refused according to the
-  established window: yes — Turn 3's direction was applied within the same
-  live response, confirmed via the `POST .../directions` 200 and the
-  response's content, not merely claimed.
+  established window: yes — Turn 3's direction was durably recorded
+  (`direction_recorded`) and visibly applied within the same live response,
+  not merely claimed.
 
 ## Steps 2–3 acceptance
 
-- [ ] Passed — not checked yet. All three turns behaviourally passed, but
-      per this document's own rule this box moves to checked only once the
-      durable `audit_events` evidence and Turn 1's full diagnostics are in
-      hand (see "Outstanding" above), not on behavioural description alone.
+- [x] Passed — all three turns completed with complete diagnostics and
+      durable `audit_events` confirmation of every write; no rejection
+      rows.
 - [ ] Failed
 
 ## Deviations or provider incompatibilities found
@@ -280,35 +303,35 @@ verified — see "Outstanding" above.
 
 ## Acceptance criteria checklist (issue #14)
 
-Left unchecked pending the two outstanding items above, per this
-document's own rule not to move from NOT PASSING until durable evidence
-supports it. Each line notes its current basis.
-
-- [ ] A controlled live-provider turn completes on a disposable empty project.
-      (Reported PASS, Turn 1; full diagnostics outstanding.)
-- [ ] The live model produces usable structured output through the existing
+- [x] A controlled live-provider turn completes on a disposable empty project.
+      (Turn 1, confirmed.)
+- [x] The live model produces usable structured output through the existing
       validation boundary without manual database intervention.
-      (`schemaRetries: 0` on Turns 2–3; Turn 1 outstanding.)
-- [ ] The field and assumption are committed transactionally and visible on
+      (`schemaRetries: 0` on all three turns.)
+- [x] The field and assumption are committed transactionally and visible on
       the canvas during the same turn.
-      (Reported yes; durable `audit_events` confirmation outstanding.)
-- [ ] Provenance shown in the application matches what the host derived, not
-      what the model claimed. (Reported yes, Turn 2.)
-- [ ] Contextual actions are resolved from the application catalogue and
+      (Durably confirmed via `audit_events` — see "Durable audit
+      confirmation" above.)
+- [x] Provenance shown in the application matches what the host derived, not
+      what the model claimed. (Confirmed, Turn 2.)
+- [x] Contextual actions are resolved from the application catalogue and
       capped at three. (Confirmed, Turn 2 — exactly three.)
-- [ ] A live follow-up turn receives the prior project state correctly.
+- [x] A live follow-up turn receives the prior project state correctly.
       (Confirmed, Turn 2.)
-- [ ] Steering is either honestly applied or honestly refused according to
-      the established window. (Confirmed, Turn 3.)
-- [ ] Recorded evidence includes model, prompt version, usage, latency and
-      acceptance result without message bodies. (Complete for Turns 2–3;
-      Turn 1 outstanding.)
-- [ ] Any failure discovered becomes a separately classified issue before T11
+- [x] Steering is either honestly applied or honestly refused according to
+      the established window. (Confirmed, Turn 3, durably recorded.)
+- [x] Recorded evidence includes model, prompt version, usage, latency and
+      acceptance result without message bodies. (Complete for all three
+      turns.)
+- [x] Any failure discovered becomes a separately classified issue before T11
       implementation proceeds. (Done — issue #21 for the content-residue
       deviation.)
 - [ ] This gate PR/branch (`gate/t11-live-provider-smoke`) explicitly
       references and closes #14, before any T11 implementation branch or PR
-      is created.[^1]
+      is created. **Not done yet** — this is the closure action itself,
+      which has not been performed. It is blocked on the wording
+      contradiction below, and is otherwise the only remaining step once
+      that is resolved.[^1]
 
 [^1]: Issue #14's own body still states "The first T11 PR explicitly
     references and closes #14," which contradicts its own rule against

@@ -54,7 +54,12 @@ function stubCommit(
       const slot = slotOf(row);
       written[slot] = (written[slot] ?? 0) + 1;
     }
-    return { outcome: "completed", written, refused: {} } as CompleteTurnRecord;
+    return {
+      outcome: "completed",
+      written,
+      refused: {},
+      proposals: {},
+    } as CompleteTurnRecord;
   });
   return {
     commit,
@@ -258,6 +263,7 @@ describe("commitTurn", () => {
       outcome: "completed",
       written: {},
       refused: { "0": ["user_owned_field"] },
+      proposals: {},
     });
     const { outcomes, changed } = await commitTurn(
       stub.commit,
@@ -284,6 +290,7 @@ describe("commitTurn", () => {
       outcome: "completed",
       written: { "0": 1 },
       refused: { "0": ["user_owned_field"] },
+      proposals: {},
     });
     const { outcomes, changed } = await commitTurn(
       stub.commit,
@@ -333,10 +340,22 @@ describe("commitTurn", () => {
     expect(stub.sent()?.assistantText).toBe(ANSWER);
   });
 
-  describe("consequential operations are not applied here", () => {
-    it("defers a connected change to the approval machinery", async () => {
-      const stub = stubCommit();
-      const { outcomes } = await commitTurn(
+  describe("connected-change proposals are staged into the transaction, not applied ad hoc (T11)", () => {
+    it("stages a proposal's items and reports back what the database actually created", async () => {
+      const stub = stubCommit(() => ({
+        outcome: "completed",
+        written: { "0": 1 },
+        refused: {},
+        proposals: {
+          "0": {
+            id: "proposal-1",
+            title: "Narrow the target customer",
+            rationale: "The evidence points at smaller agencies.",
+            areas: ["customer"],
+          },
+        },
+      }));
+      const { outcomes, changed } = await commitTurn(
         stub.commit,
         ctx,
         [
@@ -357,18 +376,48 @@ describe("commitTurn", () => {
         ANSWER,
       );
 
-      expect(outcomes[0]).toEqual({
-        applied: false,
-        kind: "propose_connected_change",
-        reason: "deferred",
-      });
-      // Nothing about it is written: approval is a deterministic state machine
-      // (T11), and prose cannot stand in for it (docs/AI_SYSTEM.md §6).
+      expect(outcomes).toEqual([
+        {
+          applied: true,
+          kind: "propose_connected_change",
+          count: 1,
+          proposal: {
+            id: "proposal-1",
+            title: "Narrow the target customer",
+            rationale: "The evidence points at smaller agencies.",
+            areas: ["customer"],
+          },
+        },
+      ]);
+      expect(changed).toBe(true);
+      /*
+        Not a field or an assumption itself — a proposal stays inert
+        (`change_proposals.status = 'proposed'`) until a person decides it
+        through `apply_change_proposal`/`undo_change_proposal`, never here.
+      */
       expect(stub.sent()?.fields).toEqual([]);
       expect(stub.sent()?.assumptions).toEqual([]);
+      expect(
+        (stub.sent() as unknown as { proposals: unknown[] })?.proposals,
+      ).toEqual([
+        {
+          slot: 0,
+          title: "Narrow the target customer",
+          rationale: "The evidence points at smaller agencies.",
+          remaining_uncertainty: "No evidence on willingness to pay yet.",
+          items: [
+            {
+              area: "customer",
+              key: "primary_customer",
+              before: "Letting agencies",
+              after: "Letting agencies under 20 staff",
+            },
+          ],
+        },
+      ]);
     });
 
-    it("still refuses a malformed connected change", async () => {
+    it("refuses a malformed connected change without reaching the database", async () => {
       const stub = stubCommit();
       const { outcomes } = await commitTurn(
         stub.commit,
@@ -382,8 +431,14 @@ describe("commitTurn", () => {
         ANSWER,
       );
       expect(outcomes[0]).toMatchObject({ applied: false, reason: "rejected" });
+      expect(
+        (stub.sent() as unknown as { proposals: unknown[] } | undefined)
+          ?.proposals,
+      ).toEqual([]);
     });
+  });
 
+  describe("consequential operations are not applied here", () => {
     it("defers a checkpoint", async () => {
       const stub = stubCommit();
       const { outcomes } = await commitTurn(
@@ -424,6 +479,7 @@ describe("commitTurn", () => {
           "0": (writes as unknown as { evidence: unknown[] }).evidence.length,
         },
         refused: {},
+        proposals: {},
       }));
       const { outcomes, changed } = await commitTurn(
         stub.commit,
@@ -494,6 +550,7 @@ describe("commitTurn", () => {
         outcome: "completed",
         written: {},
         refused: { "0": ["already_linked"] },
+        proposals: {},
       });
       const { outcomes, changed } = await commitTurn(
         stub.commit,

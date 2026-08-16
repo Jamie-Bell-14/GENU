@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { CanvasObject } from "@/lib/canvas/model";
+import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { TurnStatus } from "@/lib/services/turn-snapshot";
 import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import { resolveActions } from "./contextual-actions";
@@ -46,6 +48,10 @@ export interface TurnRuntime {
   /** A direction is in flight; the control is disabled until it resolves. */
   directionPending: boolean;
   onAction: (action: ContextualAction) => void;
+  /** Clears a pending proposal once it has genuinely been decided (T11). */
+  resolveProposal: (proposalId: string) => void;
+  /** Re-reads project truth after a write that happened outside a turn (T11). */
+  refreshProjectModel: () => Promise<void>;
 }
 
 /**
@@ -100,6 +106,7 @@ export function useTurnRuntime({
   initialActivity = [],
   initialResearch = null,
   initialEvidenceOutcome = null,
+  initialPendingProposal = null,
 }: Readonly<{
   projectId: string;
   initialMessages?: Message[];
@@ -124,6 +131,18 @@ export function useTurnRuntime({
    * not a live event.
    */
   initialEvidenceOutcome?: { reason: string } | null;
+  /**
+   * A connected-change proposal still awaiting review as of the last reload
+   * (T11) — seeded the same way `initialResearch` is: what a fresh mount
+   * already knows about its project, not a live event.
+   */
+  initialPendingProposal?: {
+    id: string;
+    title: string;
+    rationale: string;
+    affectedAreas: string[];
+    turnId: string;
+  } | null;
 }>): TurnRuntime {
   const [state, dispatch] = useReducer(turnReducer, {
     ...INITIAL_TURN_STATE,
@@ -138,6 +157,7 @@ export function useTurnRuntime({
     // The action a hydrated receipt actually enables — the only contextual
     // action a fresh mount can honestly offer without a turn having run.
     actions: initialResearch ? resolveActions(["add_as_evidence"]) : [],
+    pendingProposal: initialPendingProposal,
   });
   const [draft, setDraft] = useState("");
   const [directionPending, setDirectionPending] = useState(false);
@@ -543,6 +563,48 @@ export function useTurnRuntime({
     setDraft((current) => current || action.label);
   }, []);
 
+  /**
+   * A pending proposal was decided — approved, partially approved, rejected
+   * or undone — through the dedicated changes endpoint (T11), never through
+   * this hook's own turn machinery. Scoped to the proposal it names, so a
+   * decision on an older proposal (were one somehow still in flight) cannot
+   * clear a newer one already showing.
+   */
+  const resolveProposal = useCallback((proposalId: string) => {
+    dispatch({ type: "proposal_resolved", proposalId });
+  }, []);
+
+  /**
+   * Re-reads project truth after a write that happened outside any turn —
+   * approving or undoing a connected-change proposal (T11) — the same
+   * "canvas shows what the application's own tables now hold" rule a running
+   * turn's `project_model_updated` event already follows, reached from a
+   * client component instead of the server route.
+   */
+  const refreshProjectModel = useCallback(async () => {
+    if (isDemo) return;
+    try {
+      const response = await fetch(`/api/projects/${projectId}/model`);
+      if (!response.ok) return;
+      const payload = (await response.json()) as {
+        objects: CanvasObject[];
+        relationships: ProjectRelationship[];
+      };
+      dispatch({
+        type: "event",
+        event: {
+          type: "project_model_updated",
+          objects: payload.objects,
+          relationships: payload.relationships,
+        },
+      });
+    } catch {
+      // The approve/undo call itself already reported its own outcome; a
+      // failed refresh only means the canvas keeps showing its last known
+      // state until the next turn or reload re-reads it.
+    }
+  }, [isDemo, projectId]);
+
   return {
     state,
     draft,
@@ -554,5 +616,7 @@ export function useTurnRuntime({
     dismissRecovery,
     directionPending,
     onAction,
+    resolveProposal,
+    refreshProjectModel,
   };
 }

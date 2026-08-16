@@ -9,6 +9,7 @@ import {
 } from "@/lib/canvas/project-model-store";
 import { loadActivityHistory } from "@/lib/services/activity";
 import { loadLatestEvidenceOutcome } from "@/lib/services/turn-snapshot";
+import { loadPendingProposal } from "@/lib/services/change-proposals";
 
 // Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
@@ -53,6 +54,7 @@ export default async function ProjectPage({
     activity,
     research,
     evidenceOutcome,
+    pendingProposal,
   ] = await Promise.all([
     loadCanvasObjects(supabase, projectId),
     loadProjectRelationships(supabase, projectId),
@@ -68,6 +70,11 @@ export default async function ProjectPage({
     // receipt (T10 review round 4, P0-3) — otherwise only the stored,
     // staged assistant wording would survive a reload.
     loadLatestEvidenceOutcome(supabase, projectId),
+    // A connected-change proposal still awaiting review (T11) — recovered
+    // the same way a still-current research receipt is, so the in-stream
+    // card survives a reload rather than only being reachable while the SSE
+    // stream that created it stays open.
+    loadPendingProposal(supabase, projectId),
   ]);
 
   return (
@@ -81,6 +88,17 @@ export default async function ProjectPage({
       canvasRelationships={canvasRelationships.data}
       initialResearch={research}
       initialEvidenceOutcome={evidenceOutcome}
+      initialPendingProposal={
+        pendingProposal
+          ? {
+              id: pendingProposal.id,
+              title: pendingProposal.title,
+              rationale: pendingProposal.rationale,
+              affectedAreas: pendingProposal.areas,
+              turnId: pendingProposal.turnId,
+            }
+          : null
+      }
     />
   );
 }

@@ -35,6 +35,15 @@ import type { CompleteTurnRecord } from "./trusted-writer";
  * checkpoints are consequential and are not applied here at all.
  */
 
+/** A durably-created proposal's compact summary (T11), for surfacing after commit. */
+export interface CreatedProposal {
+  id: string;
+  title: string;
+  rationale: string;
+  /** Distinct project areas the proposal's items target, for the in-stream card. */
+  areas: string[];
+}
+
 export type OperationOutcome =
   | {
       applied: true;
@@ -43,6 +52,13 @@ export type OperationOutcome =
       count: number;
       /** Rows it refused, when part of the operation was not permitted. */
       refused?: number;
+      /**
+       * Present only for `propose_connected_change`: what was actually
+       * created, so the host can announce it once the transaction that
+       * created it has genuinely committed (T11) — the same reasoning
+       * `research_findings` already follows for its own receipt id.
+       */
+      proposal?: CreatedProposal;
     }
   /** Understood, deliberately not applied at this stage of the build. */
   | { applied: false; kind: DiscoveryToolName; reason: "deferred" }
@@ -96,6 +112,7 @@ export type TurnCommitter = (input: {
   fields: unknown[];
   assumptions: unknown[];
   evidence: unknown[];
+  proposals: unknown[];
 }) => Promise<CompleteTurnRecord>;
 
 function normalise(value: string): string {
@@ -177,6 +194,25 @@ interface EvidenceRow {
 }
 
 /**
+ * A staged connected-change proposal (T11). Stores intent only — `before` is
+ * the model's own claim of the field's current value, kept for display and
+ * staleness-checking; `apply_change_proposal` re-reads the live value at
+ * approval time rather than trusting this (docs/ARCHITECTURE.md §11).
+ */
+interface ProposalRow {
+  slot: number;
+  title: string;
+  rationale: string;
+  remaining_uncertainty: string;
+  items: {
+    area: string;
+    key: string;
+    before: string;
+    after: string;
+  }[];
+}
+
+/**
  * Refusal codes the database reports, in words a person can act on.
  *
  * Exported rather than kept private: the same mapping is what makes a
@@ -239,6 +275,7 @@ export async function commitTurn(
   const fields: FieldRow[] = [];
   const assumptions: AssumptionRow[] = [];
   const evidence: EvidenceRow[] = [];
+  const proposals: ProposalRow[] = [];
   /** Which outcome slots the transaction decides, so it can rewrite them. */
   const writeSlots: number[] = [];
 
@@ -304,14 +341,33 @@ export async function commitTurn(
       }
 
       case "propose_connected_change": {
+        /*
+          Stored as intent (T11), the same as any other staged write: kept
+          only if this turn's transaction commits. Nothing here writes a
+          project field — a proposal is inert until a person reviews and
+          approves it through `apply_change_proposal`.
+        */
         const parsed = ProposeConnectedChangeSchema.safeParse(
           operation.candidate,
         );
-        outcomes.push(
-          parsed.success
-            ? { applied: false, kind: tool, reason: "deferred" }
-            : reject(tool, parsed.error.issues[0].message),
-        );
+        if (!parsed.success) {
+          outcomes.push(reject(tool, parsed.error.issues[0].message));
+          break;
+        }
+        proposals.push({
+          slot,
+          title: parsed.data.title,
+          rationale: parsed.data.rationale,
+          remaining_uncertainty: parsed.data.remainingUncertainty,
+          items: parsed.data.items.map((item) => ({
+            area: item.area,
+            key: item.key,
+            before: item.before,
+            after: item.after,
+          })),
+        });
+        writeSlots.push(slot);
+        outcomes.push({ applied: true, kind: tool, count: 1 });
         break;
       }
 
@@ -374,7 +430,13 @@ export async function commitTurn(
     state are part of this transaction too, so there is no path on which a turn
     ends without one.
   */
-  const record = await commit({ assistantText, fields, assumptions, evidence });
+  const record = await commit({
+    assistantText,
+    fields,
+    assumptions,
+    evidence,
+    proposals,
+  });
 
   if (record.outcome !== "completed") {
     /*
@@ -405,11 +467,13 @@ export async function commitTurn(
       continue;
     }
     changed = true;
+    const proposal = record.proposals[String(slot)];
     outcomes[slot] = {
       applied: true,
       kind,
       count: written,
       ...(refusals.length ? { refused: refusals.length } : {}),
+      ...(kind === "propose_connected_change" && proposal ? { proposal } : {}),
     };
   }
 

@@ -13,12 +13,14 @@ import {
 } from "@/lib/workspace/layout";
 import { ConversationPane } from "@/components/conversation/conversation-pane";
 import { LivingCanvas } from "@/components/canvas/living-canvas";
+import { ChangeProposalSheet } from "@/components/changes/change-proposal-sheet";
 import type { EditSubmit } from "@/components/canvas/object-editor";
 import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { ActivityLine, Message } from "@/lib/ai/turn-events";
 import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import { useTurnRuntime } from "@/lib/ai/use-turn-runtime";
+import { useChangeProposalActions } from "@/lib/ai/use-change-proposal-actions";
 import { ActivityHistory } from "@/components/activity/activity-history";
 import { AppearanceSettings } from "./appearance-settings";
 import { PlanningNav } from "./planning-nav";
@@ -64,6 +66,7 @@ export function WorkspaceShell({
   canvasRelationships = [],
   initialResearch = null,
   initialEvidenceOutcome = null,
+  initialPendingProposal = null,
   onEditObject,
 }: Readonly<{
   projectId: string;
@@ -93,6 +96,17 @@ export function WorkspaceShell({
    * staged assistant wording.
    */
   initialEvidenceOutcome?: { reason: string } | null;
+  /**
+   * A connected-change proposal still awaiting review as of the last reload
+   * (T11) — recovered the same way `initialResearch` is.
+   */
+  initialPendingProposal?: {
+    id: string;
+    title: string;
+    rationale: string;
+    affectedAreas: string[];
+    turnId: string;
+  } | null;
   onEditObject?: EditSubmit;
 }>) {
   /*
@@ -107,7 +121,25 @@ export function WorkspaceShell({
     initialActivity,
     initialResearch,
     initialEvidenceOutcome,
+    initialPendingProposal,
   });
+  const proposalActions = useChangeProposalActions(
+    projectId,
+    runtime.resolveProposal,
+    runtime.refreshProjectModel,
+  );
+  // The sheet stays mounted across pane layouts; the title it shows before
+  // its own fetch resolves comes from the card that opened it, when that is
+  // still the pending proposal — a decided one reopened from the outcome
+  // banner has no live card, so the sheet's own fetched title is all there is.
+  const sheetProposalTitle =
+    runtime.state.pendingProposal?.id === proposalActions.sheetProposalId
+      ? runtime.state.pendingProposal.title
+      : "";
+  const pendingProposalId = runtime.state.pendingProposal?.id ?? null;
+  const onReviewProposal = pendingProposalId
+    ? () => proposalActions.openSheet(pendingProposalId)
+    : undefined;
   /*
     The canvas draws from the server-rendered model until a turn changes
     something, at which point the server re-reads its own tables and sends the
@@ -230,7 +262,10 @@ export function WorkspaceShell({
                 defaultSize={effective.split}
                 minSize={25}
               >
-                <ConversationPane runtime={runtime} />
+                <ConversationPane
+                  runtime={runtime}
+                  proposalActions={proposalActions}
+                />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
@@ -246,11 +281,15 @@ export function WorkspaceShell({
                   unavailableSources={runtime.state.unavailableSources}
                   activity={runtime.state.activity.canvas}
                   onEdit={onEditObject}
+                  onReviewProposal={onReviewProposal}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>
           ) : mode === "conversation" ? (
-            <ConversationPane runtime={runtime} />
+            <ConversationPane
+              runtime={runtime}
+              proposalActions={proposalActions}
+            />
           ) : (
             <LivingCanvas
               objects={liveObjects}
@@ -260,10 +299,30 @@ export function WorkspaceShell({
               unavailableSources={runtime.state.unavailableSources}
               activity={runtime.state.activity.canvas}
               onEdit={onEditObject}
+              onReviewProposal={onReviewProposal}
             />
           )}
         </main>
       </div>
+      <ChangeProposalSheet
+        proposalId={proposalActions.sheetProposalId}
+        title={sheetProposalTitle}
+        loadDetail={proposalActions.loadDetail}
+        onApprove={(decisions) =>
+          proposalActions.submitReview(
+            {
+              id: proposalActions.sheetProposalId ?? "",
+              title: sheetProposalTitle,
+            },
+            decisions,
+          )
+        }
+        onOpenChange={(open) => {
+          if (!open) proposalActions.closeSheet();
+        }}
+        pending={proposalActions.pending}
+        error={proposalActions.error}
+      />
     </div>
   );
 }

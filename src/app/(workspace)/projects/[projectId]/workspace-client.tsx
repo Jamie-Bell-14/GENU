@@ -24,6 +24,7 @@ export function WorkspaceClient({
   canvasRelationships,
   initialResearch,
   initialEvidenceOutcome,
+  initialPendingProposal,
 }: Readonly<{
   projectId: string;
   projectName: string;
@@ -40,6 +41,14 @@ export function WorkspaceClient({
   /** A refused "Add as evidence" still current as of the last reload
    *  (T10 review round 4, P0-3). */
   initialEvidenceOutcome: { reason: string } | null;
+  /** A connected-change proposal still awaiting review (T11). */
+  initialPendingProposal: {
+    id: string;
+    title: string;
+    rationale: string;
+    affectedAreas: string[];
+    turnId: string;
+  } | null;
 }>) {
   const onEditObject = useCallback<EditSubmit>(
     async (object, text) => {
@@ -66,6 +75,7 @@ export function WorkspaceClient({
       canvasRelationships={canvasRelationships}
       initialResearch={initialResearch}
       initialEvidenceOutcome={initialEvidenceOutcome}
+      initialPendingProposal={initialPendingProposal}
       onEditObject={onEditObject}
     />
   );

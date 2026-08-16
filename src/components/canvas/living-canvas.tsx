@@ -103,6 +103,7 @@ export function LivingCanvas({
   loading = false,
   error = null,
   onEdit,
+  onReviewProposal,
 }: Readonly<{
   objects: CanvasObject[];
   relationships?: ProjectRelationship[];
@@ -132,6 +133,13 @@ export function LivingCanvas({
    * (docs/ADAPTIVE_CANVAS_MVP.md §4.4), so the visual map never mutates text.
    */
   onEdit?: EditSubmit;
+  /**
+   * Opens the focused before/after proposal review (T11,
+   * docs/ADAPTIVE_CANVAS_MVP.md §4.3). Only offered while the canvas is in
+   * its impact-review emphasis state; omit where there is nothing pending to
+   * review.
+   */
+  onReviewProposal?: () => void;
 }>) {
   /*
     When no scene is supplied, the host derives one for the active problem and
@@ -448,6 +456,12 @@ export function LivingCanvas({
             map={map}
             pinned={mapView.pinned}
             emphasis={scene?.emphasis ?? "none"}
+            affectedObjectIds={
+              scene?.emphasis === "impact_review" ? scene.visibleObjectIds : []
+            }
+            onReviewProposal={
+              scene?.emphasis === "impact_review" ? onReviewProposal : undefined
+            }
             operations={{
               onFocus: focusOn,
               onToggleBranch: (key) =>

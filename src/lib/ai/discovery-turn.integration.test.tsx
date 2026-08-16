@@ -216,7 +216,7 @@ function scriptedCommit() {
       });
       written[String(row.slot)] = (written[String(row.slot)] ?? 0) + 1;
     }
-    return { outcome: "completed", written, refused: {} };
+    return { outcome: "completed", written, refused: {}, proposals: {} };
   };
   return { commit, stored };
 }
@@ -578,7 +578,7 @@ describe("same-turn research and add-evidence are never wired together (T10 revi
       committerCalls.push(writes.evidence);
       // Nothing here ever legitimately reaches the committer with an
       // `add_evidence` row in either scenario below — see the assertions.
-      return { outcome: "completed", written: {}, refused: {} };
+      return { outcome: "completed", written: {}, refused: {}, proposals: {} };
     };
 
     await finishTurn(

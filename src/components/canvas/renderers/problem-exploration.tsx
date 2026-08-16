@@ -48,11 +48,12 @@ function StatusLine({
 
 function FocalObject({
   object,
-  emphasised,
+  affected,
   onInspect,
 }: Readonly<{
   object: CanvasObject;
-  emphasised: boolean;
+  /** Impact-review is active and this object is one the proposal names (T11). */
+  affected: boolean;
   onInspect: (id: string) => void;
 }>) {
   return (
@@ -63,7 +64,7 @@ function FocalObject({
         object.origin === "ai_inferred"
           ? "border-l-assumption border-dashed"
           : "border-l-brand",
-        emphasised && "ring-edge-focus ring-1",
+        affected && "ring-edge-focus ring-1",
       )}
     >
       <p className="text-fg-tertiary text-xs font-medium tracking-wide uppercase">
@@ -95,10 +96,18 @@ function FocalObject({
 function BranchRow({
   member,
   pinned,
+  dimmed,
   operations,
 }: Readonly<{
   member: Branch["members"][number];
   pinned: boolean;
+  /**
+   * Impact-review is active and this object is not one the proposal touches
+   * (T11) — reduced prominence, not hidden: docs/ADAPTIVE_CANVAS_MVP.md §4.3
+   * asks for unrelated context to recede, never to disappear or become
+   * unreachable.
+   */
+  dimmed: boolean;
   operations: MapOperations;
 }>) {
   const { object, relationship } = member;
@@ -106,7 +115,12 @@ function BranchRow({
     <li>
       {/* Compact row, not a card: avoids the uniform card treatment
           DESIGN.md §21 and UI acceptance §4 warn against. */}
-      <div className="border-edge-subtle hover:bg-surface-secondary flex items-start justify-between gap-2 border-b py-2 last:border-b-0">
+      <div
+        className={cn(
+          "border-edge-subtle hover:bg-surface-secondary flex items-start justify-between gap-2 border-b py-2 last:border-b-0",
+          dimmed && "opacity-50",
+        )}
+      >
         <div className="min-w-0">
           <p className="text-sm break-words">{object.title}</p>
           <StatusLine object={object} relationship={relationship} />
@@ -149,11 +163,25 @@ export function ProblemExplorationRenderer({
   map,
   pinned,
   emphasis,
+  affectedObjectIds = [],
+  onReviewProposal,
   operations,
 }: Readonly<{
   map: ProblemMap;
   pinned: string[];
   emphasis: "none" | "impact_review";
+  /**
+   * The proposed change's own objects (T11) — the scene's `visibleObjectIds`
+   * when the model recommended this impact-review state, never inferred by
+   * the renderer itself. Ignored outside `emphasis === "impact_review"`.
+   */
+  affectedObjectIds?: string[];
+  /**
+   * Opens the focused before/after proposal review
+   * (docs/ADAPTIVE_CANVAS_MVP.md §4.3: "links to the focused before/after
+   * proposal review"). Only rendered while impact-review is active.
+   */
+  onReviewProposal?: () => void;
   operations: MapOperations;
 }>) {
   if (!map.focal) {
@@ -170,13 +198,29 @@ export function ProblemExplorationRenderer({
     );
   }
 
+  const reviewingImpact = emphasis === "impact_review";
+  const isAffected = (objectId: string) => affectedObjectIds.includes(objectId);
   const hasBranches = map.branches.length > 0;
 
   return (
     <div className="flex flex-col gap-4 p-3">
+      {reviewingImpact && (
+        <div className="border-brand/40 bg-surface-secondary flex items-center justify-between gap-2 rounded-md border p-3">
+          <p className="text-fg-secondary text-xs">
+            Reviewing a proposed change. Affected objects are highlighted;
+            everything else is dimmed.
+          </p>
+          {onReviewProposal && (
+            <Button variant="outline" size="xs" onClick={onReviewProposal}>
+              Review changes
+            </Button>
+          )}
+        </div>
+      )}
+
       <FocalObject
         object={map.focal}
-        emphasised={emphasis === "impact_review"}
+        affected={reviewingImpact && isAffected(map.focal.id)}
         onInspect={operations.onInspect}
       />
 
@@ -210,6 +254,7 @@ export function ProblemExplorationRenderer({
                       key={member.relationship.id}
                       member={member}
                       pinned={pinned.includes(member.object.id)}
+                      dimmed={reviewingImpact && !isAffected(member.object.id)}
                       operations={operations}
                     />
                   ))}

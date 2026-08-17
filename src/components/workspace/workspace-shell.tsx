@@ -20,7 +20,10 @@ import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { ActivityLine, Message } from "@/lib/ai/turn-events";
 import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import { useTurnRuntime } from "@/lib/ai/use-turn-runtime";
-import { useChangeProposalActions } from "@/lib/ai/use-change-proposal-actions";
+import {
+  useChangeProposalActions,
+  type ProposalOutcome,
+} from "@/lib/ai/use-change-proposal-actions";
 import { ActivityHistory } from "@/components/activity/activity-history";
 import { AppearanceSettings } from "./appearance-settings";
 import { PlanningNav } from "./planning-nav";
@@ -67,6 +70,7 @@ export function WorkspaceShell({
   initialResearch = null,
   initialEvidenceOutcome = null,
   initialPendingProposal = null,
+  initialProposalOutcome = null,
   onEditObject,
 }: Readonly<{
   projectId: string;
@@ -108,6 +112,13 @@ export function WorkspaceShell({
     affectedObjectIds: string[];
     turnId: string;
   } | null;
+  /**
+   * The project's most recently *decided* proposal, still current as of the
+   * last reload (issue #25) — recovered the same way `initialPendingProposal`
+   * is, so the outcome card and its Review changes/Undo actions survive a
+   * reload rather than only existing in the session that made the decision.
+   */
+  initialProposalOutcome?: ProposalOutcome | null;
   onEditObject?: EditSubmit;
 }>) {
   /*
@@ -128,6 +139,7 @@ export function WorkspaceShell({
     projectId,
     runtime.resolveProposal,
     runtime.refreshProjectModel,
+    initialProposalOutcome,
   );
   // The sheet stays mounted across pane layouts; the title it shows before
   // its own fetch resolves comes from the card that opened it, when that is

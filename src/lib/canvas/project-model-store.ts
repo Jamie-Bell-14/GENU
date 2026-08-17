@@ -92,6 +92,13 @@ export async function loadCanvasObjects(
           "id, statement, why_it_matters, status, origin, alternatives, recommended_validation",
         )
         .eq("project_id", projectId)
+        // Excludes an assumption still tied to an undecided or rejected
+        // connected-change proposal (T11 review round 5, issue #28): it was
+        // recorded as the reasoning behind a direction the person has not
+        // (or no longer) approved, so it must not read as active project
+        // truth — here or in the model's own context, which this same read
+        // supplies (see turns/route.ts).
+        .eq("pending_decision", false)
         .order("created_at", { ascending: true })
         .limit(50),
       // Evidence's own id is its canvas-object identity (T10 review round 1,

@@ -171,6 +171,20 @@ export const RecordAssumptionSchema = z
     importance: z.enum(ASSUMPTION_IMPORTANCE),
     /** Verified against the real message before it can mean `user_stated`. */
     quotedFromMessage,
+    /**
+     * True when this assumption is the reasoning behind a connected-change
+     * direction being proposed in this same turn, rather than something that
+     * stands on its own (T11 review round 5, issue #28). An assumption
+     * marked this way is recorded but stays out of the Structured view and
+     * the model's own context until the proposal it belongs to is approved
+     * — rejecting or undoing that proposal must not leave the reasoning
+     * behind it looking like settled project truth. `complete_turn` links
+     * this to the turn's own proposal server-side; if the turn stages more
+     * than one, linkage is not attempted and the assumption is recorded as
+     * ordinary/immediate instead, since which proposal it means cannot be
+     * inferred from this flag alone.
+     */
+    contingentOnProposal: z.boolean().default(false),
   })
   .strict();
 
@@ -412,7 +426,7 @@ export const DISCOVERY_TOOLS = [
   {
     name: "record_assumption",
     description:
-      "Record an assumption the project is now resting on — one the person made, or one you drew from what they said. Say why it matters and offer alternative explanations that are genuinely plausible, not ones chosen to be dismissed. Mark it material only if being wrong about it would change the direction of the work.",
+      "Record an assumption the project is now resting on — one the person made, or one you drew from what they said. Say why it matters and offer alternative explanations that are genuinely plausible, not ones chosen to be dismissed. Mark it material only if being wrong about it would change the direction of the work. If this assumption is specifically the reasoning behind a connected change you are proposing this same turn, mark it contingentOnProposal rather than recording it as if it were already settled.",
     strict: true,
     input_schema: {
       type: "object",
@@ -423,6 +437,7 @@ export const DISCOVERY_TOOLS = [
         "alternatives",
         "importance",
         "quotedFromMessage",
+        "contingentOnProposal",
       ],
       properties: {
         statement: { type: "string" },
@@ -436,6 +451,11 @@ export const DISCOVERY_TOOLS = [
           type: ["string", "null"],
           description:
             "An exact, word-for-word excerpt from the person's message, if the assumption is theirs in those words. It is checked against the real message. Send null when the assumption is your own inference.",
+        },
+        contingentOnProposal: {
+          type: "boolean",
+          description:
+            "True only when this assumption is the reasoning behind a connected-change proposal you are also proposing this same turn — it will not appear as active project truth unless that proposal is approved. False for an assumption that stands on its own, which is most of them.",
         },
       },
     },

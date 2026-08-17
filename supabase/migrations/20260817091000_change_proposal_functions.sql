@@ -56,6 +56,15 @@ declare
   v_field_value text;
   v_field_origin public.field_origin;
   v_field_support public.support_state;
+  /*
+    Links a proposal-contingent assumption to the turn's own proposal (T11
+    review round 5, issue #28) — see the proposals loop below, which now
+    runs before the assumptions loop for exactly this reason.
+  */
+  v_proposal_count integer := 0;
+  v_single_proposal_id uuid;
+  v_assumption_proposal_id uuid;
+  v_assumption_pending boolean;
 begin
   perform private.assert_project_actor(p_project_id, p_actor_id);
 
@@ -146,6 +155,121 @@ begin
     );
   end loop;
 
+  /*
+    Connected-change proposals (T11 review round 1, P1). Stored as intent
+    only — nothing here touches `project_fields`. `before` is never the
+    model's own claim of the field's current value: it is read fresh from
+    `project_fields` here, by the server, for every item, the moment the
+    proposal is staged. Two things follow from that. First, the review
+    sheet's "Currently" column is always genuine project truth, never model
+    prose — a model that describes the existing value imperfectly can no
+    longer mislabel it. Second, `apply_change_proposal`'s staleness check
+    becomes a true database-to-database comparison across two points in
+    time, so it can never manufacture a false conflict out of a merely
+    inaccurate model description (docs/ARCHITECTURE.md §11). A null `before`
+    means the field does not exist yet in this project, exactly as an
+    approval or an undo already interprets it.
+
+    `v_object_ids` collects the canvas-object id (`project_fields.id`) of
+    every item that already exists as a field, so the client can highlight
+    precisely the objects this proposal touches — never the scene's own
+    `visibleObjectIds`, which name everything a scene may show, not what a
+    proposal changes.
+
+    Runs *before* the assumptions loop below (T11 review round 5, issue #28):
+    a proposal-contingent assumption needs its proposal's real id to link
+    to, and that id does not exist until this loop creates the row.
+    `v_proposal_count`/`v_single_proposal_id` are what the assumptions loop
+    reads — see its own comment for why linkage is only attempted when a
+    turn stages exactly one proposal.
+  */
+  for proposal_item in select * from jsonb_array_elements(coalesce(p_proposals, '[]'::jsonb))
+  loop
+    slot := coalesce(proposal_item ->> 'slot', '0');
+
+    insert into public.change_proposals
+      (project_id, source_turn_id, title, rationale, remaining_uncertainty)
+    values (
+      p_project_id,
+      p_turn_id,
+      proposal_item ->> 'title',
+      proposal_item ->> 'rationale',
+      proposal_item ->> 'remaining_uncertainty'
+    )
+    returning id into v_proposal_id;
+
+    v_proposal_count := v_proposal_count + 1;
+
+    v_areas := array[]::text[];
+    v_object_ids := array[]::uuid[];
+    for change_item in select * from jsonb_array_elements(coalesce(proposal_item -> 'items', '[]'::jsonb))
+    loop
+      /*
+        A non-strict `select ... into` leaves its targets at their *previous*
+        value when zero rows match — it does not clear them. v_field_id and
+        friends are declared once for the whole function and reused by every
+        item in every proposal, so without this reset a field that does not
+        exist yet would silently inherit an earlier item's real id/value/
+        origin/support as its "before" instead of being recorded as null.
+      */
+      v_field_id := null;
+      v_field_value := null;
+      v_field_origin := null;
+      v_field_support := null;
+      select id, value, origin, support
+      into v_field_id, v_field_value, v_field_origin, v_field_support
+      from public.project_fields
+      where project_id = p_project_id
+        and area = (change_item ->> 'area')::public.project_area
+        and key = change_item ->> 'key';
+
+      /*
+        `before_origin`/`before_support` snapshot the same real row `before`
+        does, at the same instant (T11 review round 2, P1) — so
+        `undo_change_proposal` can restore what an approval overwrites in
+        full, not only the text.
+      */
+      insert into public.change_items
+        (proposal_id, area, key, before, before_origin, before_support, after)
+      values (
+        v_proposal_id,
+        (change_item ->> 'area')::public.project_area,
+        change_item ->> 'key',
+        v_field_value,
+        v_field_origin,
+        v_field_support,
+        change_item ->> 'after'
+      );
+      v_areas := array_append(v_areas, change_item ->> 'area');
+      if v_field_id is not null then
+        v_object_ids := array_append(v_object_ids, v_field_id);
+      end if;
+    end loop;
+
+    written := jsonb_set(
+      written, array[slot], to_jsonb(1), true
+    );
+    proposals := jsonb_set(
+      proposals,
+      array[slot],
+      jsonb_build_object(
+        'id', v_proposal_id,
+        'title', proposal_item ->> 'title',
+        'rationale', proposal_item ->> 'rationale',
+        'areas', to_jsonb(array(select distinct unnest(v_areas))),
+        'object_ids', to_jsonb(coalesce(v_object_ids, array[]::uuid[]))
+      ),
+      true
+    );
+  end loop;
+
+  -- Exactly one proposal this turn is the only case linkage can be
+  -- unambiguous in; see the assumptions loop below.
+  v_single_proposal_id := case
+    when v_proposal_count = 1 then v_proposal_id
+    else null
+  end;
+
   for item in select * from jsonb_array_elements(coalesce(p_assumptions, '[]'::jsonb))
   loop
     slot := coalesce(item ->> 'slot', '0');
@@ -156,9 +280,31 @@ begin
         using errcode = 'check_violation';
     end if;
 
+    /*
+      Proposal-contingent assumption linkage (T11 review round 5, issue #28).
+      An assumption the model marked `contingent_on_proposal` is reasoning
+      behind the direction this turn is also proposing — it starts
+      `pending_decision = true`, invisible to every read that treats
+      assumptions as active project truth, until `apply_change_proposal`
+      promotes it. An ordinary assumption (the common case: the flag is
+      false, or absent) gets neither column set, exactly today's existing
+      behaviour. Linkage is only attempted when this turn staged exactly one
+      proposal — `v_single_proposal_id` is null otherwise, including when it
+      staged none at all, and a flagged assumption with no proposal to link
+      to is recorded as an ordinary one rather than left pending forever
+      with nothing that could ever promote it.
+    */
+    v_assumption_proposal_id := null;
+    v_assumption_pending := false;
+    if coalesce((item ->> 'contingent_on_proposal')::boolean, false)
+       and v_single_proposal_id is not null then
+      v_assumption_proposal_id := v_single_proposal_id;
+      v_assumption_pending := true;
+    end if;
+
     insert into public.assumptions
       (project_id, statement, why_it_matters, alternatives, importance, origin,
-       source_turn_id, source_excerpt)
+       source_turn_id, source_excerpt, source_change_proposal_id, pending_decision)
     values (
       p_project_id,
       item ->> 'statement',
@@ -167,7 +313,9 @@ begin
       item ->> 'importance',
       (item ->> 'origin')::public.field_origin,
       case when item ->> 'source_excerpt' is null then null else p_turn_id end,
-      item ->> 'source_excerpt'
+      item ->> 'source_excerpt',
+      v_assumption_proposal_id,
+      v_assumption_pending
     );
 
     written := jsonb_set(
@@ -361,105 +509,6 @@ begin
     );
   end loop;
 
-  /*
-    Connected-change proposals (T11 review round 1, P1). Stored as intent
-    only — nothing here touches `project_fields`. `before` is never the
-    model's own claim of the field's current value: it is read fresh from
-    `project_fields` here, by the server, for every item, the moment the
-    proposal is staged. Two things follow from that. First, the review
-    sheet's "Currently" column is always genuine project truth, never model
-    prose — a model that describes the existing value imperfectly can no
-    longer mislabel it. Second, `apply_change_proposal`'s staleness check
-    becomes a true database-to-database comparison across two points in
-    time, so it can never manufacture a false conflict out of a merely
-    inaccurate model description (docs/ARCHITECTURE.md §11). A null `before`
-    means the field does not exist yet in this project, exactly as an
-    approval or an undo already interprets it.
-
-    `v_object_ids` collects the canvas-object id (`project_fields.id`) of
-    every item that already exists as a field, so the client can highlight
-    precisely the objects this proposal touches — never the scene's own
-    `visibleObjectIds`, which name everything a scene may show, not what a
-    proposal changes.
-  */
-  for proposal_item in select * from jsonb_array_elements(coalesce(p_proposals, '[]'::jsonb))
-  loop
-    slot := coalesce(proposal_item ->> 'slot', '0');
-
-    insert into public.change_proposals
-      (project_id, source_turn_id, title, rationale, remaining_uncertainty)
-    values (
-      p_project_id,
-      p_turn_id,
-      proposal_item ->> 'title',
-      proposal_item ->> 'rationale',
-      proposal_item ->> 'remaining_uncertainty'
-    )
-    returning id into v_proposal_id;
-
-    v_areas := array[]::text[];
-    v_object_ids := array[]::uuid[];
-    for change_item in select * from jsonb_array_elements(coalesce(proposal_item -> 'items', '[]'::jsonb))
-    loop
-      /*
-        A non-strict `select ... into` leaves its targets at their *previous*
-        value when zero rows match — it does not clear them. v_field_id and
-        friends are declared once for the whole function and reused by every
-        item in every proposal, so without this reset a field that does not
-        exist yet would silently inherit an earlier item's real id/value/
-        origin/support as its "before" instead of being recorded as null.
-      */
-      v_field_id := null;
-      v_field_value := null;
-      v_field_origin := null;
-      v_field_support := null;
-      select id, value, origin, support
-      into v_field_id, v_field_value, v_field_origin, v_field_support
-      from public.project_fields
-      where project_id = p_project_id
-        and area = (change_item ->> 'area')::public.project_area
-        and key = change_item ->> 'key';
-
-      /*
-        `before_origin`/`before_support` snapshot the same real row `before`
-        does, at the same instant (T11 review round 2, P1) — so
-        `undo_change_proposal` can restore what an approval overwrites in
-        full, not only the text.
-      */
-      insert into public.change_items
-        (proposal_id, area, key, before, before_origin, before_support, after)
-      values (
-        v_proposal_id,
-        (change_item ->> 'area')::public.project_area,
-        change_item ->> 'key',
-        v_field_value,
-        v_field_origin,
-        v_field_support,
-        change_item ->> 'after'
-      );
-      v_areas := array_append(v_areas, change_item ->> 'area');
-      if v_field_id is not null then
-        v_object_ids := array_append(v_object_ids, v_field_id);
-      end if;
-    end loop;
-
-    written := jsonb_set(
-      written, array[slot], to_jsonb(1), true
-    );
-    proposals := jsonb_set(
-      proposals,
-      array[slot],
-      jsonb_build_object(
-        'id', v_proposal_id,
-        'title', proposal_item ->> 'title',
-        'rationale', proposal_item ->> 'rationale',
-        'areas', to_jsonb(array(select distinct unnest(v_areas))),
-        'object_ids', to_jsonb(coalesce(v_object_ids, array[]::uuid[]))
-      ),
-      true
-    );
-  end loop;
-
   update public.turn_runs
   set state = 'completed',
       accepting_direction = false,
@@ -486,7 +535,7 @@ grant execute on function public.complete_turn(
 comment on function public.complete_turn(
   uuid, uuid, uuid, text, jsonb, jsonb, jsonb, jsonb
 ) is
-  'Stores a turn''s answer, applies its project-truth writes (fields, assumptions, evidence, connected-change proposals) and closes the run, in one transaction. An evidence item''s receipt must belong to the project''s most recently *answered* turn (role = assistant, not merely a stored message), the same currency rule reload hydration applies; a refusal is also durably recorded on turn_runs.evidence_refused_reason. A proposal item''s before value is always read fresh from project_fields by this function, never trusted from the model. Returns completed | not_running with per-slot written/refused counts and created proposal summaries (including each proposal''s affected canvas-object ids).';
+  'Stores a turn''s answer, applies its project-truth writes (fields, assumptions, evidence, connected-change proposals) and closes the run, in one transaction. An evidence item''s receipt must belong to the project''s most recently *answered* turn (role = assistant, not merely a stored message), the same currency rule reload hydration applies; a refusal is also durably recorded on turn_runs.evidence_refused_reason. A proposal item''s before value is always read fresh from project_fields by this function, never trusted from the model. An assumption marked contingent_on_proposal is linked to this turn''s own proposal (only when exactly one was staged) and recorded pending_decision = true, invisible as active project truth until apply_change_proposal promotes it. Returns completed | not_running with per-slot written/refused counts and created proposal summaries (including each proposal''s affected canvas-object ids).';
 
 -- ---------------------------------------------------------------------------
 -- Area -> document mapping
@@ -864,7 +913,21 @@ begin
   set status = v_status, decided_at = now()
   where id = p_proposal_id;
 
+  /*
+    Promotes an assumption that was recorded as this proposal's own reasoning
+    (T11 review round 5, issue #28) — an approval or partial approval is what
+    makes the direction it reasons about real, so this is the moment its
+    assumption stops being merely proposed and starts reading as active
+    project truth. A full rejection intentionally does nothing here: the
+    assumption was never promoted, so it simply stays `pending_decision =
+    true` forever, exactly "not an active hypothesis" without deleting the
+    row.
+  */
   if v_status <> 'rejected' then
+    update public.assumptions
+    set pending_decision = false
+    where source_change_proposal_id = p_proposal_id;
+
     insert into public.decisions
       (project_id, title, reasoning_summary, remaining_uncertainty,
        approved_by, change_proposal_id)
@@ -910,7 +973,7 @@ revoke all on function public.apply_change_proposal(uuid, jsonb) from public;
 grant execute on function public.apply_change_proposal(uuid, jsonb) to authenticated;
 
 comment on function public.apply_change_proposal(uuid, jsonb) is
-  'Approves (fully or partially) or rejects a connected-change proposal, transactionally: field writes (value, origin and support all overwritten to reflect the approved AI-proposed value), one new document_versions row per affected document — its full ordered section set, existing sections preserved and updated in place, new ones appended, never one row per item — a decisions row (unless rejected) and an audit_events row. Every change_items row is set to included=true or false to match what was actually decided, never left at its creation default. Refuses with conflict rather than writing if the proposal is no longer proposed or any field an included item targets has changed since the proposal was created. Iterates change_items rather than the caller''s own decisions array, so a duplicate or unknown item id in the request cannot inflate the approval count.';
+  'Approves (fully or partially) or rejects a connected-change proposal, transactionally: field writes (value, origin and support all overwritten to reflect the approved AI-proposed value), one new document_versions row per affected document — its full ordered section set, existing sections preserved and updated in place, new ones appended, never one row per item — a decisions row (unless rejected) and an audit_events row. Every change_items row is set to included=true or false to match what was actually decided, never left at its creation default. On any non-rejected outcome, promotes (pending_decision = false) every assumption complete_turn linked to this proposal, so the reasoning behind an approved direction stops being excluded from active project truth the same moment the direction itself becomes real. Refuses with conflict rather than writing if the proposal is no longer proposed or any field an included item targets has changed since the proposal was created. Iterates change_items rather than the caller''s own decisions array, so a duplicate or unknown item id in the request cannot inflate the approval count.';
 
 -- ---------------------------------------------------------------------------
 -- Undoing an applied proposal
@@ -1148,6 +1211,18 @@ begin
   set status = 'undone'
   where id = p_proposal_id;
 
+  /*
+    Retires an assumption that was promoted when this proposal was approved
+    (T11 review round 5, issue #28) — undo reverts the fields it reasoned
+    about, so the reasoning itself must stop reading as active project truth
+    too, the same way approval promoted it in the first place. The row
+    survives, `pending_decision = true` again, exactly like a rejected
+    proposal's own assumption never promoted at all.
+  */
+  update public.assumptions
+  set pending_decision = true
+  where source_change_proposal_id = p_proposal_id;
+
   insert into public.audit_events
     (project_id, actor_id, actor_kind, action, target, correlation_id, detail)
   values (
@@ -1167,4 +1242,4 @@ revoke all on function public.undo_change_proposal(uuid) from public;
 grant execute on function public.undo_change_proposal(uuid) to authenticated;
 
 comment on function public.undo_change_proposal(uuid) is
-  'Reverts an approved or partially-approved proposal''s included items to their prior value, origin and support, as new writes and one new document version per affected document (its full ordered section set, never one row per item) - never rewriting the approval itself. Refuses with conflict if a field has changed again since the approval it would undo, or if the proposal is not in an undoable state.';
+  'Reverts an approved or partially-approved proposal''s included items to their prior value, origin and support, as new writes and one new document version per affected document (its full ordered section set, never one row per item) - never rewriting the approval itself. Also retires (pending_decision = true) every assumption complete_turn linked to this proposal, so its reasoning stops reading as active project truth the same moment the fields it reasoned about are reverted. Refuses with conflict if a field has changed again since the approval it would undo, or if the proposal is not in an undoable state.';

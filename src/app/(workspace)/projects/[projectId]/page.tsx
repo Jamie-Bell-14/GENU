@@ -9,7 +9,10 @@ import {
 } from "@/lib/canvas/project-model-store";
 import { loadActivityHistory } from "@/lib/services/activity";
 import { loadLatestEvidenceOutcome } from "@/lib/services/turn-snapshot";
-import { loadPendingProposal } from "@/lib/services/change-proposals";
+import {
+  loadPendingProposal,
+  loadLatestDecidedProposal,
+} from "@/lib/services/change-proposals";
 
 // Ownership-scoped project route rendering the workspace shell (T5).
 export default async function ProjectPage({
@@ -55,6 +58,7 @@ export default async function ProjectPage({
     research,
     evidenceOutcome,
     pendingProposal,
+    decidedProposal,
   ] = await Promise.all([
     loadCanvasObjects(supabase, projectId),
     loadProjectRelationships(supabase, projectId),
@@ -75,6 +79,10 @@ export default async function ProjectPage({
     // card survives a reload rather than only being reachable while the SSE
     // stream that created it stays open.
     loadPendingProposal(supabase, projectId),
+    // The project's most recently *decided* proposal (issue #25) — recovered
+    // the same way, so the outcome card and its Review changes/Undo actions
+    // survive a reload rather than only existing in this session's memory.
+    loadLatestDecidedProposal(supabase, projectId),
   ]);
 
   return (
@@ -97,6 +105,17 @@ export default async function ProjectPage({
               affectedAreas: pendingProposal.areas,
               affectedObjectIds: pendingProposal.objectIds,
               turnId: pendingProposal.turnId,
+            }
+          : null
+      }
+      initialProposalOutcome={
+        decidedProposal
+          ? {
+              proposalId: decidedProposal.id,
+              title: decidedProposal.title,
+              status: decidedProposal.status,
+              areas: decidedProposal.areas,
+              viewRefreshed: true,
             }
           : null
       }

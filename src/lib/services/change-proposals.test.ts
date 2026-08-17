@@ -7,6 +7,7 @@ import {
   applyChangeProposal,
   findOwnedProposalProjectId,
   loadChangeProposalDetail,
+  loadLatestDecidedProposal,
   loadPendingProposal,
   undoChangeProposal,
 } from "./change-proposals";
@@ -308,6 +309,7 @@ function chainReturning(row: unknown, rows?: unknown[]) {
   const chain: Record<string, unknown> = {
     select: () => chain,
     eq: () => chain,
+    neq: () => chain,
     order: () => chain,
     limit: () => chain,
     maybeSingle: async () => ({ data: row }),
@@ -433,5 +435,46 @@ describe("loadPendingProposal", () => {
       from: () => chainReturning(null),
     } as unknown as SupabaseClient;
     await expect(loadPendingProposal(client, "project-1")).resolves.toBeNull();
+  });
+});
+
+describe("loadLatestDecidedProposal", () => {
+  it("returns the most recent decided proposal, with the distinct areas of its included items (issue #25)", async () => {
+    const client = {
+      from: (table: string) => {
+        if (table === "change_proposals") {
+          return chainReturning({
+            id: PROPOSAL,
+            title: "Narrow the target customer",
+            status: "partially_approved",
+          });
+        }
+        // change_items — only items still `included` count towards the
+        // decided outcome's areas, the same as apply_change_proposal's own
+        // returned `areas` (T11 review round 5, #25).
+        return chainReturning(null, [
+          { area: "customer" },
+          { area: "customer" },
+        ]);
+      },
+    } as unknown as SupabaseClient;
+
+    await expect(
+      loadLatestDecidedProposal(client, "project-1"),
+    ).resolves.toEqual({
+      id: PROPOSAL,
+      title: "Narrow the target customer",
+      status: "partially_approved",
+      areas: ["customer"],
+    });
+  });
+
+  it("returns nothing when the project has never decided a proposal", async () => {
+    const client = {
+      from: () => chainReturning(null),
+    } as unknown as SupabaseClient;
+    await expect(
+      loadLatestDecidedProposal(client, "project-1"),
+    ).resolves.toBeNull();
   });
 });

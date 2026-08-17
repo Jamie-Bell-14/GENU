@@ -234,6 +234,40 @@ describe("commitTurn", () => {
     ]);
   });
 
+  it("defaults an assumption to not contingent on any proposal", async () => {
+    // Issue #28: the ordinary, by-far-most-common case — an assumption with
+    // no `propose_connected_change` call in the same turn — must record
+    // exactly today's existing behaviour, immediately active.
+    const stub = stubCommit();
+    await commitTurn(
+      stub.commit,
+      ctx,
+      [op("record_assumption", validAssumption)],
+      ANSWER,
+    );
+    expect(stub.sent()?.assumptions[0]).toMatchObject({
+      contingent_on_proposal: false,
+    });
+  });
+
+  it("carries a proposal-contingent assumption's flag through to the transaction (issue #28)", async () => {
+    const stub = stubCommit();
+    await commitTurn(
+      stub.commit,
+      ctx,
+      [
+        op("record_assumption", {
+          ...validAssumption,
+          contingentOnProposal: true,
+        }),
+      ],
+      ANSWER,
+    );
+    expect(stub.sent()?.assumptions[0]).toMatchObject({
+      contingent_on_proposal: true,
+    });
+  });
+
   it("reports every write as refused when the transaction did not happen", async () => {
     /*
       Nothing was written — not one field, and not the answer either — so

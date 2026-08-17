@@ -115,7 +115,14 @@ evidence           (id, project_id, title, summary, source_name, source_url,
                     -- rather than a bespoke evidence_links table
 assumptions        (id, project_id, statement, why_it_matters, alternatives jsonb,
                     status open|supported|weakened|invalidated, importance low|material,
+                    source_change_proposal_id → change_proposals, pending_decision boolean,
                     created_at, updated_at)
+                    -- pending_decision = true excludes the row from every read that treats
+                    -- assumptions as active project truth (loadCanvasObjects, and so the
+                    -- model's own context inventory) — set when complete_turn links an
+                    -- assumption to the one proposal staged in the same turn (issue #28);
+                    -- cleared by apply_change_proposal on approval/partial approval, set
+                    -- back by undo_change_proposal on undo, never cleared for a rejection
 change_proposals   (id, project_id, title, rationale, proposed_by ai|user,
                     status proposed|approved|partially_approved|rejected|undone,
                     created_at, decided_at)

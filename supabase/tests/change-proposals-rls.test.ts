@@ -100,6 +100,16 @@ async function completeTurnWithProposal(
     title?: string;
     rationale?: string;
     remainingUncertainty?: string;
+    /**
+     * Assumptions staged in the same turn (T11 review round 5, issue #28) —
+     * empty by default, matching every existing caller of this helper.
+     */
+    assumptions?: {
+      statement: string;
+      whyItMatters: string;
+      importance: "low" | "material";
+      contingentOnProposal: boolean;
+    }[];
   } = {},
 ): Promise<CompleteResult> {
   await asTrustedWriter();
@@ -114,6 +124,14 @@ async function completeTurnWithProposal(
       items,
     },
   ];
+  const assumptions = (overrides.assumptions ?? []).map((assumption, i) => ({
+    slot: i + 1,
+    statement: assumption.statement,
+    why_it_matters: assumption.whyItMatters,
+    importance: assumption.importance,
+    origin: "ai_inferred",
+    contingent_on_proposal: assumption.contingentOnProposal,
+  }));
   const { rows } = await db.query(
     `select public.complete_turn(
        p_project_id => $1,
@@ -121,7 +139,7 @@ async function completeTurnWithProposal(
        p_actor_id => $3,
        p_assistant_text => $4,
        p_fields => '[]'::jsonb,
-       p_assumptions => '[]'::jsonb,
+       p_assumptions => $6::jsonb,
        p_evidence => '[]'::jsonb,
        p_proposals => $5::jsonb
      ) as result`,
@@ -131,6 +149,7 @@ async function completeTurnWithProposal(
       actorId,
       "Proposing a connected change.",
       JSON.stringify(proposals),
+      JSON.stringify(assumptions),
     ],
   );
   return rows[0].result as CompleteResult;
@@ -1090,6 +1109,210 @@ describe.skipIf(skip)("undo_change_proposal", () => {
     );
   });
 });
+
+/*
+  A proposal-contingent assumption's lifecycle (T11 review round 5, issue
+  #28): recorded alongside a connected-change proposal, it must not read as
+  active project truth until that proposal is actually approved — and
+  rejecting or undoing the proposal must not leave it looking settled.
+*/
+describe.skipIf(skip)(
+  "assumption lifecycle tied to a connected-change proposal",
+  () => {
+    async function assumptionRow(projectId: string, statement: string) {
+      const { rows } = await db.query(
+        `select source_change_proposal_id, pending_decision
+         from assumptions where project_id = $1 and statement = $2`,
+        [projectId, statement],
+      );
+      return rows[0] as
+        | {
+            source_change_proposal_id: string | null;
+            pending_decision: boolean;
+          }
+        | undefined;
+    }
+
+    it("starts pending and invisible, then is promoted the moment its proposal is approved", async () => {
+      const turnId = await openRun(projectA);
+      const result = await completeTurnWithProposal(
+        projectA,
+        turnId,
+        USER_A,
+        [
+          {
+            area: "customer",
+            key: "primary_customer",
+            before: null,
+            after: "Small agencies",
+          },
+        ],
+        {
+          assumptions: [
+            {
+              statement: "Smaller agencies churn faster.",
+              whyItMatters: "It changes the retention story.",
+              importance: "material",
+              contingentOnProposal: true,
+            },
+          ],
+        },
+      );
+      const proposalId = result.proposals!["0"].id;
+
+      const staged = await assumptionRow(
+        projectA,
+        "Smaller agencies churn faster.",
+      );
+      expect(staged).toMatchObject({
+        source_change_proposal_id: proposalId,
+        pending_decision: true,
+      });
+
+      const items = await db.query(
+        "select id from change_items where proposal_id = $1",
+        [proposalId],
+      );
+      await impersonate(USER_A);
+      await applyProposal(proposalId, [
+        { itemId: items.rows[0].id, included: true },
+      ]);
+
+      const promoted = await assumptionRow(
+        projectA,
+        "Smaller agencies churn faster.",
+      );
+      expect(promoted).toMatchObject({ pending_decision: false });
+    });
+
+    it("stays pending forever when the proposal is rejected — never an active hypothesis", async () => {
+      const turnId = await openRun(projectA);
+      const result = await completeTurnWithProposal(
+        projectA,
+        turnId,
+        USER_A,
+        [
+          {
+            area: "customer",
+            key: "primary_customer",
+            before: null,
+            after: "Property management companies",
+          },
+        ],
+        {
+          assumptions: [
+            {
+              statement: "Property managers pay faster than landlords.",
+              whyItMatters: "It changes the pricing model.",
+              importance: "material",
+              contingentOnProposal: true,
+            },
+          ],
+        },
+      );
+      const proposalId = result.proposals!["0"].id;
+
+      await impersonate(USER_A);
+      const decision = await applyProposal(proposalId, []);
+      expect(decision).toMatchObject({
+        outcome: "completed",
+        status: "rejected",
+      });
+
+      const row = await assumptionRow(
+        projectA,
+        "Property managers pay faster than landlords.",
+      );
+      // The row survives — a historical trace of what was proposed and
+      // declined — but never becomes active, exactly as if it were never
+      // promoted at all.
+      expect(row).toMatchObject({
+        source_change_proposal_id: proposalId,
+        pending_decision: true,
+      });
+    });
+
+    it("is retired back to pending when its approved proposal is undone", async () => {
+      const turnId = await openRun(projectA);
+      const result = await completeTurnWithProposal(
+        projectA,
+        turnId,
+        USER_A,
+        [
+          {
+            area: "customer",
+            key: "primary_customer",
+            before: null,
+            after: "Letting agencies",
+          },
+        ],
+        {
+          assumptions: [
+            {
+              statement: "Letting agencies negotiate on price.",
+              whyItMatters: "It changes the pricing model.",
+              importance: "material",
+              contingentOnProposal: true,
+            },
+          ],
+        },
+      );
+      const proposalId = result.proposals!["0"].id;
+      const items = await db.query(
+        "select id from change_items where proposal_id = $1",
+        [proposalId],
+      );
+
+      await impersonate(USER_A);
+      await applyProposal(proposalId, [
+        { itemId: items.rows[0].id, included: true },
+      ]);
+      expect(
+        await assumptionRow(projectA, "Letting agencies negotiate on price."),
+      ).toMatchObject({ pending_decision: false });
+
+      await undoProposal(proposalId);
+
+      expect(
+        await assumptionRow(projectA, "Letting agencies negotiate on price."),
+      ).toMatchObject({ pending_decision: true });
+    });
+
+    it("records an assumption not marked contingent as immediately active, unchanged from before this fix", async () => {
+      const turnId = await openRun(projectA);
+      await completeTurnWithProposal(
+        projectA,
+        turnId,
+        USER_A,
+        [
+          {
+            area: "problem",
+            key: "core_problem",
+            before: null,
+            after: "Slow deposit disputes",
+          },
+        ],
+        {
+          assumptions: [
+            {
+              statement: "Disputes concentrate at move-out.",
+              whyItMatters: "It changes when to intervene.",
+              importance: "material",
+              contingentOnProposal: false,
+            },
+          ],
+        },
+      );
+
+      expect(
+        await assumptionRow(projectA, "Disputes concentrate at move-out."),
+      ).toMatchObject({
+        source_change_proposal_id: null,
+        pending_decision: false,
+      });
+    });
+  },
+);
 
 describe.skipIf(skip)("documents / document_versions / decisions", () => {
   it("has no direct write grant for the authenticated role", async () => {

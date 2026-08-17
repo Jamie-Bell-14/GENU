@@ -251,6 +251,63 @@ export async function loadPendingProposal(
   };
 }
 
+export interface DecidedProposalHydration {
+  id: string;
+  title: string;
+  status: "approved" | "partially_approved" | "rejected" | "undone";
+  /** Distinct areas of the items the decision actually included — empty for a rejection. */
+  areas: string[];
+}
+
+/**
+ * The project's most recently *decided* proposal, if any — the outcome-banner
+ * counterpart to `loadPendingProposal` (issue #25). `useChangeProposalActions`'s
+ * `outcome` was session-only: set when a live approve/undo response arrived,
+ * with no reload path, so the outcome card and its Review changes/Undo
+ * actions vanished on refresh even though the decision itself (and the
+ * ability to undo it) were durably recorded. Read the same way
+ * `loadPendingProposal` recovers a still-undecided proposal: a fresh mount
+ * already knows this, so the banner does not have to wait for a live
+ * decision response in *this* session to reappear.
+ *
+ * `areas` mirrors exactly what `apply_change_proposal`/`undo_change_proposal`
+ * themselves return: the distinct areas of items left `included = true` by
+ * the decision — empty for a full rejection, unaffected by an undo (which
+ * never touches `included`).
+ */
+export async function loadLatestDecidedProposal(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<DecidedProposalHydration | null> {
+  const { data: proposal } = await supabase
+    .from("change_proposals")
+    .select("id, title, status")
+    .eq("project_id", projectId)
+    .neq("status", "proposed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle<{
+      id: string;
+      title: string;
+      status: DecidedProposalHydration["status"];
+    }>();
+  if (!proposal) return null;
+
+  const { data: items } = await supabase
+    .from("change_items")
+    .select("area")
+    .eq("proposal_id", proposal.id)
+    .eq("included", true)
+    .returns<{ area: string }[]>();
+
+  return {
+    id: proposal.id,
+    title: proposal.title,
+    status: proposal.status,
+    areas: Array.from(new Set((items ?? []).map((row) => row.area))),
+  };
+}
+
 /**
  * The proposal a person actually owns, or nothing — used by the route to
  * confirm the URL's project id matches the proposal before deciding it, so a

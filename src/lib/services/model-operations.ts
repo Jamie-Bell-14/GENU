@@ -188,6 +188,15 @@ interface AssumptionRow {
   importance: string;
   origin: "user_stated" | "ai_inferred";
   source_excerpt: string | null;
+  /**
+   * Whether this assumption is the reasoning behind a connected-change
+   * proposal staged in the same turn (T11 review round 5, issue #28).
+   * `complete_turn` links it to that turn's own proposal — and only if the
+   * turn stages exactly one, since which proposal this means cannot be
+   * inferred from a bare flag when there is more than one; see its own
+   * comment for why that fallback is the safe direction.
+   */
+  contingent_on_proposal: boolean;
 }
 
 /**
@@ -346,6 +355,7 @@ export async function commitTurn(
           importance: parsed.data.importance,
           origin: excerpt ? "user_stated" : "ai_inferred",
           source_excerpt: excerpt,
+          contingent_on_proposal: parsed.data.contingentOnProposal,
         });
         writeSlots.push(slot);
         outcomes.push({ applied: true, kind: tool, count: 1 });

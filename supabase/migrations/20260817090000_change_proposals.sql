@@ -337,3 +337,51 @@ grant select, insert on public.change_items to service_role;
 alter type public.audit_action add value if not exists 'proposal_approved';
 alter type public.audit_action add value if not exists 'proposal_rejected';
 alter type public.audit_action add value if not exists 'proposal_undone';
+
+-- ---------------------------------------------------------------------------
+-- Assumption lifecycle, tied to the proposal it was inferred alongside
+-- ---------------------------------------------------------------------------
+
+/*
+  A connected-change proposal correctly gates project-field writes behind
+  explicit approval, but an assumption the model infers in the *same turn* as
+  a `propose_connected_change` call — the reasoning behind the direction it is
+  proposing — was written straight into `assumptions` as active, visible,
+  canonical project truth, regardless of whether that proposal was ever
+  approved. Rejecting or undoing the proposal left the assumption behind,
+  looking like settled truth for a direction the person explicitly did not
+  adopt (T11 manual QA, issue #28).
+
+  `source_change_proposal_id` names the proposal an assumption was inferred
+  alongside, when there was one; `pending_decision` is what actually gates
+  visibility. Every read that treats assumptions as active project truth
+  (`loadCanvasObjects`, which also supplies the model's own scene/context
+  inventory) excludes a row while this is true. `apply_change_proposal`
+  clears it on an approval or partial approval — promoting the assumption
+  the same moment the direction it reasons about becomes real —
+  and `undo_change_proposal` sets it back on undo, retiring the assumption
+  exactly when the fields it was reasoning about are themselves reverted. A
+  *rejected* proposal's assumption is never promoted at all: it simply stays
+  `pending_decision = true` forever, which is already "not an active
+  hypothesis" without deleting the row — it survives as a historical trace of
+  what was proposed and declined, per the issue's own "retained only as
+  historical reasoning if useful" framing.
+
+  An assumption recorded with no proposal in the same turn at all — the
+  ordinary, and by far the most common, case — gets `source_change_proposal_id
+  = null`, `pending_decision = false` by construction: immediately active,
+  exactly today's existing behaviour. Nothing about this changes for it.
+*/
+alter table public.assumptions
+  add column if not exists source_change_proposal_id uuid
+    references public.change_proposals (id) on delete set null,
+  add column if not exists pending_decision boolean not null default false;
+
+create index if not exists assumptions_source_proposal_idx
+  on public.assumptions (source_change_proposal_id)
+  where source_change_proposal_id is not null;
+
+comment on column public.assumptions.source_change_proposal_id is
+  'The connected-change proposal this assumption was inferred alongside in the same turn, if any (T11 review round 5, issue #28). Null for an assumption recorded independently of any proposal.';
+comment on column public.assumptions.pending_decision is
+  'True while source_change_proposal_id names a still-undecided or rejected proposal: the row exists but must not read as active project truth (T11 review round 5, issue #28). apply_change_proposal clears this on approval/partial approval; undo_change_proposal sets it back on undo. Never cleared for a rejected proposal, since the assumption was never promoted in the first place.';

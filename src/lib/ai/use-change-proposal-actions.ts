@@ -117,6 +117,13 @@ export function useChangeProposalActions(
   onResolved: (proposalId: string) => void,
   /** Resolves false when the re-read failed; the decision itself still stands. */
   onProjectChanged: () => boolean | Promise<boolean>,
+  /**
+   * The project's most recently decided proposal, as of the last reload
+   * (issue #25) — seeds `outcome` so the banner and its Review changes/Undo
+   * actions are already showing on mount, rather than only appearing after a
+   * live decision made in this same session.
+   */
+  initialOutcome: ProposalOutcome | null = null,
 ): ChangeProposalActions {
   const isDemo = isDevProject(projectId);
   const supabase = useMemo(
@@ -124,7 +131,9 @@ export function useChangeProposalActions(
     [isDemo],
   );
   const [sheetProposalId, setSheetProposalId] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<ProposalOutcome | null>(null);
+  const [outcome, setOutcome] = useState<ProposalOutcome | null>(
+    initialOutcome,
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

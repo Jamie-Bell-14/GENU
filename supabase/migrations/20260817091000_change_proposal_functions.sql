@@ -1032,6 +1032,14 @@ begin
       affected-document row for it, which cannot happen for an included
       item, but kept as a defensive no-op) simply contributes nothing
       further below.
+
+      When `v_item.before is null`, the field did not exist before this
+      proposal was approved — undoing it must remove that section from the
+      document entirely, not leave a ghost empty-text section behind (T11
+      review round 4, P1). A jsonb `null` is stored as an explicit delete
+      sentinel and interpreted below, since a missing map key and an
+      explicit "delete this key" both need to be distinguishable from an
+      ordinary restored section.
     */
     v_doc_slug_text := private.document_slug_for_area(v_item.area)::text;
     v_doc_sections := jsonb_set(
@@ -1040,10 +1048,10 @@ begin
       coalesce(v_doc_sections -> v_doc_slug_text, '{}'::jsonb)
         || jsonb_build_object(
              v_item.key,
-             jsonb_build_object(
-               'text', coalesce(v_item.before, ''),
-               'state', case when v_item.before is null then 'unvalidated' else 'working_draft' end
-             )
+             case
+               when v_item.before is null then 'null'::jsonb
+               else jsonb_build_object('text', v_item.before, 'state', 'working_draft')
+             end
            ),
       true
     );
@@ -1080,6 +1088,16 @@ begin
     loop
       v_section_key := v_section ->> 'key';
       v_new_value := v_doc_sections -> v_doc_slug_text -> v_section_key;
+      v_seen_keys := array_append(v_seen_keys, v_section_key);
+
+      -- An explicit delete sentinel (T11 review round 4, P1): this item's
+      -- undo means the field never existed before the proposal it undoes,
+      -- so its section is dropped from the new version entirely rather
+      -- than restored as an empty stub.
+      if v_new_value is not null and jsonb_typeof(v_new_value) = 'null' then
+        continue;
+      end if;
+
       v_ordered_sections := v_ordered_sections || jsonb_build_array(
         case
           when v_new_value is not null then
@@ -1091,13 +1109,19 @@ begin
           else v_section
         end
       );
-      v_seen_keys := array_append(v_seen_keys, v_section_key);
     end loop;
 
     for v_section_key in select jsonb_object_keys(v_doc_sections -> v_doc_slug_text)
     loop
       if not (v_section_key = any(v_seen_keys)) then
         v_new_value := v_doc_sections -> v_doc_slug_text -> v_section_key;
+
+        -- Defensive: a delete sentinel for a key that was never in the
+        -- document's existing sections has nothing to remove.
+        if jsonb_typeof(v_new_value) = 'null' then
+          continue;
+        end if;
+
         v_ordered_sections := v_ordered_sections || jsonb_build_array(
           jsonb_build_object(
             'key', v_section_key,

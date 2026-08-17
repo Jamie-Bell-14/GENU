@@ -6,9 +6,11 @@
  * `documents`/`document_versions`/`decisions` are all system- or
  * function-authored (no direct insert grant for `authenticated`, invisible
  * across projects); a proposal is staged into `complete_turn`'s own
- * transaction exactly like a field or an assumption; `apply_change_proposal`
- * recomputes every item's "before" at approval time and refuses the whole
- * decision — writing nothing — if any of them has drifted (no partial
+ * transaction exactly like a field or an assumption, with each item's
+ * "before" snapshotted from real project truth at that moment; `apply_change_proposal`
+ * re-reads every included item's live value at approval time only to compare
+ * it against that snapshot, and refuses the whole decision — writing
+ * nothing — if any of them has drifted (no partial
  * application on staleness); exclude-all is recorded as a rejection, not a
  * silent no-op; approving twice is refused as already_decided rather than
  * double-applied; only the project's owner can apply or undo; undo restores
@@ -914,6 +916,73 @@ describe.skipIf(skip)("undo_change_proposal", () => {
       [projectA],
     );
     expect(audit.rowCount).toBe(1);
+  });
+
+  it("removes the created section from the document's current version, not just the field (T11 review round 4, P1)", async () => {
+    const { proposalId } = await stageAndApprove();
+
+    await impersonate(USER_A);
+    await undoProposal(proposalId);
+
+    const current = await db.query(
+      `select dv.content from documents d
+       join document_versions dv on dv.id = d.current_version_id
+       where d.project_id = $1 and d.slug = 'mvp_scope'`,
+      [projectA],
+    );
+    const sections = current.rows[0].content.sections as { key: string }[];
+    // `before` was null, so the field never existed prior to this proposal —
+    // undoing it must drop the section entirely rather than leave a ghost
+    // empty-text entry behind for a field that canonical truth now says
+    // doesn't exist.
+    expect(sections.map((s) => s.key)).not.toContain("core_feature");
+  });
+
+  it("undoing a proposal that added a section to an already-existing document preserves the original section (T11 review round 4, P1)", async () => {
+    // First proposal creates the document with one section.
+    await stageAndApprove();
+
+    // Second, separate proposal adds a *different* section to the same
+    // document.
+    const secondTurn = await openRun(projectA);
+    const second = await completeTurnWithProposal(
+      projectA,
+      secondTurn,
+      USER_A,
+      [
+        {
+          area: "mvp_scope",
+          key: "secondary_feature",
+          before: null,
+          after: "Automated reminder emails.",
+        },
+      ],
+    );
+    const secondItems = await db.query(
+      "select id from change_items where proposal_id = $1",
+      [second.proposals!["0"].id],
+    );
+    const secondItemId = secondItems.rows[0].id as string;
+
+    await impersonate(USER_A);
+    await applyProposal(second.proposals!["0"].id, [
+      { itemId: secondItemId, included: true },
+    ]);
+    await undoProposal(second.proposals!["0"].id);
+
+    const current = await db.query(
+      `select dv.content from documents d
+       join document_versions dv on dv.id = d.current_version_id
+       where d.project_id = $1 and d.slug = 'mvp_scope'`,
+      [projectA],
+    );
+    const sections = current.rows[0].content.sections as { key: string }[];
+    // Undoing the second proposal must remove only the section it added —
+    // the first proposal's still-approved section must survive untouched.
+    expect(sections.map((s) => s.key)).toEqual(["core_feature"]);
+    expect(await fieldValue(projectA, "mvp_scope", "core_feature")).toBe(
+      "Deposit dispute tracker",
+    );
   });
 
   it("restores the field's prior origin and support, not only its value", async () => {

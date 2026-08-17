@@ -1160,6 +1160,12 @@ describe.skipIf(skip)(
       );
       const proposalId = result.proposals!["0"].id;
 
+      // Reading `assumptions` directly needs the owning user's own role —
+      // `assumptions` is granted only to `authenticated`, not `service_role`,
+      // which is what `completeTurnWithProposal`'s own `asTrustedWriter()`
+      // leaves active (the identical class of oversight round 1 already hit
+      // once for `project_fields`).
+      await impersonate(USER_A);
       const staged = await assumptionRow(
         projectA,
         "Smaller agencies churn faster.",
@@ -1304,6 +1310,7 @@ describe.skipIf(skip)(
         },
       );
 
+      await impersonate(USER_A);
       expect(
         await assumptionRow(projectA, "Disputes concentrate at move-out."),
       ).toMatchObject({

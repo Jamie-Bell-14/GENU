@@ -1238,6 +1238,74 @@ describe.skipIf(skip)(
       });
     });
 
+    it("stays pending on a partial approval, even when the item its reasoning depends on was the one included (T11 review round 6, P1)", async () => {
+      // The link is to the whole proposal, not the specific item/area an
+      // assumption reasons about — so a partial approval must never promote
+      // it, regardless of which items happened to be included. A proposal
+      // touching two areas, with the assumption's own reasoning naming only
+      // one of them, is the concrete case the review raised; this proves the
+      // conservative rule (full approval only) holds even in the more
+      // favourable direction, where the included item is the one the
+      // assumption is actually about.
+      const turnId = await openRun(projectA);
+      const result = await completeTurnWithProposal(
+        projectA,
+        turnId,
+        USER_A,
+        [
+          {
+            area: "customer",
+            key: "primary_customer",
+            before: null,
+            after: "Tenants",
+          },
+          {
+            area: "mvp_scope",
+            key: "core_feature",
+            before: null,
+            after: "Deposit dispute tracking",
+          },
+        ],
+        {
+          assumptions: [
+            {
+              statement: "Tenants will pay for deposit-protection tooling.",
+              whyItMatters: "It changes who the paying customer is.",
+              importance: "material",
+              contingentOnProposal: true,
+            },
+          ],
+        },
+      );
+      const proposalId = result.proposals!["0"].id;
+      const items = await db.query(
+        "select id, area from change_items where proposal_id = $1",
+        [proposalId],
+      );
+      const customerItemId = items.rows.find(
+        (row: { area: string }) => row.area === "customer",
+      ).id as string;
+
+      await impersonate(USER_A);
+      const decision = await applyProposal(proposalId, [
+        { itemId: customerItemId, included: true },
+      ]);
+      expect(decision).toMatchObject({
+        outcome: "completed",
+        status: "partially_approved",
+      });
+
+      expect(
+        await assumptionRow(
+          projectA,
+          "Tenants will pay for deposit-protection tooling.",
+        ),
+      ).toMatchObject({
+        source_change_proposal_id: proposalId,
+        pending_decision: true,
+      });
+    });
+
     it("is retired back to pending when its approved proposal is undone", async () => {
       const turnId = await openRun(projectA);
       const result = await completeTurnWithProposal(

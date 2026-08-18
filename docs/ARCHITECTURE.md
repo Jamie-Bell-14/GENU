@@ -121,8 +121,10 @@ assumptions        (id, project_id, statement, why_it_matters, alternatives json
                     -- assumptions as active project truth (loadCanvasObjects, and so the
                     -- model's own context inventory) — set when complete_turn links an
                     -- assumption to the one proposal staged in the same turn (issue #28);
-                    -- cleared by apply_change_proposal on approval/partial approval, set
-                    -- back by undo_change_proposal on undo, never cleared for a rejection
+                    -- cleared by apply_change_proposal on a FULL approval only (never a
+                    -- partial one — the link is proposal-wide, not item-scoped, round 6
+                    -- P1), set back by undo_change_proposal on undo, never cleared for a
+                    -- rejected or partially-approved proposal
 change_proposals   (id, project_id, title, rationale, proposed_by ai|user,
                     status proposed|approved|partially_approved|rejected|undone,
                     created_at, decided_at)

@@ -177,12 +177,15 @@ export const RecordAssumptionSchema = z
      * stands on its own (T11 review round 5, issue #28). An assumption
      * marked this way is recorded but stays out of the Structured view and
      * the model's own context until the proposal it belongs to is approved
-     * — rejecting or undoing that proposal must not leave the reasoning
-     * behind it looking like settled project truth. `complete_turn` links
-     * this to the turn's own proposal server-side; if the turn stages more
-     * than one, linkage is not attempted and the assumption is recorded as
-     * ordinary/immediate instead, since which proposal it means cannot be
-     * inferred from this flag alone.
+     * *in full* — a partial approval leaves it pending too, since the link
+     * is to the whole proposal, not the specific item this reasoning is
+     * actually about (T11 review round 6, P1). Rejecting or undoing that
+     * proposal must not leave the reasoning behind it looking like settled
+     * project truth either. `complete_turn` links this to the turn's own
+     * proposal server-side; if the turn stages more than one, linkage is not
+     * attempted and the assumption is recorded as ordinary/immediate
+     * instead, since which proposal it means cannot be inferred from this
+     * flag alone.
      */
     contingentOnProposal: z.boolean().default(false),
   })

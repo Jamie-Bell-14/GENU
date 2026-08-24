@@ -103,6 +103,8 @@ export function LivingCanvas({
   loading = false,
   error = null,
   onEdit,
+  pendingProposal = null,
+  onReviewProposal,
 }: Readonly<{
   objects: CanvasObject[];
   relationships?: ProjectRelationship[];
@@ -132,6 +134,24 @@ export function LivingCanvas({
    * (docs/ADAPTIVE_CANVAS_MVP.md §4.4), so the visual map never mutates text.
    */
   onEdit?: EditSubmit;
+  /**
+   * A connected-change proposal still awaiting review (T11 review round 1,
+   * P1). Present, this deterministically puts the canvas into its
+   * impact-review emphasis state — never dependent on the model happening
+   * to also recommend a scene with `emphasis: "impact_review"`, which may
+   * not happen at all. `affectedObjectIds` names precisely the objects the
+   * proposal touches, computed server-side from real project truth; it is
+   * never the current scene's own `visibleObjectIds`, which name everything
+   * a scene may show, not what a proposal changes.
+   */
+  pendingProposal?: { id: string; affectedObjectIds: string[] } | null;
+  /**
+   * Opens the focused before/after proposal review (T11,
+   * docs/ADAPTIVE_CANVAS_MVP.md §4.3). Only offered while the canvas is in
+   * its impact-review emphasis state; omit where there is nothing pending to
+   * review.
+   */
+  onReviewProposal?: () => void;
 }>) {
   /*
     When no scene is supplied, the host derives one for the active problem and
@@ -324,17 +344,49 @@ export function LivingCanvas({
     () =>
       buildProblemMap(
         objects,
-        // Only relationships this scene declares visible are laid out.
-        scene
-          ? relationships.filter((relationship) =>
-              scene.visibleRelationshipIds.includes(relationship.id),
-            )
-          : [],
+        /*
+          Only relationships this scene declares visible are laid out —
+          except while a proposal is pending (T11 review round 1, P1): impact
+          review has to show the path from the change to what it affects
+          deterministically, not only when the last scene the model happened
+          to recommend already included that relationship. A scene narrower
+          than the proposal's own reach must never hide the very branch
+          impact-review exists to highlight.
+        */
+        pendingProposal
+          ? relationships
+          : scene
+            ? relationships.filter((relationship) =>
+                scene.visibleRelationshipIds.includes(relationship.id),
+              )
+            : [],
         scene?.focalObjectId ?? null,
         mapView,
       ),
-    [objects, relationships, scene, mapView],
+    [objects, relationships, scene, mapView, pendingProposal],
   );
+
+  /*
+    The real path from a pending proposal to what it affects (T11 review
+    round 2, P1): every *stored* relationship whose both endpoints are among
+    the proposal's own affected objects, never a path the renderer infers or
+    fabricates. Empty when no such relationship exists — the renderer then
+    highlights the affected objects alone, which is the honest thing to show
+    when the change genuinely touches unconnected project areas.
+  */
+  const affectedRelationshipIds = useMemo(() => {
+    if (!pendingProposal || pendingProposal.affectedObjectIds.length === 0) {
+      return [];
+    }
+    const affected = new Set(pendingProposal.affectedObjectIds);
+    return relationships
+      .filter(
+        (relationship) =>
+          affected.has(relationship.fromObjectId) &&
+          affected.has(relationship.toObjectId),
+      )
+      .map((relationship) => relationship.id);
+  }, [relationships, pendingProposal]);
 
   const showVisual = sceneState.view === "visual";
 
@@ -447,7 +499,12 @@ export function LivingCanvas({
           <ProblemExplorationRenderer
             map={map}
             pinned={mapView.pinned}
-            emphasis={scene?.emphasis ?? "none"}
+            emphasis={
+              pendingProposal ? "impact_review" : (scene?.emphasis ?? "none")
+            }
+            affectedObjectIds={pendingProposal?.affectedObjectIds ?? []}
+            affectedRelationshipIds={affectedRelationshipIds}
+            onReviewProposal={pendingProposal ? onReviewProposal : undefined}
             operations={{
               onFocus: focusOn,
               onToggleBranch: (key) =>

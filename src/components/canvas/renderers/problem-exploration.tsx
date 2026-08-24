@@ -48,11 +48,12 @@ function StatusLine({
 
 function FocalObject({
   object,
-  emphasised,
+  affected,
   onInspect,
 }: Readonly<{
   object: CanvasObject;
-  emphasised: boolean;
+  /** Impact-review is active and this object is one the proposal names (T11). */
+  affected: boolean;
   onInspect: (id: string) => void;
 }>) {
   return (
@@ -63,7 +64,7 @@ function FocalObject({
         object.origin === "ai_inferred"
           ? "border-l-assumption border-dashed"
           : "border-l-brand",
-        emphasised && "ring-edge-focus ring-1",
+        affected && "ring-edge-focus ring-1",
       )}
     >
       <p className="text-fg-tertiary text-xs font-medium tracking-wide uppercase">
@@ -95,10 +96,28 @@ function FocalObject({
 function BranchRow({
   member,
   pinned,
+  dimmed,
+  onPath,
   operations,
 }: Readonly<{
   member: Branch["members"][number];
   pinned: boolean;
+  /**
+   * Impact-review is active and this object is not one the proposal touches
+   * (T11) — reduced prominence, not hidden: docs/ADAPTIVE_CANVAS_MVP.md §4.3
+   * asks for unrelated context to recede, never to disappear or become
+   * unreachable.
+   */
+  dimmed: boolean;
+  /**
+   * This row's own stored relationship connects two objects the proposal
+   * touches (T11 review round 2, P1) — the actual path from the change to
+   * an affected project area, never a synthetic one: a relationship earns
+   * this mark only because it is a real, committed edge between two
+   * genuinely affected objects, not because the renderer inferred a
+   * connection that was never stored.
+   */
+  onPath: boolean;
   operations: MapOperations;
 }>) {
   const { object, relationship } = member;
@@ -106,9 +125,22 @@ function BranchRow({
     <li>
       {/* Compact row, not a card: avoids the uniform card treatment
           DESIGN.md §21 and UI acceptance §4 warn against. */}
-      <div className="border-edge-subtle hover:bg-surface-secondary flex items-start justify-between gap-2 border-b py-2 last:border-b-0">
+      <div
+        className={cn(
+          "border-edge-subtle hover:bg-surface-secondary flex items-start justify-between gap-2 border-b py-2 last:border-b-0",
+          dimmed && "opacity-50",
+          onPath && "border-l-edge-focus border-l-2 pl-2",
+        )}
+      >
         <div className="min-w-0">
-          <p className="text-sm break-words">{object.title}</p>
+          <p className="text-sm break-words">
+            {object.title}
+            {onPath && (
+              <span className="text-fg-tertiary ml-2 text-xs font-medium tracking-wide uppercase">
+                Part of this change
+              </span>
+            )}
+          </p>
           <StatusLine object={object} relationship={relationship} />
         </div>
         <div className="flex shrink-0 gap-0.5">
@@ -149,11 +181,34 @@ export function ProblemExplorationRenderer({
   map,
   pinned,
   emphasis,
+  affectedObjectIds = [],
+  affectedRelationshipIds = [],
+  onReviewProposal,
   operations,
 }: Readonly<{
   map: ProblemMap;
   pinned: string[];
   emphasis: "none" | "impact_review";
+  /**
+   * The proposed change's own objects (T11) — a pending proposal's actually-
+   * committed targets, never inferred by the renderer itself. Ignored
+   * outside `emphasis === "impact_review"`.
+   */
+  affectedObjectIds?: string[];
+  /**
+   * Stored relationships whose *both* endpoints are in `affectedObjectIds`
+   * (T11 review round 2, P1) — the real path from the proposed change to the
+   * project areas it touches, computed by the caller from genuine stored
+   * edges only. Empty when no such edge exists; the renderer never draws a
+   * path it cannot back with a real relationship.
+   */
+  affectedRelationshipIds?: string[];
+  /**
+   * Opens the focused before/after proposal review
+   * (docs/ADAPTIVE_CANVAS_MVP.md §4.3: "links to the focused before/after
+   * proposal review"). Only rendered while impact-review is active.
+   */
+  onReviewProposal?: () => void;
   operations: MapOperations;
 }>) {
   if (!map.focal) {
@@ -170,13 +225,31 @@ export function ProblemExplorationRenderer({
     );
   }
 
+  const reviewingImpact = emphasis === "impact_review";
+  const isAffected = (objectId: string) => affectedObjectIds.includes(objectId);
+  const isOnPath = (relationshipId: string) =>
+    affectedRelationshipIds.includes(relationshipId);
   const hasBranches = map.branches.length > 0;
 
   return (
     <div className="flex flex-col gap-4 p-3">
+      {reviewingImpact && (
+        <div className="border-brand/40 bg-surface-secondary flex items-center justify-between gap-2 rounded-md border p-3">
+          <p className="text-fg-secondary text-xs">
+            Reviewing a proposed change. Affected objects are highlighted;
+            everything else is dimmed.
+          </p>
+          {onReviewProposal && (
+            <Button variant="outline" size="xs" onClick={onReviewProposal}>
+              Review changes
+            </Button>
+          )}
+        </div>
+      )}
+
       <FocalObject
         object={map.focal}
-        emphasised={emphasis === "impact_review"}
+        affected={reviewingImpact && isAffected(map.focal.id)}
         onInspect={operations.onInspect}
       />
 
@@ -210,6 +283,10 @@ export function ProblemExplorationRenderer({
                       key={member.relationship.id}
                       member={member}
                       pinned={pinned.includes(member.object.id)}
+                      dimmed={reviewingImpact && !isAffected(member.object.id)}
+                      onPath={
+                        reviewingImpact && isOnPath(member.relationship.id)
+                      }
                       operations={operations}
                     />
                   ))}

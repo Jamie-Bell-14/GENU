@@ -197,6 +197,9 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
     if (trimmed.toLowerCase() === "add as evidence") {
       return this.runAddEvidenceTurn(input, hooks, signal, interrupted);
     }
+    if (trimmed.toLowerCase() === "propose a change") {
+      return this.runProposeChangeTurn(input, hooks, signal, interrupted);
+    }
 
     const preview =
       trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
@@ -385,6 +388,74 @@ export class ScriptedDiscoveryEngine implements DiscoveryEngine {
         {
           name: "add_evidence",
           candidate: { consequenceSummary, direction: "unclear" },
+        },
+      ],
+    };
+  }
+
+  /**
+   * "Propose a change" (VERTICAL_SLICE_SPEC Steps 7–8, T11). Stages a
+   * connected change across target customer, problem, value proposition and
+   * MVP scope — nothing here writes project truth. As with "Add as
+   * evidence", the staged operation is only real once the host has actually
+   * committed it; the host announces the proposal (`proposal_created`) at
+   * that point, not here.
+   */
+  private async runProposeChangeTurn(
+    input: TurnInput,
+    hooks: TurnHooks,
+    signal: AbortSignal | undefined,
+    interrupted: () => TurnResult,
+  ): Promise<TurnResult> {
+    if (signal?.aborted) return interrupted();
+
+    const text =
+      "I found a connected change worth reviewing: narrowing the target customer changes what the problem, value proposition and MVP scope should say too. Nothing is applied yet — review it below, item by item.";
+
+    hooks.emit({ type: "block", kind: "plain" });
+    if (!(await this.stream(text, hooks, signal))) return interrupted();
+
+    return {
+      assistantText: text,
+      operations: [
+        {
+          name: "propose_connected_change",
+          candidate: {
+            title: "Narrow the target customer to small letting agencies",
+            rationale:
+              "The scripted scenario's evidence points at smaller agencies, which changes what the problem, value proposition and MVP scope should say too.",
+            remainingUncertainty:
+              "No pricing evidence yet, so the MVP scope change is the least certain of the four.",
+            items: [
+              {
+                area: "customer",
+                key: "primary_customer",
+                before: "Letting agencies",
+                after: "Letting agencies under 20 staff",
+              },
+              {
+                area: "problem",
+                key: "core_problem",
+                before: "Deposit disputes are costly and slow to resolve.",
+                after:
+                  "Deposit disputes are costly and slow to resolve for agencies too small to have in-house dispute handling.",
+              },
+              {
+                area: "value_proposition",
+                key: "core_value",
+                before: "Faster deposit dispute resolution.",
+                after:
+                  "Faster deposit dispute resolution, without needing in-house dispute expertise.",
+              },
+              {
+                area: "mvp_scope",
+                key: "core_scope",
+                before: "Deposit dispute case tracking.",
+                after:
+                  "Deposit dispute case tracking, sized for a small agency's caseload.",
+              },
+            ],
+          },
         },
       ],
     };

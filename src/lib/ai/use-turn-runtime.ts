@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { CanvasObject } from "@/lib/canvas/model";
+import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { TurnStatus } from "@/lib/services/turn-snapshot";
 import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
 import { resolveActions } from "./contextual-actions";
@@ -46,6 +48,11 @@ export interface TurnRuntime {
   /** A direction is in flight; the control is disabled until it resolves. */
   directionPending: boolean;
   onAction: (action: ContextualAction) => void;
+  /** Clears a pending proposal once it has genuinely been decided (T11). */
+  resolveProposal: (proposalId: string) => void;
+  /** Re-reads project truth after a write that happened outside a turn (T11). */
+  /** Resolves false when the re-read failed; the caller's own write still stands. */
+  refreshProjectModel: () => Promise<boolean>;
 }
 
 /**
@@ -100,6 +107,7 @@ export function useTurnRuntime({
   initialActivity = [],
   initialResearch = null,
   initialEvidenceOutcome = null,
+  initialPendingProposal = null,
 }: Readonly<{
   projectId: string;
   initialMessages?: Message[];
@@ -124,6 +132,19 @@ export function useTurnRuntime({
    * not a live event.
    */
   initialEvidenceOutcome?: { reason: string } | null;
+  /**
+   * A connected-change proposal still awaiting review as of the last reload
+   * (T11) — seeded the same way `initialResearch` is: what a fresh mount
+   * already knows about its project, not a live event.
+   */
+  initialPendingProposal?: {
+    id: string;
+    title: string;
+    rationale: string;
+    affectedAreas: string[];
+    affectedObjectIds: string[];
+    turnId: string;
+  } | null;
 }>): TurnRuntime {
   const [state, dispatch] = useReducer(turnReducer, {
     ...INITIAL_TURN_STATE,
@@ -138,6 +159,7 @@ export function useTurnRuntime({
     // The action a hydrated receipt actually enables — the only contextual
     // action a fresh mount can honestly offer without a turn having run.
     actions: initialResearch ? resolveActions(["add_as_evidence"]) : [],
+    pendingProposal: initialPendingProposal,
   });
   const [draft, setDraft] = useState("");
   const [directionPending, setDirectionPending] = useState(false);
@@ -160,6 +182,9 @@ export function useTurnRuntime({
   const directionsEndpoint = isDemo
     ? "/api/dev/directions"
     : `/api/projects/${projectId}/directions`;
+  const modelEndpoint = isDemo
+    ? "/api/dev/project-model"
+    : `/api/projects/${projectId}/model`;
 
   /**
    * Recovers a turn whose stream was lost.
@@ -543,6 +568,55 @@ export function useTurnRuntime({
     setDraft((current) => current || action.label);
   }, []);
 
+  /**
+   * A pending proposal was decided — approved, partially approved, rejected
+   * or undone — through the dedicated changes endpoint (T11), never through
+   * this hook's own turn machinery. Scoped to the proposal it names, so a
+   * decision on an older proposal (were one somehow still in flight) cannot
+   * clear a newer one already showing.
+   */
+  const resolveProposal = useCallback((proposalId: string) => {
+    dispatch({ type: "proposal_resolved", proposalId });
+  }, []);
+
+  /**
+   * Re-reads project truth after a write that happened outside any turn —
+   * approving or undoing a connected-change proposal (T11) — the same
+   * "canvas shows what the application's own tables now hold" rule a running
+   * turn's `project_model_updated` event already follows, reached from a
+   * client component instead of the server route. Runs in the dev workspace
+   * too (T11 review round 2, P1): the demo project has its own mutable field
+   * store now (`dev-project-fields.ts`), so there is something real to
+   * re-read there as well.
+   *
+   * Returns whether the refresh actually landed, so a caller can tell the
+   * person their decision was recorded but the view could not refresh — the
+   * decision itself is never reversed on a failed refresh, but silently
+   * leaving the canvas stale with no indication is its own kind of dishonest
+   * (T11 review round 2, P1).
+   */
+  const refreshProjectModel = useCallback(async (): Promise<boolean> => {
+    try {
+      const response = await fetch(modelEndpoint);
+      if (!response.ok) return false;
+      const payload = (await response.json()) as {
+        objects: CanvasObject[];
+        relationships: ProjectRelationship[];
+      };
+      dispatch({
+        type: "event",
+        event: {
+          type: "project_model_updated",
+          objects: payload.objects,
+          relationships: payload.relationships,
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }, [modelEndpoint]);
+
   return {
     state,
     draft,
@@ -554,5 +628,7 @@ export function useTurnRuntime({
     dismissRecovery,
     directionPending,
     onAction,
+    resolveProposal,
+    refreshProjectModel,
   };
 }

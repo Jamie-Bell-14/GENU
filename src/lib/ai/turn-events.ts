@@ -193,6 +193,28 @@ export type TurnEvent =
    */
   | { type: "evidence_refused"; reason: string }
   /**
+   * A connected-change proposal the running turn just created was durably
+   * written by `complete_turn` (docs/VERTICAL_SLICE_TASKS.md T11). Not in
+   * `EngineEvent`: only the host knows whether the write actually landed —
+   * the same boundary `evidence_refused` already draws for a staged "Add as
+   * evidence" proposal. The proposal itself stays inert (`change_proposals`
+   * `status = 'proposed'`) until a person reviews and approves it; this event
+   * only makes that pending review visible.
+   */
+  | {
+      type: "proposal_created";
+      proposalId: string;
+      title: string;
+      rationale: string;
+      affectedAreas: string[];
+      /**
+       * The canvas-object ids the proposal actually touches, computed
+       * server-side from real project truth — never the current scene's
+       * `visibleObjectIds` (T11 review round 1, P1).
+       */
+      affectedObjectIds: string[];
+    }
+  /**
    * Carries the failing turn's own id (issue #13, T10 exit gate) so the
    * reducer can clear only *that* turn's queued scene recommendation — never
    * a different turn's, whether older or newer.
@@ -232,6 +254,12 @@ export type EngineEvent = Exclude<
    * so it cannot be the one to announce a refusal either.
    */
   | { type: "evidence_refused" }
+  /*
+   * Only the host knows whether `complete_turn` actually wrote a staged
+   * connected-change proposal — the engine is never told, the same reason
+   * `evidence_refused` is host-only above.
+   */
+  | { type: "proposal_created" }
 >;
 
 export interface Message {
@@ -349,6 +377,25 @@ export interface TurnState {
    */
   evidenceOutcome: { refused: true; reason: string } | null;
   /**
+   * A connected-change proposal the running conversation created, awaiting
+   * review (T11). Unlike `evidenceOutcome`, this is not cleared on the next
+   * message: DESIGN.md §13.2's in-stream card and its "Review changes /
+   * Approve direction / Modify proposal / Keep current direction" actions
+   * stay live across further conversation until a person actually decides
+   * it, so only `proposal_resolved` — dispatched once the approve/undo
+   * endpoint confirms a real decision — clears it.
+   */
+  pendingProposal: {
+    id: string;
+    title: string;
+    rationale: string;
+    affectedAreas: string[];
+    /** The canvas-object ids the proposal actually touches (T11 review round 1, P1). */
+    affectedObjectIds: string[];
+    /** The turn that created it, so the in-stream card renders in that turn's own group. */
+    turnId: string;
+  } | null;
+  /**
    * The project model as last re-read by the server during this session; null
    * until a turn changes something, when the server-rendered props still stand.
    */
@@ -408,6 +455,7 @@ export const INITIAL_TURN_STATE: TurnState = {
   activeResearchTurnId: null,
   unavailableSources: [],
   evidenceOutcome: null,
+  pendingProposal: null,
   projectModel: null,
   direction: null,
   error: null,
@@ -462,6 +510,13 @@ export type TurnAction =
       message: Message | null;
     }
   | { type: "reset_error" }
+  /**
+   * The person decided a pending proposal — approved, partially approved,
+   * rejected, or it was undone — through the dedicated approve/undo
+   * endpoint (T11). Scoped to the proposal it names, so a decision on an
+   * older proposal can never clear a newer one already showing.
+   */
+  | { type: "proposal_resolved"; proposalId: string }
   | { type: "hydrate"; messages: Message[]; activityLog?: ActivityLine[] };
 
 function upsertRecovery(
@@ -698,6 +753,11 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
     case "reset_error":
       return { ...state, error: null };
 
+    case "proposal_resolved":
+      return state.pendingProposal?.id === action.proposalId
+        ? { ...state, pendingProposal: null }
+        : state;
+
     case "event":
       switch (action.event.type) {
         case "turn_started":
@@ -853,6 +913,21 @@ export function turnReducer(state: TurnState, action: TurnAction): TurnState {
             ...state,
             evidenceOutcome: { refused: true, reason: action.event.reason },
           };
+
+        case "proposal_created":
+          return state.streaming
+            ? {
+                ...state,
+                pendingProposal: {
+                  id: action.event.proposalId,
+                  title: action.event.title,
+                  rationale: action.event.rationale,
+                  affectedAreas: action.event.affectedAreas,
+                  affectedObjectIds: action.event.affectedObjectIds,
+                  turnId: state.streaming.turnId,
+                },
+              }
+            : state;
 
         case "project_model_updated":
           /*

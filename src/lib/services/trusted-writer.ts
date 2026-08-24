@@ -137,6 +137,22 @@ export type CompleteTurnRecord =
       outcome: "completed";
       written: Record<string, number>;
       refused: Record<string, string[]>;
+      /**
+       * Compact summaries of connected-change proposals genuinely created
+       * this commit, keyed by slot (T11) — never trusted content: built by
+       * `complete_turn` from what it actually inserted, not echoed from the
+       * request.
+       */
+      proposals: Record<
+        string,
+        {
+          id: string;
+          title: string;
+          rationale: string;
+          areas: string[];
+          objectIds: string[];
+        }
+      >;
     }
   /** The run was no longer this turn's to finish; nothing was written. */
   | { outcome: "not_running" }
@@ -167,6 +183,12 @@ export async function completeTurnRecord(input: {
    * the receipt's own stored focal object.
    */
   evidence: unknown[];
+  /**
+   * Connected-change proposals staged this turn (T11) — intent only, never
+   * a project write: `complete_turn` stores `change_proposals`/`change_items`
+   * rows, inert until a person approves them through `apply_change_proposal`.
+   */
+  proposals: unknown[];
 }): Promise<CompleteTurnRecord> {
   const client = trustedClient();
   if (!client) {
@@ -181,6 +203,7 @@ export async function completeTurnRecord(input: {
     p_fields: input.fields,
     p_assumptions: input.assumptions,
     p_evidence: input.evidence,
+    p_proposals: input.proposals,
   });
   if (error) {
     console.error("complete_turn failed", { code: error.code });
@@ -190,12 +213,34 @@ export async function completeTurnRecord(input: {
     outcome: "completed" | "not_running";
     written?: Record<string, number>;
     refused?: Record<string, string[]>;
+    proposals?: Record<
+      string,
+      {
+        id: string;
+        title: string;
+        rationale: string;
+        areas: string[];
+        object_ids: string[];
+      }
+    >;
   } | null;
   if (result?.outcome !== "completed") return { outcome: "not_running" };
   return {
     outcome: "completed",
     written: result.written ?? {},
     refused: result.refused ?? {},
+    proposals: Object.fromEntries(
+      Object.entries(result.proposals ?? {}).map(([slot, proposal]) => [
+        slot,
+        {
+          id: proposal.id,
+          title: proposal.title,
+          rationale: proposal.rationale,
+          areas: proposal.areas,
+          objectIds: proposal.object_ids,
+        },
+      ]),
+    ),
   };
 }
 

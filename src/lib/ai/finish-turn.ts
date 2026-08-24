@@ -133,6 +133,27 @@ export async function finishTurn(
     ) {
       ports.emit({ type: "evidence_refused", reason: outcome.issue });
     }
+    /*
+      A connected-change proposal announced mid-turn is only real once the
+      transaction that created it has committed (T11) — the same reasoning
+      `research_findings` already follows for its own receipt id. `proposal`
+      is present only when `complete_turn` actually wrote the proposal, so
+      this can never announce one that was staged and then rolled back.
+    */
+    if (
+      outcome.kind === "propose_connected_change" &&
+      outcome.applied &&
+      outcome.proposal
+    ) {
+      ports.emit({
+        type: "proposal_created",
+        proposalId: outcome.proposal.id,
+        title: outcome.proposal.title,
+        rationale: outcome.proposal.rationale,
+        affectedAreas: outcome.proposal.areas,
+        affectedObjectIds: outcome.proposal.objectIds,
+      });
+    }
   }
 
   // Only if the project really changed, and only after the commit.

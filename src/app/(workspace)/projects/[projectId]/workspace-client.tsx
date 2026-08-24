@@ -7,6 +7,7 @@ import type { CanvasObject } from "@/lib/canvas/model";
 import type { ProjectRelationship } from "@/lib/canvas/relationships";
 import type { ActivityLine, Message } from "@/lib/ai/turn-events";
 import type { ResearchFinding, ResearchSource } from "@/lib/research/types";
+import type { ProposalOutcome } from "@/lib/ai/use-change-proposal-actions";
 import { editProjectObject } from "./canvas-actions";
 
 /**
@@ -24,6 +25,8 @@ export function WorkspaceClient({
   canvasRelationships,
   initialResearch,
   initialEvidenceOutcome,
+  initialPendingProposal,
+  initialProposalOutcome,
 }: Readonly<{
   projectId: string;
   projectName: string;
@@ -40,6 +43,22 @@ export function WorkspaceClient({
   /** A refused "Add as evidence" still current as of the last reload
    *  (T10 review round 4, P0-3). */
   initialEvidenceOutcome: { reason: string } | null;
+  /** A connected-change proposal still awaiting review (T11). */
+  initialPendingProposal: {
+    id: string;
+    title: string;
+    rationale: string;
+    affectedAreas: string[];
+    affectedObjectIds: string[];
+    turnId: string;
+  } | null;
+  /**
+   * The project's most recently *decided* proposal, still current as of the
+   * last reload (issue #25) — recovered the same way `initialPendingProposal`
+   * is, so the outcome card and its Review changes/Undo actions survive a
+   * reload rather than only existing in the session that made the decision.
+   */
+  initialProposalOutcome: ProposalOutcome | null;
 }>) {
   const onEditObject = useCallback<EditSubmit>(
     async (object, text) => {
@@ -66,6 +85,8 @@ export function WorkspaceClient({
       canvasRelationships={canvasRelationships}
       initialResearch={initialResearch}
       initialEvidenceOutcome={initialEvidenceOutcome}
+      initialPendingProposal={initialPendingProposal}
+      initialProposalOutcome={initialProposalOutcome}
       onEditObject={onEditObject}
     />
   );

@@ -11,6 +11,7 @@ import {
   openDevTurn,
   takePendingDirections,
 } from "@/lib/dev/pending-directions";
+import { createDevProposalFromCandidate } from "@/lib/dev/pending-proposals";
 import { TurnRequestSchema } from "@/lib/validation/turns";
 
 export const runtime = "nodejs";
@@ -139,6 +140,38 @@ export async function POST(request: NextRequest) {
           hooks,
           request.signal,
         );
+        /*
+          Mirrors the real route's finish-turn step for exactly one operation
+          kind: a proposal is only announced once it has actually been
+          recorded, which here means committed to the in-memory store rather
+          than to `complete_turn` (T11 e2e — the dev route persists nothing
+          durable, but a proposal has to exist *somewhere* for the review
+          sheet's own dev endpoint to serve it back).
+        */
+        const proposeOperation = result.operations.find(
+          (operation) => operation.name === "propose_connected_change",
+        );
+        if (proposeOperation) {
+          const proposal = createDevProposalFromCandidate(
+            proposeOperation.candidate,
+          );
+          if (proposal) {
+            emit({
+              type: "proposal_created",
+              proposalId: proposal.id,
+              title: proposal.title,
+              rationale: proposal.rationale,
+              affectedAreas: Array.from(
+                new Set(proposal.items.map((item) => item.area)),
+              ),
+              // No canvas object in the demo model represents a project
+              // field, so a dev-mode proposal never affects one — see
+              // living-canvas.tsx's pendingProposal prop doc.
+              affectedObjectIds: [],
+            });
+          }
+        }
+
         // The host owns `done`. Nothing is persisted here, so it follows the
         // engine returning a result.
         if (result.assistantText) emit({ type: "done" });

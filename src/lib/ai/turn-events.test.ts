@@ -1059,6 +1059,99 @@ describe("research (T10)", () => {
     });
   });
 
+  describe("proposal_created / proposal_resolved (T11)", () => {
+    it("surfaces a durably-created proposal, tagged with the turn that created it", () => {
+      const state = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "proposal_created",
+          proposalId: "proposal-1",
+          title: "Narrow the target customer",
+          rationale: "The evidence points at smaller agencies.",
+          affectedAreas: ["customer", "value_proposition"],
+          affectedObjectIds: ["field-1"],
+        },
+      });
+      expect(state.pendingProposal).toEqual({
+        id: "proposal-1",
+        title: "Narrow the target customer",
+        rationale: "The evidence points at smaller agencies.",
+        affectedAreas: ["customer", "value_proposition"],
+        affectedObjectIds: ["field-1"],
+        turnId: TURN,
+      });
+    });
+
+    it("does nothing outside a running stream", () => {
+      const state = turnReducer(INITIAL_TURN_STATE, {
+        type: "event",
+        event: {
+          type: "proposal_created",
+          proposalId: "proposal-1",
+          title: "Narrow the target customer",
+          rationale: "The evidence points at smaller agencies.",
+          affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
+        },
+      });
+      expect(state.pendingProposal).toBeNull();
+    });
+
+    it("stays live across a new message, unlike a one-off refusal notice", () => {
+      const withProposal = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "proposal_created",
+          proposalId: "proposal-1",
+          title: "Narrow the target customer",
+          rationale: "The evidence points at smaller agencies.",
+          affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
+        },
+      });
+      const state = send(withProposal);
+      expect(state.pendingProposal?.id).toBe("proposal-1");
+    });
+
+    it("clears once the person's decision is confirmed", () => {
+      const withProposal = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "proposal_created",
+          proposalId: "proposal-1",
+          title: "Narrow the target customer",
+          rationale: "The evidence points at smaller agencies.",
+          affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
+        },
+      });
+      const state = turnReducer(withProposal, {
+        type: "proposal_resolved",
+        proposalId: "proposal-1",
+      });
+      expect(state.pendingProposal).toBeNull();
+    });
+
+    it("ignores a decision naming a different proposal", () => {
+      const withProposal = turnReducer(streamStarted(send()), {
+        type: "event",
+        event: {
+          type: "proposal_created",
+          proposalId: "proposal-1",
+          title: "Narrow the target customer",
+          rationale: "The evidence points at smaller agencies.",
+          affectedAreas: ["customer"],
+          affectedObjectIds: ["field-1"],
+        },
+      });
+      const state = turnReducer(withProposal, {
+        type: "proposal_resolved",
+        proposalId: "some-other-proposal",
+      });
+      expect(state.pendingProposal?.id).toBe("proposal-1");
+    });
+  });
+
   describe("direction_rejected (T10 review round 2, P0-D)", () => {
     it("corrects the earlier promise once the provider says it cannot apply", () => {
       const withDirection = turnReducer(streamStarted(send()), {

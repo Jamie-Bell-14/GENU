@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { Message, PendingRecovery, TurnState } from "@/lib/ai/turn-events";
+import { ProposalCard } from "@/components/changes/proposal-card";
 import { TurnBlock } from "./turn-block";
 import { Button } from "@/components/ui/button";
 import { ActivityIndicator } from "@/components/activity/activity-indicator";
@@ -182,10 +183,23 @@ export function ConversationStream({
   state,
   onCheckAgain,
   onDismissRecovery,
+  onReviewProposal,
+  onApproveProposalDirection,
+  onModifyProposal,
+  onKeepCurrentDirection,
+  proposalPending = false,
+  proposalError = null,
 }: Readonly<{
   state: TurnState;
   onCheckAgain?: (turnId: string) => void;
   onDismissRecovery?: (turnId: string) => void;
+  /** The in-stream proposal card's own actions (T11), all absent when unused. */
+  onReviewProposal?: (proposalId: string) => void;
+  onApproveProposalDirection?: (proposalId: string) => void;
+  onModifyProposal?: (proposalId: string) => void;
+  onKeepCurrentDirection?: (proposalId: string) => void;
+  proposalPending?: boolean;
+  proposalError?: string | null;
 }>) {
   const endRef = useRef<HTMLDivElement>(null);
   const count = state.messages.length;
@@ -206,6 +220,8 @@ export function ConversationStream({
       </div>
     );
   }
+
+  const pendingProposal = state.pendingProposal;
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -230,6 +246,21 @@ export function ConversationStream({
               question={group.user?.content}
               onCheckAgain={onCheckAgain}
               onDismissRecovery={onDismissRecovery}
+            />
+          )}
+          {pendingProposal && pendingProposal.turnId === group.turnId && (
+            <ProposalCard
+              proposal={pendingProposal}
+              pending={proposalPending}
+              error={proposalError}
+              onReviewChanges={() => onReviewProposal?.(pendingProposal.id)}
+              onApproveDirection={() =>
+                onApproveProposalDirection?.(pendingProposal.id)
+              }
+              onModifyProposal={() => onModifyProposal?.(pendingProposal.id)}
+              onKeepCurrentDirection={() =>
+                onKeepCurrentDirection?.(pendingProposal.id)
+              }
             />
           )}
         </div>
